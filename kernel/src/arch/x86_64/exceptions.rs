@@ -1,8 +1,6 @@
 use lazy_static::lazy_static;
 use x86_64::instructions::interrupts;
-use x86_64::structures::idt::{
-    InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode,
-};
+use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
 use super::gdt;
 use crate::qemu::{self, ExitCode};
@@ -72,11 +70,7 @@ extern "x86-interrupt" fn double_fault_handler(
     fatal_exception("double fault", &stack_frame, Some(error_code));
 }
 
-fn fatal_exception(
-    name: &str,
-    stack_frame: &InterruptStackFrame,
-    error_code: Option<u64>,
-) -> ! {
+fn fatal_exception(name: &str, stack_frame: &InterruptStackFrame, error_code: Option<u64>) -> ! {
     match error_code {
         Some(code) => serial::emergency(format_args!(
             "[FATAL] exception: {name}; error={code:#x}\n{stack_frame:#?}\n"

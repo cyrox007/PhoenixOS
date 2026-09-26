@@ -21,36 +21,37 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install QEMU and OVMF
+      - name: Установить QEMU и OVMF
         run: |
           sudo apt-get update
           sudo apt-get install -y qemu-system-x86 ovmf
 
-      - name: Select Rust toolchain
+      - name: Выбрать инструментарий Rust
         run: rustup show
 
-      - name: Check formatting
+      - name: Проверить форматирование
         run: cargo fmt --all -- --check
 
-      - name: Test host-side kernel primitives
+      - name: Запустить модульные проверки ядра
         run: |
           cargo test -p phoenix-framebuffer
           cargo test -p phoenix-memory
           cargo test -p phoenix-vm
 
-      - name: Build UEFI image
+      - name: Собрать UEFI-образ
         run: |
           mkdir -p artifacts
           IMAGE="$(cargo run --release --quiet)"
           test -f "$IMAGE"
           cp "$IMAGE" artifacts/phoenixos-uefi.img
 
-      - name: Boot and verify exception path
+      - name: Проверить исключения и виртуальную память в QEMU
         env:
           PHOENIXOS_EXPECT_SERIAL: "exception: breakpoint"
+          PHOENIXOS_EXPECT_SERIAL_2: "virtual memory self-test: OK"
         run: bash scripts/run-qemu-ci.sh artifacts/phoenixos-uefi.img
 
-      - name: Upload boot image
+      - name: Сохранить UEFI-образ
         uses: actions/upload-artifact@v4
         with:
           name: phoenixos-uefi

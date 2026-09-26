@@ -53,14 +53,7 @@ pub fn draw_boot_banner(framebuffer: &mut FrameBuffer) -> Result<BannerInfo, Ren
 
     if info.width >= 160 && info.height >= 64 {
         canvas.draw_text(24, 18, "PhoenixOS", PRIMARY_TEXT, PANEL, 2)?;
-        canvas.draw_text(
-            24,
-            62,
-            "x86_64 / UEFI bootstrap",
-            SECONDARY_TEXT,
-            PANEL,
-            1,
-        )?;
+        canvas.draw_text(24, 62, "x86_64 / UEFI bootstrap", SECONDARY_TEXT, PANEL, 1)?;
     }
 
     Ok(BannerInfo {

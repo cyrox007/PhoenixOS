@@ -30,7 +30,7 @@ impl Color {
     }
 }
 
-const BACKGROUND: Color = Color::rgb(14, 18, 28);
+const BACKGROUND: Color = Color::rgb(0, 0, 0);
 const PANEL: Color = Color::rgb(24, 31, 46);
 const ACCENT: Color = Color::rgb(229, 94, 54);
 const PRIMARY_TEXT: Color = Color::rgb(245, 247, 250);
@@ -95,6 +95,11 @@ struct Canvas<'a> {
 
 impl Canvas<'_> {
     fn clear(&mut self, color: Color) -> Result<(), RenderError> {
+        if color == Color::rgb(0, 0, 0) {
+            self.buffer.fill(0);
+            return Ok(());
+        }
+
         self.fill_rect(0, 0, self.info.width, self.info.height, color)
     }
 

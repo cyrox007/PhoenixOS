@@ -3,11 +3,33 @@ set -euo pipefail
 
 IMAGE="${1:?usage: run-qemu-ci.sh <uefi-image>}"
 
-OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE.fd}"
-OVMF_VARS="${OVMF_VARS:-/usr/share/OVMF/OVMF_VARS.fd}"
+find_ovmf_file() {
+  local explicit="${1:-}"
+  shift || true
 
-if [[ ! -f "$OVMF_CODE" || ! -f "$OVMF_VARS" ]]; then
-  echo "OVMF firmware not found" >&2
+  if [[ -n "$explicit" && -f "$explicit" ]]; then
+    printf '%s\n' "$explicit"
+    return 0
+  fi
+
+  local candidate
+  for candidate in "$@"; do
+    if [[ -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+OVMF_CODE="$(find_ovmf_file "${OVMF_CODE:-}"   /usr/share/OVMF/OVMF_CODE.fd   /usr/share/OVMF/OVMF_CODE_4M.fd   /usr/share/edk2/x64/OVMF_CODE.fd   /usr/share/edk2/ovmf/OVMF_CODE.fd || true)"
+
+OVMF_VARS="$(find_ovmf_file "${OVMF_VARS:-}"   /usr/share/OVMF/OVMF_VARS.fd   /usr/share/OVMF/OVMF_VARS_4M.fd   /usr/share/edk2/x64/OVMF_VARS.fd   /usr/share/edk2/ovmf/OVMF_VARS.fd || true)"
+
+if [[ -z "$OVMF_CODE" || -z "$OVMF_VARS" ]]; then
+  echo "OVMF firmware not found. Installed OVMF files:" >&2
+  find /usr/share -maxdepth 3 -type f \( -name 'OVMF_CODE*.fd' -o -name 'OVMF_VARS*.fd' \) -print >&2 || true
   exit 2
 fi
 

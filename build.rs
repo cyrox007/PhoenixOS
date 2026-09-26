@@ -1,9 +1,7 @@
 use std::path::PathBuf;
 
 fn main() {
-    let out_dir = PathBuf::from(
-        std::env::var_os("OUT_DIR").expect("Cargo must provide OUT_DIR"),
-    );
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo must provide OUT_DIR"));
 
     let kernel = PathBuf::from(
         std::env::var_os("CARGO_BIN_FILE_KERNEL_kernel")

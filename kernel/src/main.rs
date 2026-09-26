@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use bootloader_api::{entry_point, BootInfo};
+use bootloader_api::{BootInfo, entry_point};
 use core::fmt::Write;
 use uart_16550::backend::PioBackend;
 use uart_16550::{Config, Uart16550Tty};
@@ -14,8 +14,7 @@ enum QemuExitCode {
 }
 
 fn serial() -> Uart16550Tty<PioBackend> {
-    unsafe { Uart16550Tty::new_port(0x3F8, Config::default()) }
-        .expect("COM1 UART must initialize")
+    unsafe { Uart16550Tty::new_port(0x3F8, Config::default()) }.expect("COM1 UART must initialize")
 }
 
 fn exit_qemu(code: QemuExitCode) -> ! {

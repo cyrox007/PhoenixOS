@@ -44,7 +44,9 @@ jobs:
           test -f "$IMAGE"
           cp "$IMAGE" artifacts/phoenixos-uefi.img
 
-      - name: Boot smoke test
+      - name: Boot and verify exception path
+        env:
+          PHOENIXOS_EXPECT_SERIAL: "exception: breakpoint"
         run: bash scripts/run-qemu-ci.sh artifacts/phoenixos-uefi.img
 
       - name: Upload boot image

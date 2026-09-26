@@ -89,11 +89,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     );
 
     heap_self_test();
-    serial::line(
-        &mut out,
-        "INFO",
-        format_args!("kernel heap self-test: OK"),
-    );
+    serial::line(&mut out, "INFO", format_args!("kernel heap self-test: OK"));
 
     render_boot_banner(boot_info, &mut out);
 

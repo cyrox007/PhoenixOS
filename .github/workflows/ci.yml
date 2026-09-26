@@ -32,8 +32,10 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Test host-side framebuffer primitives
-        run: cargo test -p phoenix-framebuffer
+      - name: Test host-side kernel primitives
+        run: |
+          cargo test -p phoenix-framebuffer
+          cargo test -p phoenix-memory
 
       - name: Build UEFI image
         run: |

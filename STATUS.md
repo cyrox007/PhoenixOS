@@ -1,44 +1,58 @@
-# PhoenixOS Status
+# Состояние PhoenixOS
 
-## Current phase
+## Текущий этап
 
-**Milestone 0.0 — Bootstrap**
+**0.1 — Основы ядра**
 
-Completed in the bootstrap feature branch:
+Этап 0.0 завершён и подтверждён автоматическими проверками в `develop`.
 
-- repository initialized;
-- `main`, `develop`, and feature-flow established;
-- architecture and long-term scope documented;
-- networking and browser promoted to first-class roadmap requirements;
-- production-grade transactional updates specified as a first-class platform subsystem;
-- Rust x86-64 `no_std` kernel entry point added;
-- UEFI image builder added;
-- QEMU/OVMF boot smoke-test script added;
-- CI workflow added.
+Реализовано:
 
-## Update-system baseline
+- репозиторий, ветки `main`, `develop` и рабочие ветки;
+- ядро Rust `no_std` для x86-64;
+- UEFI-образ;
+- реальная загрузка под QEMU/OVMF;
+- ранняя диагностика через последовательный порт;
+- аварийный путь вывода паники;
+- ранний графический экран через framebuffer;
+- начальный распределитель физических страниц по карте памяти загрузчика;
+- модульные проверки framebuffer и распределителя памяти;
+- публикация UEFI-образа как результата автоматической сборки.
 
-The project now requires signed, transactional system updates with an A/B or equivalent generation-based model, pending-boot health confirmation, automatic rollback, independent recovery, resumable downloads, release channels, staged rollout support, and explicit compatibility/migration rules.
+## Проверка загрузки
 
-The detailed baseline is in `docs/updates.md`.
+Автоматическая проверка:
 
-## Immediate verification gate
+1. проверяет форматирование;
+2. запускает модульные тесты доступных низкоуровневых библиотек;
+3. собирает UEFI-образ;
+4. загружает его в QEMU + OVMF;
+5. проверяет штатное завершение ядра;
+6. публикует UEFI-образ как результат сборки.
 
-The current CI sequence must:
+## Система обновлений
 
-1. format-check the workspace;
-2. build the UEFI image;
-3. boot it under QEMU + OVMF;
-4. observe the kernel serial banner;
-5. receive the expected debug-exit code;
-6. publish the UEFI image as a CI artifact.
+Для будущей продуктовой версии зафиксированы подписанные транзакционные обновления по схеме A/B либо поколений:
 
-The first CI failure was a formatting mismatch and was fixed. The next build failure identified the missing Rust `rust-src` component required by the bootloader build; the toolchain definition now includes it and the corrected run is being verified.
+- установка в неактивную систему;
+- подтверждение успешной загрузки;
+- автоматический откат;
+- независимое восстановление;
+- возобновляемая загрузка;
+- каналы выпусков;
+- поэтапное распространение;
+- явные правила совместимости и миграций.
 
-If the gate still fails, the bootstrap task remains open until the concrete toolchain/image/QEMU failure is fixed.
+Подробности: `docs/updates.md`.
 
-## Next implementation after bootstrap
+## Текущая работа
 
-Kernel diagnostics, framebuffer initialization, memory-map normalization, physical page allocation, exception handling, and the first kernel test harness.
+Следующие задачи этапа 0.1:
 
-A separate stacked memory-foundation branch already contains the first heap-free 4 KiB boot-frame allocator plus host-side tests; it will only be integrated after the bootstrap gate is healthy.
+- GDT/IDT и обработка исключений;
+- системный распределитель физической памяти;
+- виртуальная память;
+- куча ядра;
+- инфраструктура тестирования исключений и памяти.
+
+После этого можно безопаснее переходить к APIC, таймерам и планировщику.

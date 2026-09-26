@@ -1,102 +1,113 @@
-# Networking Architecture
+# Архитектура сети
 
-Networking is a required PhoenixOS platform subsystem because the browser, package manager, updater, remote development, and ordinary desktop use all depend on it.
+Сеть — обязательная подсистема PhoenixOS, потому что от неё зависят браузер, менеджер пакетов, обновления, удалённая разработка и обычная работа рабочего стола.
 
-## Layering
+## Слои
 
 ```text
-applications
+приложения
   |
-native socket API / POSIX socket compatibility
+собственный интерфейс сокетов / совместимость POSIX
   |
-TLS / HTTP / DNS libraries and system services
+TLS / HTTP / DNS и системные службы
   |
 TCP / UDP / ICMP
   |
-IPv4 / IPv6 / routing
+IPv4 / IPv6 / маршрутизация
   |
 ARP / NDP
   |
-Ethernet / Wi-Fi link layer
+Ethernet / Wi-Fi
   |
-NIC driver API
+интерфейс сетевого драйвера
   |
-PCIe / USB device
+PCIe / USB
 ```
 
-## Kernel/user split
+## Разделение между ядром и пользовательским пространством
 
-The packet fast path, routing primitives, socket buffers, wait/wakeup integration, and NIC queue interaction may live in kernel space for low overhead.
+Быстрый путь пакетов, базовая маршрутизация, буферы сокетов, ожидание событий и работа с очередями сетевого адаптера могут находиться в ядре ради низких задержек.
 
-Configuration and policy belong in userspace where possible:
+Настройки и политика по возможности находятся в пользовательском пространстве:
 
-- network manager;
-- DHCP clients;
-- DNS policy/cache;
-- certificate management;
-- proxy policy;
-- Wi-Fi connection policy;
-- UI.
+- управление сетью;
+- клиенты DHCP;
+- политика и кэш DNS;
+- сертификаты;
+- прокси;
+- подключение Wi-Fi;
+- графический интерфейс.
 
-The boundary is allowed to evolve as profiling data becomes available.
+Граница может меняться после измерений.
 
-## Native sockets
+## Собственные сокеты
 
-The native API must support:
+Интерфейс должен поддерживать:
 
-- IPv4 and IPv6;
-- TCP and UDP;
-- nonblocking/asynchronous operation;
-- scatter/gather I/O;
-- poll/wait integration;
-- address reuse and common socket options;
-- interface binding;
-- dual-stack behavior;
-- zero-copy or page-sharing extensions where safe and useful.
+- IPv4 и IPv6;
+- TCP и UDP;
+- неблокирующую и асинхронную работу;
+- векторный ввод-вывод;
+- ожидание событий;
+- повторное использование адресов и распространённые параметры сокетов;
+- привязку к интерфейсу;
+- двухстековую работу;
+- расширения без копирования или с общей памятью, где это безопасно.
 
-A POSIX socket compatibility layer maps common BSD socket calls onto the native API.
+Слой совместимости POSIX отображает распространённые BSD-сокеты на собственный интерфейс.
 
-## Addressing and discovery
+## Адресация
 
-Required:
+Обязательны:
 
-- loopback;
-- static addresses;
+- обратный интерфейс;
+- статические адреса;
 - DHCPv4;
-- IPv6 link-local addresses;
+- локальные IPv6-адреса;
 - NDP;
 - SLAAC;
 - DHCPv6;
-- configurable routing table;
-- DNS A/AAAA/CNAME handling;
-- search domains and resolver ordering.
+- настраиваемая таблица маршрутизации;
+- записи DNS A/AAAA/CNAME;
+- поисковые домены и порядок преобразователей.
 
-## Security and web prerequisites
+## Безопасность и требования браузера
 
-Required before the browser milestone can be called usable:
+До признания браузера пригодным нужны:
 
-- system trust/certificate store;
-- secure random source;
-- wall-clock/time synchronization path;
-- TLS 1.2 and TLS 1.3;
-- SNI and ALPN;
+- системное хранилище доверенных корневых сертификатов;
+- надёжный источник случайности;
+- корректные часы и путь синхронизации времени;
+- TLS 1.2 и 1.3;
+- SNI и ALPN;
 - HTTP/1.1;
 - HTTP/2;
-- HTTPS certificate validation;
-- HTTP/SOCKS proxy support;
-- revocation/update strategy for trust roots.
+- проверка сертификатов HTTPS;
+- HTTP/SOCKS-прокси;
+- обновление и отзыв доверенных корней.
 
-Cryptographic primitives should come from reviewed libraries rather than novel in-house cryptography.
+Криптографические примитивы должны приходить из проверенных библиотек, а не из новой самописной криптографии.
 
-## Driver milestones
+## Этапы драйверов
 
-1. VirtIO-net under QEMU.
-2. One real wired Ethernet controller used by the supported reference PC.
-3. Generalized NIC queue/checksum/offload interfaces.
-4. Wi-Fi framework.
-5. Driver for the first explicitly supported Wi-Fi controller.
-6. Additional drivers according to hardware demand.
+1. VirtIO-net в QEMU.
+2. Один реальный проводной сетевой контроллер эталонного компьютера.
+3. Общие интерфейсы очередей, контрольных сумм и аппаратного разгружения.
+4. инфраструктура Wi-Fi.
+5. первый явно поддерживаемый Wi-Fi-контроллер.
+6. дополнительные драйверы по необходимости.
 
-## Test strategy
+## Стратегия тестирования
 
-Automated tests should cover packet encode/decode, malformed input, TCP state transitions, loopback sockets, QEMU multi-node connectivity, DHCP/DNS, IPv4/IPv6, TLS validation, HTTP integration, and throughput/latency regressions.
+Автоматические проверки должны покрывать:
+
+- кодирование и разбор пакетов;
+- повреждённые пакеты;
+- состояния TCP;
+- обратные сокеты;
+- соединение нескольких виртуальных машин QEMU;
+- DHCP и DNS;
+- IPv4/IPv6;
+- проверку TLS;
+- HTTP;
+- регрессии пропускной способности и задержек.

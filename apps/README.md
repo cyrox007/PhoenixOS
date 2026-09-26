@@ -1,5 +1,5 @@
-# Applications
+# Приложения
 
-First-party user applications will live here as the userspace and GUI SDK become available.
+Здесь будут находиться собственные пользовательские приложения PhoenixOS по мере появления пользовательского пространства и графического комплекта разработки.
 
-See `docs/applications.md`.
+Подробности: `docs/applications.md`.

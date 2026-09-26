@@ -1,8 +1,8 @@
-# Document and Media Platform
+# Платформа документов и медиа
 
-PhoenixOS should not implement each document format, image codec, container, and video codec independently inside every application. The desktop needs a shared platform layer that applications can reuse.
+PhoenixOS не должна отдельно реализовывать каждый формат документа, изображения, контейнер и кодек внутри каждого приложения. Нужен общий слой, которым пользуются приложения и браузер.
 
-## Architecture
+## Архитектура
 
 ```text
 Writer / Sheets / Slides / Documents
@@ -10,35 +10,33 @@ Images / Paint / Media / Browser
               |
               v
 +----------------------------------+
-| Phoenix document/media services  |
+| Общие службы документов и медиа  |
 +----------------------------------+
-| MIME/file associations           |
-| text layout / fonts              |
-| document import/export           |
-| PDF export/view bridge           |
-| image codec abstraction          |
-| media demux/decode abstraction   |
-| subtitles                        |
-| color-management hooks           |
-| thumbnail/preview service        |
-| print/export service             |
+| типы файлов и связи приложений   |
+| текст и шрифты                   |
+| импорт / экспорт документов      |
+| просмотр / экспорт PDF           |
+| изображения                      |
+| контейнеры и кодеки              |
+| субтитры                         |
+| управление цветом                |
+| миниатюры / предварительный вид  |
+| печать / экспорт                 |
 +----------------------------------+
               |
               v
-ported mature libraries + native OS APIs
+зрелые перенесённые библиотеки + интерфейсы PhoenixOS
 ```
 
-## Document model
+## Модель документов
 
-PhoenixOS should prefer open, documented formats for its first-party authoring path.
+Для собственных редакторов приоритетны открытые документированные форматы:
 
-Primary authoring targets:
+- ODT — форматированный текст;
+- ODS — таблицы;
+- ODP — презентации.
 
-- ODT for formatted text documents;
-- ODS for spreadsheets;
-- ODP for presentations.
-
-Interoperability targets:
+Целевая совместимость:
 
 - DOCX;
 - XLSX;
@@ -47,30 +45,30 @@ Interoperability targets:
 - CSV;
 - PDF.
 
-PDF is primarily a viewing/export format. Editing arbitrary PDFs is not a 1.0 requirement.
+PDF в версии 1.0 прежде всего предназначен для просмотра и экспорта. Полное произвольное редактирование PDF не является обязательным.
 
-The office applications should use an internal document model independent from any single external format so import/export code can evolve without rewriting the UI.
+Внутренняя модель документа не должна зависеть от одного внешнего формата, чтобы импорт и экспорт можно было менять без переписывания интерфейса.
 
-## Text layout
+## Текст
 
-The common text stack must eventually provide:
+Общий текстовый слой должен поддерживать:
 
 - Unicode;
-- bidirectional text;
-- shaping;
-- font fallback;
-- line breaking;
-- rich text;
-- styled spans;
-- paragraph layout;
-- pagination;
-- printing/PDF output.
+- двунаправленный текст;
+- формирование глифов;
+- подстановку шрифтов;
+- перенос строк;
+- форматированный текст;
+- стилизованные участки;
+- раскладку абзацев;
+- разбиение на страницы;
+- печать и PDF.
 
-This same stack benefits the desktop shell, browser, document editors, terminal, and accessibility support.
+Этот слой используется рабочей средой, браузером, редакторами, терминалом и средствами доступности.
 
-## Image stack
+## Изображения
 
-Initial decode/encode targets:
+Первые форматы:
 
 - PNG;
 - JPEG;
@@ -79,21 +77,21 @@ Initial decode/encode targets:
 - GIF;
 - SVG.
 
-Later formats can include AVIF and additional camera/professional formats through packages.
+Позже через пакеты могут добавляться AVIF и специальные форматы камер и профессиональной графики.
 
-The image layer should expose decoded surfaces in a format suitable for CPU rendering initially and GPU upload later.
+Декодированное изображение сначала должно подходить для программной отрисовки, а позднее — для быстрой загрузки в графический ускоритель.
 
-## Media stack
+## Медиа
 
-Initial containers:
+Первые контейнеры:
 
 - MP4;
 - Matroska/MKV;
 - WebM.
 
-Codec support should come from mature third-party codec libraries. PhoenixOS does not implement modern patented/complex codecs from scratch.
+Кодеки берутся из зрелых сторонних библиотек. Собственные реализации современных сложных кодеков не являются целью проекта.
 
-Target decode support, subject to the chosen distribution/build policy:
+Целевые декодеры при допустимости выбранной схемы распространения:
 
 - H.264;
 - H.265/HEVC;
@@ -102,65 +100,48 @@ Target decode support, subject to the chosen distribution/build policy:
 - AAC;
 - Opus;
 - Vorbis;
-- common PCM formats.
+- распространённые варианты PCM.
 
-The architecture separates:
+Медиастек разделяет:
 
-1. demuxing;
-2. decoding;
-3. audio/video synchronization;
-4. subtitle decoding/rendering;
-5. output surfaces/audio streams.
+1. разбор контейнера;
+2. декодирование;
+3. синхронизацию звука и видео;
+4. субтитры;
+5. вывод звука и видеоповерхности.
 
-This makes the same stack usable by Phoenix Media and Phoenix Browser.
+Так один стек могут использовать Phoenix Media и Phoenix Browser.
 
-## Hardware acceleration
+## Аппаратное ускорение
 
-Software decoding is the first correctness target.
+Сначала требуется корректное программное декодирование.
 
-Later, graphics/media drivers may expose hardware decode acceleration. Applications should not depend directly on GPU-vendor APIs; the shared media layer chooses hardware or software decoding.
+Позднее драйверы могут предоставить аппаратное ускорение. Приложение не обращается напрямую к интерфейсам конкретного производителя: выбор программного или аппаратного пути делает общий медиаслой.
 
-## Parser and codec isolation
+## Изоляция парсеров и кодеков
 
-Documents, images, fonts, subtitles, containers, and codecs process untrusted input.
+Документы, изображения, шрифты, субтитры и медиа — недоверенные входные данные.
 
-Where practical, complex parsers/decoders should execute in sandboxed worker processes with:
+Сложные обработчики по возможности запускаются в ограниченных рабочих процессах с:
 
-- restricted filesystem access;
-- limited device access;
-- bounded memory;
-- IPC-based input/output;
-- crash containment.
+- ограниченным доступом к файлам;
+- ограниченным доступом к устройствам;
+- лимитом памяти;
+- обменом данными через межпроцессный канал;
+- локализацией сбоя.
 
-A malformed media file should not be able to crash the desktop session or kernel.
+Повреждённый медиафайл не должен иметь возможности уронить рабочую сессию или ядро.
 
-## Application integration
+## Интеграция приложений
 
-The File Manager should use the shared stack for:
+Файловый менеджер использует общий слой для миниатюр, метаданных, предварительного просмотра и выбора приложения.
 
-- thumbnails;
-- metadata;
-- previews;
-- default application selection.
+Браузер переиспользует медиавывод, кодеки, выбор файлов и интеграцию PDF.
 
-The Browser should reuse:
+Офисные приложения переиспользуют шрифты, формирование текста, импорт изображений, печать/PDF, буфер обмена и общие диалоги файлов.
 
-- image decoding where practical;
-- audio/video output;
-- codecs;
-- file picker;
-- PDF viewing integration.
+## Стратегия переноса
 
-The office applications should reuse:
+Для сложных форматов предпочтителен перенос зрелых библиотек, а не повторение десятилетий поддержки форматов и кодеков.
 
-- fonts/text shaping;
-- image import;
-- print/PDF export;
-- clipboard and drag/drop;
-- common file dialogs.
-
-## Porting strategy
-
-The project should prefer porting mature libraries for complex format support instead of recreating decades of file-format and codec behavior.
-
-The POSIX/libc compatibility layer is therefore also a productivity/media enabler: it reduces the effort required to bring document, image, PDF, multimedia, font, and browser dependencies to PhoenixOS.
+Поэтому слой POSIX/libc также важен для документов и мультимедиа: он уменьшает объём изменений внешних библиотек.

@@ -1,17 +1,31 @@
-# Supported Hardware Policy
+# Политика поддерживаемого оборудования
 
-PhoenixOS does not claim universal PC support in early releases.
+PhoenixOS не заявляет универсальную поддержку всех ПК в ранних версиях.
 
-## Tier 0 — virtual reference
+## Уровень 0 — виртуальная эталонная платформа
 
-QEMU + OVMF is the deterministic reference platform used by CI. Planned virtual devices favor VirtIO where practical.
+QEMU + OVMF — воспроизводимая платформа автоматических проверок.
 
-## Tier 1 — physical reference machine(s)
+Виртуальные устройства по возможности используют VirtIO.
 
-Before hardware enablement begins, each reference machine will be documented with exact CPU/platform, firmware behavior, PCI IDs, storage controller, USB controller, Ethernet controller, Wi-Fi controller, graphics device, and audio controller/codec.
+## Уровень 1 — физические эталонные компьютеры
 
-Only explicitly tested configurations are called supported.
+Перед добавлением физической конфигурации документируются:
 
-## Additional hardware
+- процессор и платформа;
+- поведение UEFI;
+- идентификаторы PCI;
+- контроллер хранения;
+- USB-контроллер;
+- Ethernet;
+- Wi-Fi;
+- графическое устройство;
+- звуковой контроллер и кодек.
 
-New devices are added through the DDK and hardware-enablement documentation. Unsupported hardware should fail cleanly and report actionable diagnostics rather than silently corrupt state.
+Поддерживаемой называется только реально проверенная конфигурация.
+
+## Дополнительное оборудование
+
+Новые устройства добавляются через комплект разработки драйверов и документацию подключения оборудования.
+
+Неподдерживаемое устройство должно завершать инициализацию предсказуемо и давать полезную диагностику, а не повреждать состояние системы.

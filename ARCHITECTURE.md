@@ -1,76 +1,96 @@
-# PhoenixOS Architecture
+# Архитектура PhoenixOS
 
-## Product boundary
+## Границы проекта
 
-PhoenixOS is designed as a complete operating-system platform, not only a kernel. The platform boundary includes firmware/boot, kernel/HAL, drivers, userspace, storage, networking, security, graphics/audio/desktop, SDK/package/update systems, bundled applications, browser, games, and developer documentation.
+PhoenixOS проектируется как полная операционная платформа, а не только ядро. В состав входят:
 
-## Kernel model
+- загрузка и взаимодействие с UEFI;
+- ядро и слой аппаратной абстракции;
+- драйверы устройств;
+- пользовательское пространство и системные службы;
+- хранилище и файловые системы;
+- сеть;
+- безопасность;
+- графика, звук и рабочая среда;
+- комплект разработки, пакеты и обновления;
+- встроенные приложения, браузер и игры;
+- документация для разработчиков и авторов драйверов.
 
-PhoenixOS uses a **modular hybrid-kernel** direction.
+## Модель ядра
 
-Performance-sensitive primitives live in kernel space: virtual memory, scheduler, interrupts, IPC primitives, VFS core, socket fast path, and the minimum device plumbing required to make hardware useful.
+Выбрано **модульное гибридное ядро**.
 
-The architecture must still allow components with larger attack surfaces to move out of the kernel when isolation is worth the boundary crossing. Drivers therefore use explicit interfaces rather than arbitrary kernel internals.
+Чувствительные к задержкам механизмы могут находиться в ядре: виртуальная память, планировщик, прерывания, базовые механизмы межпроцессного взаимодействия, ядро виртуальной файловой системы, быстрый путь сокетов и минимальная работа с устройствами.
 
-## Stable boundaries
+Компоненты с большой поверхностью атаки должны иметь возможность переноситься за границу ядра, если выигрыш в изоляции оправдывает дополнительные переключения. Драйверы используют явные интерфейсы и не должны обращаться к произвольным внутренностям ядра.
 
-Internal Rust types are not ABI.
+## Стабильные границы
 
-Public boundaries use fixed-layout, versioned, C-compatible types: fixed-width integers, handles instead of raw cross-boundary pointers, explicit buffer lengths, versioned structures, capability/rights masks, and stable syscall numbers once promoted from experimental status.
+Внутренние типы Rust не являются ABI.
 
-Language-specific SDKs wrap this ABI.
+Публичные границы используют версионируемые C-совместимые представления:
 
-## Planned layout
+- целые числа фиксированной ширины;
+- дескрипторы вместо необработанных указателей между областями защиты;
+- явные длины буферов;
+- версионируемые структуры;
+- маски прав и возможностей;
+- стабильные номера системных вызовов после выхода интерфейса из экспериментального состояния.
+
+Языковые библиотеки оборачивают этот ABI.
+
+## Планируемая структура
 
 ```text
 UEFI
   |
-boot image / loader
+загрузочный образ
   |
-kernel
-  +-- HAL / CPU / ACPI / APIC
-  +-- memory manager
-  +-- scheduler / processes / threads
-  +-- IPC / handles / capabilities
-  +-- VFS / page cache
-  +-- socket and packet fast path
-  +-- driver framework
+ядро
+  +-- процессор / ACPI / APIC
+  +-- память
+  +-- планировщик / процессы / потоки
+  +-- межпроцессное взаимодействие / дескрипторы / возможности
+  +-- виртуальная файловая система / кэш страниц
+  +-- быстрый путь сети
+  +-- инфраструктура драйверов
   |
-drivers
+драйверы
   +-- PCIe
   +-- NVMe / AHCI
   +-- USB / HID
   +-- Ethernet / Wi-Fi
-  +-- graphics
-  +-- audio
+  +-- графика
+  +-- звук
   |
-userspace
-  +-- init / service manager
-  +-- network manager
-  +-- DNS / TLS / HTTP libraries
-  +-- package/update services
-  +-- compositor / desktop
-  +-- SDK runtimes
+пользовательское пространство
+  +-- запуск и управление службами
+  +-- управление сетью
+  +-- DNS / TLS / HTTP
+  +-- пакеты и обновления
+  +-- компоновщик окон / рабочая среда
+  +-- библиотеки комплекта разработки
   |
-applications
-  +-- terminal / editor / files / settings
-  +-- browser
-  +-- developer tools
-  +-- games
+приложения
+  +-- терминал / редактор / файлы / настройки
+  +-- браузер
+  +-- средства разработки
+  +-- игры
 ```
 
-## Performance principles
+## Принципы производительности
 
-- no garbage collector in the kernel;
-- avoid copying large IPC/network payloads where shared memory or page ownership transfer is appropriate;
-- batch interrupts and network work under load;
-- keep hot-path allocations bounded and observable;
-- asynchronous I/O at the native API level;
-- page cache shared by filesystems and executable loading;
-- damage-tracked compositor;
-- hardware acceleration behind a graphics abstraction, with UEFI GOP/framebuffer as the initial fallback;
-- benchmarks become release gates once subsystems stabilize.
+- в ядре нет сборщика мусора;
+- крупные данные между процессами и сетевыми слоями не копируются без необходимости;
+- допускаются общая память и передача владения страницами;
+- обработка прерываний и сетевых очередей под нагрузкой пакетируется;
+- выделения памяти на горячих путях должны быть ограниченными и измеримыми;
+- основной интерфейс ввода-вывода проектируется асинхронным;
+- файловые системы и загрузчик программ используют общий кэш страниц;
+- компоновщик окон отслеживает повреждённые области;
+- аппаратное ускорение скрывается за графической абстракцией, а UEFI GOP остаётся ранним резервным путём;
+- после стабилизации подсистем контрольные измерения производительности становятся частью допуска к выпуску.
 
-## Compatibility
+## Совместимость
 
-PhoenixOS native APIs are primary. A POSIX compatibility layer is planned to reduce the cost of porting existing C/C++ and Unix-oriented software. POSIX compatibility does not dictate all kernel internals.
+Основными считаются собственные интерфейсы PhoenixOS. Слой совместимости POSIX нужен для облегчения переноса существующего ПО на C/C++ и программ из Unix-подобной экосистемы, но не должен диктовать внутреннее устройство ядра.

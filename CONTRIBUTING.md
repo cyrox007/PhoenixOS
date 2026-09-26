@@ -1,24 +1,31 @@
-# Contributing to PhoenixOS
+# Участие в разработке PhoenixOS
 
-## Branches
+## Ветки
 
-- `main`: stable integration points
-- `develop`: active integration
-- `feature/*`: focused changes
+- `main` — стабильные точки интеграции;
+- `develop` — основная интеграционная ветка;
+- `feature/*` — небольшие изолированные изменения.
 
-Normal work targets `develop` through a pull request.
+Обычная работа выполняется через запрос на слияние в `develop`.
 
-## Change expectations
+## Требования к изменениям
 
-A subsystem change should include, where applicable, implementation, tests or a deterministic smoke test, documentation, and a status/roadmap update when milestone state changes.
+Изменение подсистемы по возможности должно включать:
 
-Avoid exposing internal Rust layout as public ABI.
+- реализацию;
+- тесты либо воспроизводимую проверочную загрузку;
+- документацию;
+- обновление состояния и дорожной карты, если изменился этап проекта.
 
-## Bootstrap checks
+Внутреннее представление типов Rust нельзя превращать в публичный ABI.
+
+Код должен оставаться плоским: предпочтительны ранние выходы, небольшие функции и явные состояния вместо глубоко вложенных условных конструкций.
+
+## Базовые проверки
 
 ```bash
 cargo fmt --all -- --check
 cargo run --release --quiet
 ```
 
-CI additionally boots the generated UEFI image under QEMU/OVMF.
+Автоматическая проверка дополнительно загружает полученный UEFI-образ под QEMU/OVMF.

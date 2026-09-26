@@ -1,80 +1,99 @@
-# Browser Strategy
+# Стратегия браузера
 
-A usable modern browser is an explicit PhoenixOS milestone.
+Полноценный современный браузер — обязательный этап PhoenixOS.
 
-## What PhoenixOS will build
+## Что делает PhoenixOS
 
-PhoenixOS should own the browser application shell and OS integration:
+PhoenixOS разрабатывает собственную оболочку браузера и интеграцию с ОС:
 
-- tabs/windows;
-- address/search UI;
-- history/bookmarks;
-- downloads;
-- permissions;
-- certificate UI;
-- proxy settings;
-- file picker;
-- notifications;
-- password/credential integration when the security model is ready;
-- process sandbox integration.
+- вкладки и окна;
+- адресную строку и поиск;
+- историю и закладки;
+- загрузки;
+- разрешения;
+- интерфейс сертификатов;
+- прокси;
+- выбор файлов;
+- уведомления;
+- интеграцию хранилища учётных данных после появления модели безопасности;
+- изоляцию процессов.
 
-## What PhoenixOS will not build from scratch
+## Что не пишется с нуля
 
-The project will not initially implement its own HTML parser, CSS layout engine, JavaScript VM, DOM, Web APIs, or WebGL/WebGPU stack.
+На первом этапе не разрабатываются собственные:
 
-Reimplementing the modern web platform would delay the OS by years and create a separate standards-compatibility project.
+- HTML-парсер;
+- движок раскладки CSS;
+- виртуальная машина JavaScript;
+- DOM;
+- веб-интерфейсы;
+- WebGL/WebGPU.
 
-## Engine boundary
+Современная веб-платформа слишком велика, и её повторная реализация превратила бы проект ОС в отдельный многолетний браузерный проект.
+
+## Граница движка
 
 ```text
 Phoenix Browser
       |
-browser-engine adapter
+адаптер браузерного движка
       |
-+---------------------------+
-| Servo (primary candidate) |
-| future alternative engine |
-+---------------------------+
++------------------------------+
+| Servo — первый кандидат      |
+| другой движок в будущем      |
++------------------------------+
       |
-PhoenixOS platform adapter
-      +-- sockets/TLS
-      +-- windows/surfaces
-      +-- graphics/GPU
-      +-- fonts
-      +-- input
-      +-- audio/video
-      +-- files
-      +-- clipboard
-      +-- timers/threads
+адаптер платформы PhoenixOS
+      +-- сокеты / TLS
+      +-- окна / поверхности
+      +-- графика / ускоритель
+      +-- шрифты
+      +-- ввод
+      +-- звук / видео
+      +-- файлы
+      +-- буфер обмена
+      +-- таймеры / потоки
 ```
 
-The adapter boundary keeps PhoenixOS able to replace or add an engine without changing its kernel ABI.
+Эта граница должна позволять заменить или добавить движок без изменения ABI ядра.
 
-## Primary candidate: Servo
+## Первый кандидат: Servo
 
-Servo is the initial porting target because its Rust codebase, modular design, embedding work, and WebView-oriented API align with PhoenixOS.
+Servo рассматривается первым благодаря Rust, модульности и направлению на встраивание.
 
-This is a porting candidate, not a permanent architectural dependency. A feasibility checkpoint occurs only after PhoenixOS has processes/threads, virtual memory, filesystem, sockets, DNS/TLS, window surfaces, fonts, input, shared libraries or an equivalent linking strategy, and enough POSIX compatibility for dependencies.
+Это кандидат для переноса, а не вечная архитектурная зависимость.
 
-## Browser milestone definition
+Практическая оценка переноса начинается после появления:
 
-The browser milestone is not complete merely because a blank page renders.
+- процессов и потоков;
+- виртуальной памяти;
+- файловой системы;
+- сокетов;
+- DNS и TLS;
+- оконных поверхностей;
+- шрифтов и ввода;
+- динамического связывания либо его эквивалента;
+- достаточного слоя POSIX для зависимостей.
 
-Minimum useful target:
+## Критерий готовности браузера
 
-- multiple tabs;
-- DNS and HTTPS;
-- certificate validation;
-- common HTML/CSS rendering;
+Пустая отрисованная страница не считается готовым браузером.
+
+Минимальный полезный уровень:
+
+- несколько вкладок;
+- DNS и HTTPS;
+- проверка сертификатов;
+- распространённые HTML/CSS;
 - JavaScript;
-- persistent cookies/cache;
-- downloads;
-- text input, selection, copy/paste;
-- basic audio/video;
-- crash isolation;
-- browser-process sandboxing;
-- reproducible compatibility tests against a curated real-site list.
+- постоянные cookies и кэш;
+- загрузка файлов;
+- ввод текста, выделение и буфер обмена;
+- базовое аудио и видео;
+- изоляция сбоев;
+- песочница процессов;
+- воспроизводимый набор реальных сайтов для проверки совместимости.
 
-## Porting preparation
+## Подготовка к переносу
 
-The POSIX layer, libc surface, threading, files, sockets, mmap, clocks, and process APIs are strategic because they reduce the cost of bringing large third-party codebases such as a browser engine to PhoenixOS.
+Совместимость POSIX, libc, потоки, файлы, сокеты, `mmap`, часы и процессы имеют высокий приоритет, потому что уменьшают объём изменений крупных внешних проектов.

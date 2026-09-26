@@ -1,3 +1,3 @@
-# Userspace
+# Пользовательское пространство
 
-System services, init/service management, compatibility libraries, desktop services, and other non-kernel platform components will live here.
+Здесь будут находиться системные службы, запуск и управление службами, библиотеки совместимости, службы рабочего стола и другие компоненты платформы, работающие вне ядра.

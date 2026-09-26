@@ -1,5 +1,5 @@
-# PhoenixOS SDK
+# Комплект разработки PhoenixOS
 
-The SDK will expose the stable C-compatible application ABI plus language bindings, build tooling, package tooling, reference projects, and DDK headers/interfaces.
+Комплект разработки предоставляет стабильный C-совместимый ABI приложений, языковые обёртки, инструменты сборки и упаковки, эталонные проекты, а также заголовки и интерфейсы для разработки драйверов.
 
-See `docs/sdk-porting.md`.
+Подробности: `docs/sdk-porting.md`.

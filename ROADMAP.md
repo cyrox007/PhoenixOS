@@ -1,221 +1,222 @@
-# PhoenixOS Roadmap
+# Дорожная карта PhoenixOS
 
-The roadmap is milestone-oriented. A milestone is complete only when the relevant code, tests, documentation, and reference examples agree.
+Дорожная карта разбита на этапы. Этап считается завершённым только тогда, когда код, тесты, документация и эталонные примеры соответствуют друг другу.
 
-## 0.0 — Bootstrap
+## 0.0 — Начальная загрузка
 
-- [x] repository and branch strategy
-- [x] architecture/decision baseline
-- [x] Rust `no_std` kernel skeleton
-- [x] UEFI disk-image build path
-- [x] QEMU/OVMF smoke-test workflow
-- [ ] green CI on `develop`
-- [ ] persistent serial logger and panic diagnostics
-- [ ] framebuffer boot banner
+- [x] структура репозитория и стратегия веток;
+- [x] базовые архитектурные решения;
+- [x] каркас ядра Rust `no_std`;
+- [x] сборка UEFI-образа;
+- [x] проверочная загрузка QEMU/OVMF;
+- [x] зелёная проверка в `develop`;
+- [x] ранний последовательный журнал и диагностика паники;
+- [x] ранний графический экран через framebuffer.
 
-## 0.1 — Kernel foundations
+## 0.1 — Основы ядра
 
-- physical memory manager
-- virtual memory manager
-- heap allocator
-- GDT/IDT and exception handling
-- APIC/timers
-- scheduler
-- kernel threads
-- process/address-space model
-- syscall entry path
-- handles/capabilities
-- initial IPC
-- boot diagnostics and kernel test harness
+- [x] начальный распределитель физических страниц для стадии загрузки;
+- [ ] системный распределитель физической памяти;
+- [ ] управление виртуальной памятью;
+- [ ] куча ядра;
+- [ ] GDT/IDT и обработка исключений;
+- [ ] APIC и таймеры;
+- [ ] планировщик;
+- [ ] потоки ядра;
+- [ ] модель процессов и адресных пространств;
+- [ ] вход в системные вызовы;
+- [ ] дескрипторы и возможности;
+- [ ] начальное межпроцессное взаимодействие;
+- [ ] инфраструктура тестирования ядра.
 
-## 0.2 — Storage and userspace
+## 0.2 — Хранилище и пользовательское пространство
 
-- ELF loader
-- init/service manager
-- userspace runtime
-- VFS
-- initramfs
-- FAT read/write
-- native filesystem design/prototype
-- file descriptors/handles and async I/O
-- libc compatibility baseline
-- shell and core CLI tools
+- загрузчик ELF;
+- запуск и управление системными службами;
+- среда выполнения пользовательских программ;
+- виртуальная файловая система;
+- начальная файловая система в памяти;
+- чтение и запись FAT;
+- проектирование собственной файловой системы;
+- дескрипторы файлов и асинхронный ввод-вывод;
+- базовая совместимость libc;
+- командная оболочка и основные консольные утилиты.
 
-## 0.3 — Device framework
+## 0.3 — Устройства и драйверы
 
-- ACPI
-- PCI/PCIe enumeration
-- driver registry, matching, lifecycle, and versioning
-- DMA API and IOMMU-ready design
-- USB host baseline
-- HID keyboard/mouse
-- NVMe
-- AHCI/SATA fallback
-- UEFI GOP/framebuffer graphics fallback
-- DDK reference driver
+- ACPI;
+- перечисление PCI/PCIe;
+- реестр, подбор, запуск и версионирование драйверов;
+- интерфейс DMA с заделом на IOMMU;
+- базовая поддержка USB;
+- клавиатура и мышь HID;
+- NVMe;
+- резервный путь AHCI/SATA;
+- резервная графика UEFI GOP/framebuffer;
+- эталонный драйвер для комплекта разработки.
 
-## 0.4 — Networking foundation
+## 0.4 — Базовая сеть
 
-- NIC abstraction
-- VirtIO-net reference driver
-- one real Ethernet controller driver
-- Ethernet II
-- ARP
-- IPv4
-- ICMPv4
-- UDP
-- TCP
-- socket ABI
-- DHCPv4
-- DNS resolver
-- loopback
-- network configuration CLI
-- packet/socket tests under QEMU
+- абстракция сетевого адаптера;
+- эталонный драйвер VirtIO-net;
+- драйвер одного реального Ethernet-контроллера;
+- Ethernet II;
+- ARP;
+- IPv4;
+- ICMPv4;
+- UDP;
+- TCP;
+- ABI сокетов;
+- DHCPv4;
+- DNS;
+- обратный интерфейс;
+- консольная настройка сети;
+- проверки пакетов и сокетов в QEMU.
 
-## 0.5 — Modern networking
+## 0.5 — Современная сеть
 
-- IPv6
-- ICMPv6/NDP
-- SLAAC
-- DHCPv6
-- dual-stack socket behavior
-- routing tables
-- local firewall hooks
-- certificate store
-- TLS 1.2/1.3 through a ported/audited crypto stack
-- HTTP/1.1
-- HTTP/2
-- proxy support
-- system network manager
-- Wi-Fi framework and first supported Wi-Fi device
-- network diagnostics and capture hooks
+- IPv6;
+- ICMPv6/NDP;
+- SLAAC;
+- DHCPv6;
+- двухстековое поведение сокетов;
+- таблицы маршрутизации;
+- точки подключения локального межсетевого экрана;
+- системное хранилище доверенных сертификатов;
+- TLS 1.2/1.3 через перенесённую и проверенную криптографическую библиотеку;
+- HTTP/1.1;
+- HTTP/2;
+- прокси;
+- системная служба управления сетью;
+- инфраструктура Wi-Fi и первый поддерживаемый адаптер;
+- диагностика сети и перехват пакетов.
 
-## 0.6 — Desktop and core applications
+## 0.6 — Рабочая среда и основные приложения
 
-- graphics abstraction
-- compositor
-- windows/surfaces
-- input routing
-- fonts/text shaping
-- clipboard
-- notifications
-- audio stack
-- desktop shell
-- Settings
-- File Manager
-- Terminal
-- plain-text/code editor
-- System Monitor
-- logs/diagnostics viewer
-- calculator
-- archive utility
-- disk/storage utility
-- network settings
-- package/software manager
-- updater UI
-- image viewer
-- basic image editor
-- PDF/document viewer
-- formatted document editor
-- spreadsheet viewer/editor
-- presentation viewer/editor
-- video/audio player
-- shared document/media import-export framework
-- thumbnails, previews, recent-files integration, MIME/file associations
+- графическая абстракция;
+- компоновщик окон;
+- окна и поверхности;
+- маршрутизация ввода;
+- шрифты и формирование текста;
+- буфер обмена;
+- уведомления;
+- звук;
+- рабочая оболочка;
+- настройки;
+- файловый менеджер;
+- терминал;
+- редактор текста и кода;
+- системный монитор;
+- просмотр журналов и диагностики;
+- калькулятор;
+- архиватор;
+- управление дисками;
+- сетевые настройки;
+- менеджер программ;
+- интерфейс обновлений;
+- просмотрщик изображений;
+- простой редактор изображений;
+- просмотрщик PDF и документов;
+- редактор форматированных документов;
+- таблицы;
+- презентации;
+- аудио- и видеоплеер;
+- общая платформа импорта и экспорта документов и медиа;
+- миниатюры, предварительный просмотр, недавние файлы и связи типов файлов с приложениями.
 
-### Document/media format target for 1.0
+### Форматы для версии 1.0
 
-- UTF-8 plain text and common code/text formats
-- ODF family: ODT, ODS, ODP
-- PDF viewing and export
-- OOXML interoperability target: DOCX, XLSX, PPTX
-- raster images: PNG, JPEG, WebP, BMP, GIF
-- vector images: SVG
-- media containers/codecs through mature ported libraries rather than original codec implementations
-- common playback targets: MP4, MKV, WebM; H.264/H.265/VP9/AV1 where the chosen codec stack and distribution policy permit; AAC/Opus/Vorbis audio
+- обычный текст UTF-8 и распространённые текстовые форматы;
+- ODF: ODT, ODS, ODP;
+- просмотр и экспорт PDF;
+- совместимость с OOXML: DOCX, XLSX, PPTX;
+- растровые изображения: PNG, JPEG, WebP, BMP, GIF;
+- векторные изображения: SVG;
+- мультимедийные контейнеры и кодеки через зрелые переносимые библиотеки;
+- MP4, MKV, WebM; H.264/H.265/VP9/AV1 там, где это допускают выбранные библиотеки и политика распространения; AAC/Opus/Vorbis.
 
-## 0.7 — SDK and application platform
+## 0.7 — Комплект разработки и платформа приложений
 
-- stable C ABI v1 candidate
-- C SDK
-- Rust SDK
-- C++ convenience layer
-- Zig examples
-- GUI toolkit
-- sockets/network API documentation
-- document/media framework API documentation
-- package format
-- package manager
-- application permissions/sandboxing
-- debugger/profiler integration
-- CLI, GUI, network-client, media-client, and driver reference projects
+- кандидат стабильного C-совместимого ABI версии 1;
+- комплект разработки C;
+- комплект разработки Rust;
+- удобный слой C++;
+- примеры Zig;
+- библиотека графического интерфейса;
+- документация сетевых интерфейсов;
+- документация платформы документов и медиа;
+- формат пакетов;
+- менеджер пакетов;
+- права и изоляция приложений;
+- отладчик и профилирование;
+- эталонные консольные, графические, сетевые, мультимедийные программы и драйвер.
 
-## 0.8 — Browser
+## 0.8 — Браузер
 
-- browser platform abstraction
-- browser shell (tabs, address bar, downloads, history, settings)
-- port selected web engine, initially targeting Servo
-- networking/TLS integration
-- fonts/input/clipboard integration
-- GPU/rendering integration
-- cookies/cache/storage
-- downloads and file picker
-- proxy and certificate UI
-- audio/video integration through the shared media stack
-- sandbox browser processes
-- Web Platform Test subset in CI
-- real-site compatibility matrix
+- абстракция браузерного движка;
+- оболочка браузера: вкладки, адресная строка, загрузки, история, настройки;
+- перенос выбранного движка, первоначально исследуется Servo;
+- сеть и TLS;
+- шрифты, ввод и буфер обмена;
+- графическое ускорение;
+- cookies, кэш и хранилища;
+- загрузки и выбор файлов;
+- управление прокси и сертификатами;
+- звук и видео через общий медиастек;
+- изоляция процессов браузера;
+- часть Web Platform Tests в автоматических проверках;
+- перечень реальных сайтов для проверки совместимости.
 
-## 0.9 — Productization and updates
+## 0.9 — Подготовка продукта и обновления
 
-- installer and disk-layout tooling
-- boot manager
-- signed update metadata format
-- trusted root/update signing keys and key rotation
-- A/B or generation-based system slots
-- inactive-slot update installation
-- atomic next-boot activation
-- boot-success health marker
-- automatic rollback on failed boot/health check
-- resumable background downloads
-- stable/beta/development update channels
-- staged rollout metadata
-- delta update support after correctness baseline
-- driver/base-system compatibility gates
-- configuration/data migration framework
-- update history and manual rollback UI
-- offline/recovery update path
-- recovery environment
-- package signatures
-- user accounts and permissions
-- encrypted-storage path
-- crash dumps
-- telemetry only if explicitly opt-in
-- Secure Boot path
-- hardware-support matrix
-- performance/power profiling
-- upgrade compatibility tests
-- power-loss/fault-injection update tests
+- установщик и разметка диска;
+- менеджер загрузки;
+- формат подписанных метаданных обновлений;
+- корневые и рабочие ключи подписи, их ротация;
+- системные разделы A/B либо поколения;
+- установка в неактивный раздел;
+- атомарная активация при следующей загрузке;
+- отметка успешной загрузки;
+- автоматический откат;
+- возобновляемые фоновые загрузки;
+- стабильный, бета- и разработческий каналы;
+- поэтапное распространение;
+- дельта-обновления после доказанной корректности полного обновления;
+- проверки совместимости драйверов и базовой системы;
+- миграции настроек и данных;
+- история обновлений и ручной откат;
+- автономное обновление из среды восстановления;
+- среда восстановления;
+- подписи пакетов;
+- пользователи и права;
+- путь к шифрованию хранилища;
+- аварийные дампы;
+- телеметрия только при явном согласии;
+- путь к Secure Boot;
+- матрица поддерживаемого оборудования;
+- профилирование производительности и энергопотребления;
+- проверки обновления между версиями;
+- имитация обрыва питания и других сбоев во время обновления.
 
-## 1.0 — Supported daily-use release
+## 1.0 — Версия для ежедневного использования на поддерживаемом оборудовании
 
-1.0 means PhoenixOS can be installed and used on the documented supported hardware without another OS for routine supported workflows.
+Версия 1.0 означает, что PhoenixOS можно установить на явно указанное поддерживаемое оборудование и использовать для заявленных повседневных сценариев без второй ОС.
 
-Required deliverables include:
+Обязательны:
 
-- stable installer plus signed transactional update and recovery path;
-- automatic rollback from an unbootable/failed update;
-- desktop and core applications;
-- formatted document editing plus PDF/document viewing;
-- spreadsheet and presentation workflows;
-- image viewing plus basic image editing;
-- video/audio playback;
-- working wired networking and at least one documented Wi-Fi path;
-- real browser with HTTPS;
-- SDK and porting documentation;
-- DDK and hardware-enablement guide;
-- package manager;
-- minimum two bundled games;
-- security baseline and reproducible release checks.
+- стабильная установка, подписанное транзакционное обновление и восстановление;
+- автоматический откат из неработоспособного обновления;
+- рабочая среда и основные приложения;
+- редактирование документов и просмотр PDF;
+- таблицы и презентации;
+- просмотр и базовое редактирование изображений;
+- воспроизведение аудио и видео;
+- проводная сеть и хотя бы один документированный путь Wi-Fi;
+- настоящий браузер с HTTPS;
+- документация комплекта разработки и переноса ПО;
+- комплект разработки драйверов и руководство по добавлению оборудования;
+- менеджер пакетов;
+- не менее двух встроенных игр;
+- базовая модель безопасности и воспроизводимые проверки выпуска.
 
-Broad support for all PC hardware is explicitly not a 1.0 requirement.
+Поддержка всего существующего оборудования ПК не является требованием версии 1.0.

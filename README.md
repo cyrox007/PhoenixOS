@@ -1,30 +1,32 @@
 # PhoenixOS
 
-PhoenixOS is a from-scratch operating system project targeting modern x86-64 PCs.
+PhoenixOS — операционная система, создаваемая с нуля для современных компьютеров x86-64.
 
-The long-term goal is a complete general-purpose desktop platform: kernel, drivers, networking, graphical desktop, SDK, application ecosystem, package/update system, browser, documentation, and a small set of bundled games.
+Долгосрочная цель — полноценная настольная платформа общего назначения: ядро, драйверы, сеть, графическая среда, комплект разработки, экосистема приложений, пакеты и обновления, браузер, документация и несколько встроенных игр.
 
-## Current targets
+## Текущие целевые решения
 
-- Architecture: x86-64
-- Firmware: UEFI
-- Reference platform: QEMU + OVMF
-- Kernel implementation: Rust (`no_std`) with small, explicit low-level/assembly escape hatches
-- Public application ABI: stable C-compatible ABI; language bindings sit above it
-- Kernel shape: modular hybrid kernel
-- Hardware strategy: a deliberately small supported-hardware matrix first, with a documented DDK/porting path for additional devices
-- Networking target: IPv4 + IPv6, sockets, DHCP/SLAAC, DNS, TCP/UDP, TLS, HTTP(S), proxy support, Ethernet first and Wi-Fi through the driver framework
-- Browser target: a real standards engine port; PhoenixOS will not attempt to write HTML/CSS/JS engines from scratch
-- Update target: signed, transactional OS/application updates with rollback, recovery, channels, staged rollout, and safe interruption/reboot behavior
+- архитектура процессора: x86-64;
+- загрузка: UEFI;
+- эталонная виртуальная платформа: QEMU + OVMF;
+- ядро: Rust в режиме `no_std`, с небольшими явно выделенными участками низкоуровневого и ассемблерного кода;
+- публичный интерфейс приложений: стабильный C-совместимый ABI, поверх которого строятся привязки для языков;
+- устройство ядра: модульное гибридное ядро;
+- стратегия оборудования: сначала небольшой проверенный перечень устройств, затем расширение через документированный комплект разработки драйверов;
+- сеть: IPv4 + IPv6, сокеты, DHCP/SLAAC, DNS, TCP/UDP, TLS, HTTP(S), прокси, сначала Ethernet, затем Wi-Fi через общую модель драйверов;
+- браузер: перенос готового современного движка стандартов; собственные HTML/CSS/JavaScript-движки с нуля не планируются;
+- обновления: подписанные транзакционные обновления системы и приложений с откатом, восстановлением, каналами и поэтапным распространением.
 
-## Repository flow
+## Ветки
 
-- `main`: stable integration points
-- `develop`: active integrated development
-- `feature/*`: isolated implementation increments
+- `main` — стабильные точки интеграции;
+- `develop` — основная ветка разработки;
+- `feature/*` — изолированные небольшие изменения.
 
-See `ROADMAP.md`, `ARCHITECTURE.md`, `DECISIONS.md`, and `STATUS.md`.
+Основные документы: `ROADMAP.md`, `ARCHITECTURE.md`, `DECISIONS.md`, `STATUS.md`.
 
-## Bootstrap
+## Начальная загрузка
 
-The first executable target is intentionally tiny: build a UEFI disk image, enter the Rust kernel in QEMU, write a serial boot banner, and exit QEMU through the debug port. This gives CI a deterministic proof that the toolchain, boot image, firmware path, and kernel entry point all work before the real kernel grows.
+Первый исполняемый этап намеренно минимален: собрать UEFI-образ, войти в ядро Rust под QEMU, вывести диагностические сообщения через последовательный порт и штатно завершить QEMU через отладочный порт.
+
+Это даёт воспроизводимую проверку цепочки сборки, загрузочного образа, UEFI и точки входа ядра до усложнения системы.

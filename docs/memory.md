@@ -1,64 +1,64 @@
-# Memory Management
+# Управление памятью
 
-PhoenixOS brings memory management up in layers so each stage can be tested before it becomes responsible for more of the machine.
+Подсистема памяти PhoenixOS вводится по слоям, чтобы каждый этап можно было проверить до передачи ему большей ответственности.
 
-## Bootstrap allocator
+## Начальный распределитель
 
-The first allocator consumes only regions marked `Usable` by the bootloader memory map.
+Первый распределитель использует только области, помеченные загрузчиком как `Usable`.
 
-Properties:
+Свойства:
 
-- no heap dependency;
-- 4 KiB frame granularity;
-- monotonic allocation;
-- skips non-usable regions;
-- aligns region starts upward to frame boundaries;
-- never frees;
-- intended only for early page-table/heap bring-up.
+- не требует кучи;
+- размер физической страницы — 4 КиБ;
+- выдаёт страницы последовательно;
+- пропускает недоступные области;
+- выравнивает начало области до границы страницы;
+- не освобождает страницы;
+- предназначен только для раннего создания таблиц страниц и кучи.
 
-This is deliberately not the final physical-memory manager.
+Это намеренно не окончательный системный распределитель физической памяти.
 
-## Safety rule
+## Правило безопасности
 
-There must be exactly one live owner allocating from a given set of firmware-provided usable regions. Creating independent allocators over the same map can hand the same physical frame to two subsystems.
+Для одного набора свободных областей карты памяти должен существовать единственный активный владелец распределения.
 
-The bootstrap constructor is therefore `unsafe` and documents this invariant.
+Два независимых распределителя над одной картой могут выдать одну физическую страницу двум подсистемам. Поэтому конструктор начального распределителя помечен `unsafe` и документирует это условие.
 
-## Next physical-memory manager
+## Будущий системный распределитель
 
-The system allocator will eventually add:
+Он должен добавить:
 
-- frame reclamation;
-- contiguous allocations where DMA requires them;
-- allocation zones/constraints;
-- accounting and diagnostics;
-- reserved-frame tracking;
-- per-CPU or batched fast paths where measurements justify them;
-- integration with IOMMU/DMA mapping;
-- memory-pressure reporting.
+- освобождение страниц;
+- непрерывные физические диапазоны для DMA;
+- зоны и ограничения размещения;
+- учёт и диагностику;
+- отслеживание зарезервированных страниц;
+- быстрые пути на процессор или пакетные операции только при подтверждённой пользе;
+- интеграцию с IOMMU и DMA;
+- сведения о давлении на память.
 
-The implementation choice (bitmap, buddy allocator, segregated free lists, or a hybrid) will be made from measured workload needs instead of being fixed prematurely.
+Выбор между битовой картой, buddy-схемой, раздельными списками свободных блоков либо гибридом делается после измерений, а не заранее.
 
-## Virtual memory follow-up
+## Следующий этап — виртуальная память
 
-After physical-frame allocation is proven, the next steps are:
+После подтверждения физического распределения:
 
-1. inspect the active page tables supplied by the boot path;
-2. create safe mapping/unmapping helpers;
-3. reserve a kernel virtual-memory layout;
-4. map a kernel heap;
-5. add guard pages;
-6. build address-space creation for processes;
-7. add copy-on-write and shared-memory primitives later.
+1. исследовать активные таблицы страниц после загрузки;
+2. создать безопасные операции отображения и снятия отображения;
+3. зафиксировать схему виртуального адресного пространства ядра;
+4. отобразить кучу ядра;
+5. добавить защитные страницы;
+6. создать адресные пространства процессов;
+7. позднее добавить копирование при записи и общую память.
 
-## Tests
+## Проверки
 
-The bootstrap allocator has host-side unit tests for:
+Модульные тесты начального распределителя проверяют:
 
-- memory summary accounting;
-- reserved-region skipping;
-- unaligned usable-region starts;
-- exhaustion;
-- transitions between separated usable regions.
+- подсчёт карты памяти;
+- пропуск зарезервированных областей;
+- невыровненные начала;
+- исчерпание;
+- переход между разделёнными свободными областями.
 
-The QEMU boot test additionally allocates real frames from the firmware map and logs their physical addresses.
+Проверочная загрузка QEMU дополнительно получает реальные страницы из карты UEFI и выводит их физические адреса.

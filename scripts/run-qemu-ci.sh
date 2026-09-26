@@ -23,12 +23,28 @@ find_ovmf_file() {
   return 1
 }
 
+check_serial_marker() {
+  local marker="$1"
+  local log_file="$2"
+
+  if [[ -z "$marker" ]]; then
+    return 0
+  fi
+
+  if grep -Fq "$marker" "$log_file"; then
+    return 0
+  fi
+
+  echo "Не найден ожидаемый маркер последовательного вывода: $marker" >&2
+  return 1
+}
+
 OVMF_CODE="$(find_ovmf_file "${OVMF_CODE:-}"   /usr/share/OVMF/OVMF_CODE.fd   /usr/share/OVMF/OVMF_CODE_4M.fd   /usr/share/edk2/x64/OVMF_CODE.fd   /usr/share/edk2/ovmf/OVMF_CODE.fd || true)"
 
 OVMF_VARS="$(find_ovmf_file "${OVMF_VARS:-}"   /usr/share/OVMF/OVMF_VARS.fd   /usr/share/OVMF/OVMF_VARS_4M.fd   /usr/share/edk2/x64/OVMF_VARS.fd   /usr/share/edk2/ovmf/OVMF_VARS.fd || true)"
 
 if [[ -z "$OVMF_CODE" || -z "$OVMF_VARS" ]]; then
-  echo "OVMF firmware not found" >&2
+  echo "Не найдены файлы прошивки OVMF" >&2
   find /usr/share -maxdepth 3 -type f     \( -name 'OVMF_CODE*.fd' -o -name 'OVMF_VARS*.fd' \)     -print >&2 || true
   exit 2
 fi
@@ -44,19 +60,12 @@ status=${PIPESTATUS[0]}
 set -e
 
 if [[ "$status" -ne 33 ]]; then
-  echo "PhoenixOS UEFI boot smoke test failed with qemu status $status" >&2
+  echo "Проверочная загрузка PhoenixOS завершилась кодом QEMU $status" >&2
   exit 1
 fi
 
-if ! grep -Fq "bootstrap: OK" "$serial_log"; then
-  echo "PhoenixOS bootstrap completion marker not found" >&2
-  exit 1
-fi
+check_serial_marker "bootstrap: OK" "$serial_log"
+check_serial_marker "${PHOENIXOS_EXPECT_SERIAL:-}" "$serial_log"
+check_serial_marker "${PHOENIXOS_EXPECT_SERIAL_2:-}" "$serial_log"
 
-if [[ -n "${PHOENIXOS_EXPECT_SERIAL:-}" ]] &&
-   ! grep -Fq "$PHOENIXOS_EXPECT_SERIAL" "$serial_log"; then
-  echo "Expected serial marker not found: $PHOENIXOS_EXPECT_SERIAL" >&2
-  exit 1
-fi
-
-echo "PhoenixOS UEFI boot smoke test passed"
+echo "Проверочная UEFI-загрузка PhoenixOS успешно завершена"

@@ -67,8 +67,7 @@ impl ActivePageTable {
     /// - для этой P4 не существует другого одновременного изменяемого владельца.
     pub unsafe fn from_current(physical_memory_offset: VirtAddr) -> Self {
         let level_4_table = unsafe { active_level_4_table(physical_memory_offset) };
-        let mapper =
-            unsafe { OffsetPageTable::new(level_4_table, physical_memory_offset) };
+        let mapper = unsafe { OffsetPageTable::new(level_4_table, physical_memory_offset) };
 
         Self {
             mapper,

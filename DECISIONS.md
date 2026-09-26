@@ -51,3 +51,26 @@ New PhoenixOS software should use the native asynchronous and handle-based API. 
 **Status:** accepted.
 
 Every stable public subsystem requires documentation plus at least one buildable reference example. Driver, CLI, GUI, networking, and packaging examples are part of the SDK deliverable.
+
+## D-009: OS updates are signed and transactional
+
+**Status:** accepted.
+
+System updates must not modify the currently booted system in a way that can leave it half-updated after a power loss or failed reboot.
+
+PhoenixOS will use an A/B-style or equivalent generation-based system-update model with:
+
+- cryptographically signed metadata and payloads;
+- download verification before activation;
+- installation into an inactive system generation/slot;
+- atomic activation for the next boot;
+- boot-success confirmation;
+- automatic rollback after failed boot/health checks;
+- recovery support independent of the active system;
+- separate release channels and staged rollout metadata;
+- resumable downloads;
+- update history and user-visible rollback controls.
+
+Application/package updates may use finer-grained transactional package operations but must use the same trust/signature infrastructure.
+
+Bootloader, kernel, firmware-facing components, base userspace, drivers, applications, and configuration migrations must each have explicit compatibility/version rules.

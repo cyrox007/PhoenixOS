@@ -12,8 +12,8 @@ use phoenix_framebuffer::draw_boot_banner;
 use phoenix_memory::{MemorySummary, SystemFrameAllocator};
 use phoenix_vm::ActivePageTable;
 use qemu::ExitCode;
-use x86_64::structures::paging::{Page, PageTableFlags, Size4KiB};
 use x86_64::VirtAddr;
+use x86_64::structures::paging::{Page, PageTableFlags, Size4KiB};
 
 const SYSTEM_MEMORY_RANGE_CAPACITY: usize = 256;
 const VM_TEST_ADDRESS: u64 = 0x0000_6000_0000_0000;
@@ -41,9 +41,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let memory = MemorySummary::from_regions(&boot_info.memory_regions);
     log_memory_summary(&mut out, memory);
 
-    let mut frames =
-        SystemFrameAllocator::<SYSTEM_MEMORY_RANGE_CAPACITY>::from_regions(&boot_info.memory_regions)
-            .expect("не удалось создать системный распределитель физической памяти");
+    let mut frames = SystemFrameAllocator::<SYSTEM_MEMORY_RANGE_CAPACITY>::from_regions(
+        &boot_info.memory_regions,
+    )
+    .expect("не удалось создать системный распределитель физической памяти");
 
     serial::line(
         &mut out,

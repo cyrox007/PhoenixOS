@@ -1,51 +1,32 @@
 #![no_std]
 #![no_main]
 
+mod qemu;
+mod serial;
+
 use bootloader_api::{BootInfo, entry_point};
-use core::fmt::Write;
-use uart_16550::backend::PioBackend;
-use uart_16550::{Config, Uart16550Tty};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-enum QemuExitCode {
-    Success = 0x10,
-    Failure = 0x11,
-}
-
-fn serial() -> Uart16550Tty<PioBackend> {
-    unsafe { Uart16550Tty::new_port(0x3F8, Config::default()) }.expect("COM1 UART must initialize")
-}
-
-fn exit_qemu(code: QemuExitCode) -> ! {
-    use x86_64::instructions::{nop, port::Port};
-
-    unsafe {
-        let mut port = Port::new(0xF4);
-        port.write(code as u32);
-    }
-
-    loop {
-        nop();
-    }
-}
+use qemu::ExitCode;
 
 entry_point!(kernel_main);
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
-    let mut out = serial();
+    let mut out = serial::console();
 
-    writeln!(out, "PhoenixOS bootstrap kernel").ok();
-    writeln!(out, "architecture: x86_64").ok();
-    writeln!(out, "firmware target: UEFI").ok();
-    writeln!(out, "boot_info: {boot_info:?}").ok();
-    writeln!(out, "bootstrap: OK").ok();
+    serial::line(&mut out, "INFO", format_args!("PhoenixOS bootstrap kernel"));
+    serial::line(&mut out, "INFO", format_args!("architecture: x86_64"));
+    serial::line(&mut out, "INFO", format_args!("firmware target: UEFI"));
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("memory regions: {}", boot_info.memory_regions.len()),
+    );
+    serial::line(&mut out, "INFO", format_args!("bootstrap: OK"));
 
-    exit_qemu(QemuExitCode::Success);
+    qemu::exit(ExitCode::Success);
 }
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    let _ = writeln!(serial(), "PANIC: {info}");
-    exit_qemu(QemuExitCode::Failure);
+    serial::emergency(format_args!("\n[PANIC] {info}\n"));
+    qemu::exit(ExitCode::Failure);
 }

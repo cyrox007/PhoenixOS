@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop, "feature/**"]
+  pull_request:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install QEMU and OVMF
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf
+
+      - name: Select Rust toolchain
+        run: rustup show
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Build UEFI image
+        run: |
+          mkdir -p artifacts
+          IMAGE="$(cargo run --release --quiet)"
+          test -f "$IMAGE"
+          cp "$IMAGE" artifacts/phoenixos-uefi.img
+
+      - name: Boot smoke test
+        run: bash scripts/run-qemu-ci.sh artifacts/phoenixos-uefi.img
+
+      - name: Upload boot image
+        uses: actions/upload-artifact@v4
+        with:
+          name: phoenixos-uefi
+          path: artifacts/phoenixos-uefi.img
+          if-no-files-found: error

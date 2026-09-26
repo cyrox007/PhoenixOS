@@ -105,10 +105,7 @@ impl ActivePageTable {
         Ok(())
     }
 
-    pub fn unmap_4k(
-        &mut self,
-        page: Page<Size4KiB>,
-    ) -> Result<PhysFrame<Size4KiB>, UnmapError> {
+    pub fn unmap_4k(&mut self, page: Page<Size4KiB>) -> Result<PhysFrame<Size4KiB>, UnmapError> {
         let (frame, flush) = self.mapper.unmap(page)?;
         flush.flush();
         Ok(frame)

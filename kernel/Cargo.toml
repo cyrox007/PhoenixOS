@@ -1,0 +1,10 @@
+[package]
+name = "kernel"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[dependencies]
+bootloader_api = "=0.11.17"
+uart_16550 = "0.8.0"
+x86_64 = "0.15.2"

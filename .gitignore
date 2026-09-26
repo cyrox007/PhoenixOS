@@ -1,0 +1,8 @@
+target/
+artifacts/
+*.img
+*.iso
+*.log
+.DS_Store
+.idea/
+.vscode/

@@ -1,9 +1,9 @@
 use linked_list_allocator::LockedHeap;
 use phoenix_memory::SystemFrameAllocator;
 use phoenix_vm::ActivePageTable;
+use x86_64::VirtAddr;
 use x86_64::structures::paging::mapper::MapToError;
 use x86_64::structures::paging::{Page, PageTableFlags, Size4KiB};
-use x86_64::VirtAddr;
 
 pub const HEAP_START: u64 = 0x0000_5000_0000_0000;
 pub const HEAP_SIZE: usize = 1024 * 1024;
@@ -61,9 +61,7 @@ pub fn init<const MAX_RANGES: usize>(
     }
 
     unsafe {
-        ALLOCATOR
-            .lock()
-            .init(HEAP_START as *mut u8, HEAP_SIZE);
+        ALLOCATOR.lock().init(HEAP_START as *mut u8, HEAP_SIZE);
     }
 
     Ok(stats())

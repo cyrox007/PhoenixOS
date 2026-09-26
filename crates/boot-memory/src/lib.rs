@@ -168,11 +168,7 @@ impl<const MAX_RANGES: usize> SystemFrameAllocator<MAX_RANGES> {
                 continue;
             };
 
-            insert_range(
-                &mut allocator.managed,
-                &mut allocator.managed_len,
-                range,
-            )?;
+            insert_range(&mut allocator.managed, &mut allocator.managed_len, range)?;
             insert_range(&mut allocator.free, &mut allocator.free_len, range)?;
         }
 
@@ -196,10 +192,7 @@ impl<const MAX_RANGES: usize> SystemFrameAllocator<MAX_RANGES> {
         Some(frame_from_number(frame_number))
     }
 
-    pub fn release_4k(
-        &mut self,
-        frame: PhysFrame<Size4KiB>,
-    ) -> Result<(), PhysicalMemoryError> {
+    pub fn release_4k(&mut self, frame: PhysFrame<Size4KiB>) -> Result<(), PhysicalMemoryError> {
         let frame_number = frame.start_address().as_u64() / FRAME_SIZE;
 
         if !contains_frame(&self.managed, self.managed_len, frame_number) {
@@ -235,9 +228,7 @@ impl<const MAX_RANGES: usize> SystemFrameAllocator<MAX_RANGES> {
     }
 }
 
-unsafe impl<const MAX_RANGES: usize> FrameAllocator<Size4KiB>
-    for SystemFrameAllocator<MAX_RANGES>
-{
+unsafe impl<const MAX_RANGES: usize> FrameAllocator<Size4KiB> for SystemFrameAllocator<MAX_RANGES> {
     fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
         self.allocate_4k()
     }

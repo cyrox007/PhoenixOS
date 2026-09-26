@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["kernel", "crates/phoenix-framebuffer", "crates/boot-memory"]
+members = [
+    "kernel",
+    "crates/phoenix-framebuffer",
+    "crates/boot-memory",
+    "crates/virtual-memory",
+]
 
 [package]
 name = "phoenixos"

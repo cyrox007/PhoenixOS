@@ -36,6 +36,7 @@ jobs:
         run: |
           cargo test -p phoenix-framebuffer
           cargo test -p phoenix-memory
+          cargo test -p phoenix-vm
 
       - name: Build UEFI image
         run: |

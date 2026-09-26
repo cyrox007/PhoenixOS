@@ -68,7 +68,7 @@ impl ActivePageTable {
     pub unsafe fn from_current(physical_memory_offset: VirtAddr) -> Self {
         let level_4_table = unsafe { active_level_4_table(physical_memory_offset) };
         let mapper =
-            unsafe { OffsetPageTable::from_phys_offset(level_4_table, physical_memory_offset) };
+            unsafe { OffsetPageTable::new(level_4_table, physical_memory_offset) };
 
         Self {
             mapper,

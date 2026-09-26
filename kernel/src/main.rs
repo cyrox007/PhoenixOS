@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 
+mod arch;
 mod qemu;
 mod serial;
 
@@ -17,6 +18,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial::line(&mut out, "INFO", format_args!("PhoenixOS bootstrap kernel"));
     serial::line(&mut out, "INFO", format_args!("architecture: x86_64"));
     serial::line(&mut out, "INFO", format_args!("firmware target: UEFI"));
+
+    arch::x86_64::init();
+    serial::line(&mut out, "INFO", format_args!("interrupt tables: OK"));
+
+    arch::x86_64::exceptions::smoke_test_breakpoint();
+    serial::line(&mut out, "INFO", format_args!("breakpoint self-test: OK"));
 
     let memory = MemorySummary::from_regions(&boot_info.memory_regions);
     serial::line(
@@ -45,34 +52,31 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         ),
     );
 
-    match boot_info.framebuffer.as_mut() {
-        Some(framebuffer) => match draw_boot_banner(framebuffer) {
-            Ok(info) => {
-                serial::line(
-                    &mut out,
-                    "INFO",
-                    format_args!(
-                        "framebuffer: {}x{} {} B/px",
-                        info.width, info.height, info.bytes_per_pixel
-                    ),
-                );
-            }
-            Err(error) => {
-                serial::line(
-                    &mut out,
-                    "WARN",
-                    format_args!("framebuffer banner unavailable: {error:?}"),
-                );
-            }
-        },
-        None => {
-            serial::line(&mut out, "WARN", format_args!("framebuffer: unavailable"));
-        }
-    }
+    render_boot_banner(boot_info, &mut out);
 
     serial::line(&mut out, "INFO", format_args!("bootstrap: OK"));
-
     qemu::exit(ExitCode::Success);
+}
+
+fn render_boot_banner(boot_info: &'static mut BootInfo, out: &mut serial::Com1) {
+    let Some(framebuffer) = boot_info.framebuffer.as_mut() else {
+        serial::line(out, "WARN", format_args!("framebuffer: unavailable"));
+        return;
+    };
+
+    let Ok(info) = draw_boot_banner(framebuffer) else {
+        serial::line(out, "WARN", format_args!("framebuffer banner unavailable"));
+        return;
+    };
+
+    serial::line(
+        out,
+        "INFO",
+        format_args!(
+            "framebuffer: {}x{} {} B/px",
+            info.width, info.height, info.bytes_per_pixel
+        ),
+    );
 }
 
 #[panic_handler]

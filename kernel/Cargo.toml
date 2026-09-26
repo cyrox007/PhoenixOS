@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 bootloader_api = "=0.11.17"
+lazy_static = { version = "1.5.0", features = ["spin_no_std"] }
 phoenix-framebuffer = { path = "../crates/phoenix-framebuffer" }
 phoenix-memory = { path = "../crates/boot-memory" }
 uart_16550 = "0.8.0"

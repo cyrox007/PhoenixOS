@@ -1,0 +1,9 @@
+[package]
+name = "phoenix-framebuffer"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[dependencies]
+bootloader_api = "=0.11.17"
+noto-sans-mono-bitmap = { version = "0.3.2", default-features = false, features = ["regular", "size_16", "unicode-basic-latin"] }

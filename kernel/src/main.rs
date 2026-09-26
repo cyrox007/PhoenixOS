@@ -27,8 +27,6 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    serial::emergency(format_args!("
-[PANIC] {info}
-"));
+    serial::emergency(format_args!("\n[PANIC] {info}\n"));
     qemu::exit(ExitCode::Failure);
 }

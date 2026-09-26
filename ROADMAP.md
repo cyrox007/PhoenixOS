@@ -90,7 +90,7 @@ The roadmap is milestone-oriented. A milestone is complete only when the relevan
 - Wi-Fi framework and first supported Wi-Fi device
 - network diagnostics and capture hooks
 
-## 0.6 — Desktop
+## 0.6 — Desktop and core applications
 
 - graphics abstraction
 - compositor
@@ -104,9 +104,35 @@ The roadmap is milestone-oriented. A milestone is complete only when the relevan
 - Settings
 - File Manager
 - Terminal
-- Text Editor
+- plain-text/code editor
 - System Monitor
-- image/document viewers
+- logs/diagnostics viewer
+- calculator
+- archive utility
+- disk/storage utility
+- network settings
+- package/software manager
+- updater UI
+- image viewer
+- basic image editor
+- PDF/document viewer
+- formatted document editor
+- spreadsheet viewer/editor
+- presentation viewer/editor
+- video/audio player
+- shared document/media import-export framework
+- thumbnails, previews, recent-files integration, MIME/file associations
+
+### Document/media format target for 1.0
+
+- UTF-8 plain text and common code/text formats
+- ODF family: ODT, ODS, ODP
+- PDF viewing and export
+- OOXML interoperability target: DOCX, XLSX, PPTX
+- raster images: PNG, JPEG, WebP, BMP, GIF
+- vector images: SVG
+- media containers/codecs through mature ported libraries rather than original codec implementations
+- common playback targets: MP4, MKV, WebM; H.264/H.265/VP9/AV1 where the chosen codec stack and distribution policy permit; AAC/Opus/Vorbis audio
 
 ## 0.7 — SDK and application platform
 
@@ -117,11 +143,12 @@ The roadmap is milestone-oriented. A milestone is complete only when the relevan
 - Zig examples
 - GUI toolkit
 - sockets/network API documentation
+- document/media framework API documentation
 - package format
 - package manager
 - application permissions/sandboxing
 - debugger/profiler integration
-- CLI, GUI, network-client, and driver reference projects
+- CLI, GUI, network-client, media-client, and driver reference projects
 
 ## 0.8 — Browser
 
@@ -134,7 +161,7 @@ The roadmap is milestone-oriented. A milestone is complete only when the relevan
 - cookies/cache/storage
 - downloads and file picker
 - proxy and certificate UI
-- audio/video integration
+- audio/video integration through the shared media stack
 - sandbox browser processes
 - Web Platform Test subset in CI
 - real-site compatibility matrix
@@ -179,6 +206,10 @@ Required deliverables include:
 - stable installer plus signed transactional update and recovery path;
 - automatic rollback from an unbootable/failed update;
 - desktop and core applications;
+- formatted document editing plus PDF/document viewing;
+- spreadsheet and presentation workflows;
+- image viewing plus basic image editing;
+- video/audio playback;
 - working wired networking and at least one documented Wi-Fi path;
 - real browser with HTTPS;
 - SDK and porting documentation;

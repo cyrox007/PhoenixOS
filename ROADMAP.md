@@ -139,13 +139,27 @@ The roadmap is milestone-oriented. A milestone is complete only when the relevan
 - Web Platform Test subset in CI
 - real-site compatibility matrix
 
-## 0.9 — Productization
+## 0.9 — Productization and updates
 
-- installer
+- installer and disk-layout tooling
 - boot manager
-- updater with rollback
-- package signatures
+- signed update metadata format
+- trusted root/update signing keys and key rotation
+- A/B or generation-based system slots
+- inactive-slot update installation
+- atomic next-boot activation
+- boot-success health marker
+- automatic rollback on failed boot/health check
+- resumable background downloads
+- stable/beta/development update channels
+- staged rollout metadata
+- delta update support after correctness baseline
+- driver/base-system compatibility gates
+- configuration/data migration framework
+- update history and manual rollback UI
+- offline/recovery update path
 - recovery environment
+- package signatures
 - user accounts and permissions
 - encrypted-storage path
 - crash dumps
@@ -154,6 +168,7 @@ The roadmap is milestone-oriented. A milestone is complete only when the relevan
 - hardware-support matrix
 - performance/power profiling
 - upgrade compatibility tests
+- power-loss/fault-injection update tests
 
 ## 1.0 — Supported daily-use release
 
@@ -161,7 +176,8 @@ The roadmap is milestone-oriented. A milestone is complete only when the relevan
 
 Required deliverables include:
 
-- stable installation/update/recovery path;
+- stable installer plus signed transactional update and recovery path;
+- automatic rollback from an unbootable/failed update;
 - desktop and core applications;
 - working wired networking and at least one documented Wi-Fi path;
 - real browser with HTTPS;

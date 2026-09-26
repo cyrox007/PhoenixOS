@@ -1,85 +1,82 @@
-# Bundled Applications
+# Встроенные приложения
 
-The initial desktop should feel usable rather than like a kernel demo. PhoenixOS 1.0 therefore includes both system utilities and a practical minimum of productivity/media applications.
+Первая рабочая среда должна быть пригодной для обычного использования, а не выглядеть как демонстрация ядра.
 
-## Core system applications
+## Основные системные приложения
 
-- File Manager
-- Terminal
-- plain-text/code editor
-- Settings
-- System Monitor / Task Manager
-- Logs / diagnostics viewer
-- Calculator
-- archive utility
-- package/software manager
-- updater UI
-- disk/storage utility
-- network settings
-- Phoenix Browser
+- файловый менеджер;
+- терминал;
+- редактор обычного текста и кода;
+- настройки;
+- системный монитор и диспетчер задач;
+- просмотр журналов и диагностики;
+- калькулятор;
+- архиватор;
+- менеджер программ;
+- интерфейс обновлений;
+- управление дисками;
+- сетевые настройки;
+- Phoenix Browser.
 
-## Documents and office-style work
+## Документы
 
 ### Phoenix Writer
 
-A formatted document editor for ordinary letters, notes, reports, and longer documents.
+Редактор форматированных документов для писем, заметок, отчётов и больших текстов.
 
-Target capabilities:
+Требования:
 
-- rich text styles;
-- paragraphs/headings/lists;
-- tables;
-- images embedded in documents;
-- headers/footers;
-- page layout and print/export path;
-- spell-check integration point;
-- PDF export.
+- стили;
+- абзацы, заголовки и списки;
+- таблицы;
+- изображения;
+- колонтитулы;
+- разметка страниц;
+- печать и экспорт;
+- точка интеграции проверки орфографии;
+- экспорт PDF.
 
-Primary open format target: ODT.
+Основной открытый формат: ODT.
 
-Compatibility targets: DOCX and RTF import/export as practical porting support becomes available.
+Целевая совместимость: DOCX и RTF.
 
 ### Phoenix Sheets
 
-A spreadsheet viewer/editor with:
+Просмотр и редактирование таблиц:
 
-- cells and ranges;
-- formulas;
-- formatting;
-- multiple sheets;
-- CSV import/export;
-- basic charts.
+- ячейки и диапазоны;
+- формулы;
+- форматирование;
+- несколько листов;
+- импорт и экспорт CSV;
+- базовые диаграммы.
 
-Primary open format target: ODS.
-
-Compatibility target: XLSX.
+Основной формат: ODS. Целевая совместимость: XLSX.
 
 ### Phoenix Slides
 
-A presentation viewer/editor with:
+Презентации:
 
-- slides;
-- text and images;
-- simple shapes;
-- themes/layouts;
-- presentation mode;
-- PDF export.
+- слайды;
+- текст и изображения;
+- простые фигуры;
+- темы и макеты;
+- режим показа;
+- экспорт PDF.
 
-Primary open format target: ODP.
-
-Compatibility target: PPTX.
+Основной формат: ODP. Целевая совместимость: PPTX.
 
 ### Phoenix Documents
 
-A document/PDF viewer handling PDF plus supported read-only office/document formats where appropriate.
+Просмотрщик PDF и поддерживаемых документов в режиме чтения.
 
-The viewer/editor applications should share common text layout, printing/export, MIME/file-association, recent-files, thumbnail, and document-conversion services rather than each reimplementing them.
+Редакторы и просмотрщики должны совместно использовать формирование текста, печать и экспорт, определение типов файлов, список недавних файлов, миниатюры и преобразование документов.
 
-## Images and graphics
+## Изображения и графика
 
 ### Phoenix Images
 
-Image viewer with:
+Просмотр:
 
 - PNG;
 - JPEG;
@@ -87,84 +84,82 @@ Image viewer with:
 - BMP;
 - GIF;
 - SVG;
-- EXIF/orientation handling;
-- zoom/pan;
-- slideshow;
-- thumbnails.
+- ориентация и основные метаданные EXIF;
+- масштабирование;
+- слайд-шоу;
+- миниатюры.
 
 ### Phoenix Paint
 
-A lightweight image editor. It is not intended to replace professional graphics suites in 1.0.
+Лёгкий редактор изображений. В версии 1.0 он не обязан заменять профессиональные графические пакеты.
 
-Minimum editing target:
+Минимум:
 
-- crop;
-- resize;
-- rotate/flip;
-- basic drawing/annotation;
-- text;
-- simple selections;
-- brightness/contrast/basic color adjustment;
-- save/export to common image formats.
+- обрезка;
+- изменение размера;
+- поворот и отражение;
+- рисование и аннотации;
+- текст;
+- простое выделение;
+- яркость, контраст и базовая коррекция цвета;
+- сохранение и экспорт.
 
-More advanced raster/vector editors can later be ported as third-party applications.
-
-## Audio and video
+## Аудио и видео
 
 ### Phoenix Media
 
-A general media player for local files and network streams.
+Проигрыватель локальных файлов и сетевых потоков.
 
-Minimum UX:
+Минимум:
 
-- play/pause/seek;
-- playlists;
-- subtitles;
-- audio-track selection;
-- fullscreen;
-- volume/mute;
-- playback speed;
-- hardware-decoding path when graphics/video drivers eventually expose it.
+- воспроизведение, пауза и перемотка;
+- списки воспроизведения;
+- субтитры;
+- выбор звуковой дорожки;
+- полный экран;
+- громкость и отключение звука;
+- скорость воспроизведения;
+- путь к аппаратному декодированию после появления соответствующих драйверов.
 
-Initial container targets include MP4, MKV, and WebM. Codec support should come from mature ported multimedia libraries rather than PhoenixOS writing its own H.264/H.265/VP9/AV1/AAC/Opus implementations.
+Первые контейнеры: MP4, MKV, WebM.
 
-The media stack should be reusable by Phoenix Browser and other applications.
+Кодеки должны приходить из зрелых переносимых библиотек. PhoenixOS не пишет собственные реализации H.264/H.265/VP9/AV1/AAC/Opus.
 
-## Shared document/media platform
+Общий медиастек должен использоваться также браузером.
 
-PhoenixOS should expose reusable services/libraries for:
+## Общая платформа документов и медиа
 
-- MIME type detection and file associations;
-- thumbnails/previews;
-- fonts and text shaping;
-- color management hooks;
-- image decode/encode;
-- media demux/decode;
-- audio/video clocks and synchronization;
-- subtitle parsing/rendering;
-- printing/PDF export;
-- clipboard/drag-and-drop;
-- recent files;
-- file pickers;
-- sandboxed codec/parser execution where useful.
+Нужны переиспользуемые службы и библиотеки:
 
-Large parsers and codecs are treated as attack surfaces and should be isolated where the process model permits.
+- определение типа файла и выбор приложения;
+- миниатюры и предварительный просмотр;
+- шрифты и формирование текста;
+- точки интеграции управления цветом;
+- кодирование и декодирование изображений;
+- разбор контейнеров и декодирование медиа;
+- синхронизация звука и видео;
+- субтитры;
+- печать и PDF;
+- буфер обмена и перетаскивание;
+- недавние файлы;
+- выбор файлов;
+- изоляция сложных кодеков и парсеров, где это оправдано.
 
-## Developer-facing tools
+Сложные обработчики недоверенных файлов рассматриваются как поверхность атаки и по возможности изолируются отдельными процессами.
 
-- shell;
-- core file/process utilities;
-- compiler/SDK integration on a development install;
-- debugger;
-- profiler/tracing viewer;
-- package builder.
+## Средства разработчика
 
-## Games
+- командная оболочка;
+- основные файловые и процессные утилиты;
+- компиляторы и комплект разработки в разработческой установке;
+- отладчик;
+- профилировщик и просмотр трассировки;
+- сборщик пакетов.
 
-At least two games are a 1.0 requirement.
+## Игры
 
-A Snake/Tetris-class 2D game will exercise event loop, keyboard input, timers, 2D rendering, window lifecycle, and basic audio.
+Для версии 1.0 обязательны как минимум две игры.
 
-A small platformer or top-down game will exercise continuous rendering, asset loading, simultaneous inputs, audio mixing, frame pacing, and more demanding 2D graphics.
+Первая простая 2D-игра уровня Snake/Tetris проверяет цикл событий, клавиатуру, таймеры, 2D-отрисовку, окна и звук.
 
-Later, a lightweight Game SDK can wrap surfaces/input/audio and provide a clean example for third-party developers.
+Вторая — небольшой платформер или игра с видом сверху — проверяет непрерывную отрисовку, ресурсы, одновременный ввод, смешивание звука и стабильность кадров.

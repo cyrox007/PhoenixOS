@@ -1,5 +1,5 @@
-# Games
+# Игры
 
-Bundled games will serve both as user-facing software and integration tests for graphics, input, timers, audio, assets, and packaging.
+Встроенные игры одновременно являются пользовательскими приложениями и интеграционными проверками графики, ввода, таймеров, звука, ресурсов и упаковки.
 
-See `docs/applications.md`.
+Подробности: `docs/applications.md`.

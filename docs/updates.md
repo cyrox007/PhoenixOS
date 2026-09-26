@@ -1,163 +1,167 @@
-# System Update Architecture
+# Архитектура системных обновлений
 
-PhoenixOS treats system updates as a core reliability and security subsystem.
+Обновления PhoenixOS являются частью модели надёжности и безопасности.
 
-## Goals
+## Цели
 
-An interrupted update must not brick a supported machine. The currently working system remains bootable until a new generation has been fully downloaded, verified, installed, and selected for boot.
+Прерванное обновление не должно превращать поддерживаемый компьютер в незагружаемый.
 
-The update subsystem must support:
+Текущая рабочая система остаётся доступной, пока новая версия не будет полностью загружена, проверена, установлена и выбрана для следующей загрузки.
 
-- signed metadata and payload verification;
-- resumable background downloads;
-- system generations or A/B slots;
-- atomic activation;
-- automatic rollback;
-- offline/recovery updates;
-- release channels;
-- staged rollout metadata;
-- update history;
-- explicit compatibility checks;
-- deterministic fault-injection tests.
+Подсистема должна поддерживать:
 
-## Proposed disk/update model
+- подписанные метаданные и проверку содержимого;
+- возобновляемые фоновые загрузки;
+- поколения системы или разделы A/B;
+- атомарную активацию;
+- автоматический откат;
+- автономное обновление и восстановление;
+- каналы выпуска;
+- поэтапное распространение;
+- историю обновлений;
+- явные проверки совместимости;
+- воспроизводимые проверки с искусственным внесением сбоев.
 
-The first implementation will use an A/B-style layout because it is straightforward to reason about and test:
+## Схема диска
+
+Первый вариант использует A/B-схему:
 
 ```text
-EFI System Partition
-  +-- Phoenix boot manager
-  +-- boot metadata
+Системный раздел EFI
+  +-- менеджер загрузки Phoenix
+  +-- метаданные загрузки
 
-System A
-  +-- kernel
-  +-- base userspace
-  +-- system drivers
-  +-- immutable/versioned base
+Система A
+  +-- ядро
+  +-- базовое пользовательское пространство
+  +-- системные драйверы
+  +-- неизменяемая версия основы
 
-System B
-  +-- kernel
-  +-- base userspace
-  +-- system drivers
-  +-- immutable/versioned base
+Система B
+  +-- ядро
+  +-- базовое пользовательское пространство
+  +-- системные драйверы
+  +-- неизменяемая версия основы
 
-Data
-  +-- users
-  +-- applications/data
-  +-- mutable system state
+Данные
+  +-- пользователи
+  +-- приложения и их данные
+  +-- изменяемое состояние системы
 
-Recovery
-  +-- recovery environment
-  +-- updater/repair tools
+Восстановление
+  +-- среда восстановления
+  +-- обновление и ремонт
 ```
 
-One system slot is active. The updater writes only to the inactive slot.
+Активен только один системный раздел. Обновлятор записывает исключительно в неактивный.
 
-## Update transaction
+## Транзакция обновления
 
-1. Fetch signed update metadata.
-2. Verify metadata chain, version policy, channel, target architecture, and hardware constraints.
-3. Download payloads into a resumable staging area.
-4. Verify cryptographic hashes/signatures before installation.
-5. Install the complete new system into the inactive slot/generation.
-6. Run offline consistency checks.
-7. Write new boot metadata atomically, marking the new slot as **pending**.
-8. Reboot into the pending slot.
-9. Early userspace and system services run health checks.
-10. Mark the boot **successful** only after the required health gate passes.
-11. If the new slot fails repeatedly or never confirms success, the boot manager returns to the previous known-good slot automatically.
+1. Получить подписанные метаданные.
+2. Проверить цепочку доверия, версию, канал, архитектуру и ограничения оборудования.
+3. Загрузить файлы в возобновляемую промежуточную область.
+4. Проверить хэши и подписи.
+5. Установить полную новую систему в неактивный раздел или поколение.
+6. Выполнить автономные проверки целостности.
+7. Атомарно записать загрузочные метаданные и отметить новую систему как ожидающую подтверждения.
+8. Перезагрузиться в неё.
+9. Выполнить ранние проверки состояния.
+10. Пометить загрузку успешной только после прохождения требуемых проверок.
+11. При повторных сбоях автоматически вернуть предыдущую исправную систему.
 
-Power loss before step 7 leaves the old system active. Power loss after step 7 still leaves the previous slot intact for rollback.
+Сбой питания до шага 7 оставляет старую систему активной. После шага 7 предыдущий раздел всё равно остаётся доступным для отката.
 
-## Trust model
+## Модель доверия
 
-Update trust is separate from transport security. HTTPS protects transport, but every update is also authenticated by PhoenixOS update-signing keys.
+Доверие к обновлению отделено от защиты транспорта. HTTPS защищает передачу, но каждый выпуск дополнительно проверяется ключами подписи PhoenixOS.
 
-The metadata design must allow:
+Схема метаданных должна поддерживать:
 
-- offline root key;
-- delegated online signing keys;
-- expiry;
-- key rotation;
-- revocation/recovery;
-- rollback/freeze protection;
-- channel-specific signing policy.
+- автономный корневой ключ;
+- делегированные рабочие ключи;
+- срок действия;
+- ротацию;
+- отзыв и восстановление;
+- защиту от отката и замораживания старых метаданных;
+- отдельную политику каналов.
 
-The exact metadata format will be selected/design-reviewed before implementation; novel cryptography is out of scope.
+Формат выбирается после отдельного проектного рассмотрения. Новая самописная криптография не используется.
 
-## Components updated
+## Обновляемые компоненты
 
-The updater must model compatibility explicitly for:
+Явные правила совместимости требуются для:
 
-- boot manager;
-- kernel;
-- base userspace;
-- core libraries;
-- system drivers;
-- firmware-facing support data;
-- bundled applications;
-- SDK/runtime packages;
-- configuration/data migrations.
+- менеджера загрузки;
+- ядра;
+- базового пользовательского пространства;
+- основных библиотек;
+- системных драйверов;
+- данных поддержки оборудования и UEFI;
+- встроенных приложений;
+- комплектов разработки и сред выполнения;
+- миграций настроек и данных.
 
-A system update may refuse activation when a required compatibility contract cannot be satisfied.
+Активация может быть запрещена, если требуемый контракт совместимости не выполняется.
 
-## Applications
+## Приложения
 
-Ordinary applications do not need a whole-system A/B slot. The package manager can update them transactionally using versioned package objects and an atomic active-version switch.
+Обычным приложениям не нужен отдельный системный A/B-раздел.
 
-Shared trust/signature infrastructure should be reused for both system and application packages.
+Менеджер пакетов может использовать версионируемые объекты и атомарное переключение активной версии.
 
-## Channels
+Инфраструктура доверия и подписей должна быть общей для системы и приложений.
 
-Planned channels:
+## Каналы
 
-- `stable`
-- `beta`
-- `development`
+Планируются:
 
-Moving to a less stable channel is allowed explicitly. Moving back to a stable channel must validate data/config compatibility rather than blindly downgrading.
+- `stable` — стабильный;
+- `beta` — предварительный;
+- `development` — разработческий.
 
-## Staged rollouts
+Переход на менее стабильный канал выполняется явно. Возврат на стабильный канал сначала проверяет совместимость данных и настроек.
 
-Metadata may define a rollout percentage or cohort policy so a defective release can be stopped before reaching every installation.
+## Поэтапное распространение
 
-The client must never silently change channels to participate in a rollout.
+Метаданные могут задавать процент или группу установок, чтобы дефектный выпуск можно было остановить до распространения на все системы.
 
-## Delta updates
+Клиент не должен скрытно менять выбранный пользователем канал.
 
-Delta payloads are an optimization, not a correctness requirement.
+## Дельта-обновления
 
-The first implementation may ship full system payloads. Delta updates are introduced only after full-image/generation updates, rollback, and recovery are proven reliable.
+Дельта — оптимизация, а не условие корректности.
 
-## Recovery
+Сначала реализуются и доказываются полные обновления, откат и восстановление. Только после этого добавляются дельты.
 
-Recovery must be independently bootable and able to:
+## Восстановление
 
-- inspect both system slots;
-- choose a known-good generation;
-- repair boot metadata;
-- verify installed system hashes;
-- apply an offline signed update;
-- reinstall the base system without destroying user data where possible;
-- export diagnostics.
+Независимая среда восстановления должна уметь:
 
-## Testing
+- проверять оба системных раздела;
+- выбирать исправную версию;
+- восстанавливать загрузочные метаданные;
+- проверять хэши установленной системы;
+- устанавливать подписанное автономное обновление;
+- переустанавливать базовую систему без уничтожения данных пользователя, где это возможно;
+- экспортировать диагностику.
 
-The update subsystem is not considered production-ready without automated failure injection covering:
+## Тестирование
 
-- power loss during download;
-- power loss during inactive-slot write;
-- corrupt payload;
-- bad signature;
-- expired metadata;
-- missing dependency;
-- full disk;
-- failed configuration migration;
-- kernel panic on first boot;
-- userspace health-check failure;
-- repeated failed boots;
-- rollback to previous slot;
-- interrupted rollback;
-- recovery-mode update.
+Готовность к эксплуатации требует автоматических сценариев:
 
-The release gate should eventually boot old releases, update them to the candidate release in QEMU, intentionally fail selected update phases, and verify that at least one known-good boot path always remains.
+- обрыв питания во время загрузки;
+- обрыв при записи неактивного раздела;
+- повреждённый пакет;
+- неправильная подпись;
+- просроченные метаданные;
+- отсутствующая зависимость;
+- заполненный диск;
+- ошибка миграции;
+- паника ядра на первой загрузке;
+- сбой проверки пользовательского пространства;
+- повторные неудачные загрузки;
+- откат;
+- прерывание отката;
+- обновление из среды восстановления.
+
+Будущий допуск к выпуску должен загружать старые версии в QEMU, обновлять их до кандидата, намеренно ломать выбранные стадии и подтверждать наличие хотя бы одного исправного пути загрузки.

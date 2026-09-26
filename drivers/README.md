@@ -1,5 +1,5 @@
-# Drivers
+# Драйверы
 
-Driver implementations and reusable driver support code will live here once the kernel DDK interfaces exist.
+Здесь будут находиться реализации драйверов и общий код поддержки после стабилизации интерфейсов ядра для драйверов.
 
-See `docs/drivers.md`.
+Подробности: `docs/drivers.md`.

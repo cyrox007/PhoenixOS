@@ -1,41 +1,62 @@
-# Driver Model and DDK Direction
+# Модель драйверов и комплект разработки
 
-PhoenixOS intentionally supports a small hardware set first, but the interfaces must make later driver work repeatable.
+PhoenixOS намеренно начинает с небольшого набора оборудования, но интерфейсы должны позволять предсказуемо добавлять новые драйверы.
 
-## Driver lifecycle
+## Жизненный цикл драйвера
 
-A driver has explicit phases:
+Драйвер проходит явные стадии:
 
-1. discover/match;
-2. validate resources;
-3. initialize;
-4. publish device interfaces;
-5. handle I/O/interrupts;
-6. suspend/resume;
-7. stop/remove.
+1. обнаружение и сопоставление устройства;
+2. проверка ресурсов;
+3. инициализация;
+4. публикация интерфейсов устройства;
+5. обработка ввода-вывода и прерываний;
+6. приостановка и возобновление;
+7. остановка и удаление.
 
-## Matching
+## Сопоставление устройств
 
-PCI/PCIe drivers match on class/subclass plus vendor/device IDs where appropriate. USB drivers match on class/interface and VID/PID as needed.
+Драйверы PCI/PCIe могут сопоставляться по классу, подклассу, производителю и идентификатору устройства.
 
-## Required kernel services
+USB-драйверы используют класс интерфейса и при необходимости VID/PID.
 
-The DDK will expose versioned services for MMIO/port I/O, interrupts/MSI/MSI-X, DMA mappings, timers, work queues, synchronization, logging/tracing, PCI configuration, USB transfers, power transitions, and firmware resource queries.
+## Службы ядра для драйверов
 
-Drivers must not depend on undocumented kernel internals.
+Комплект разработки драйверов должен предоставлять версионируемые интерфейсы для:
 
-## Initial supported classes
+- MMIO и портового ввода-вывода;
+- прерываний, MSI и MSI-X;
+- отображений DMA;
+- таймеров;
+- очередей работ;
+- синхронизации;
+- журналирования и трассировки;
+- настройки PCI;
+- USB-передач;
+- переходов питания;
+- чтения аппаратных ресурсов из UEFI/ACPI.
 
-- VirtIO devices for QEMU;
+Драйверы не должны зависеть от недокументированных внутренних структур ядра.
+
+## Первые классы устройств
+
+- VirtIO для QEMU;
 - NVMe;
 - AHCI;
-- USB xHCI + HID;
+- USB xHCI и HID;
 - Ethernet;
-- framebuffer/graphics fallback;
-- audio after the basic desktop path.
+- резервная графика framebuffer;
+- звук после появления базовой рабочей среды.
 
-Wi-Fi is part of the networking roadmap but follows the reusable driver/network abstractions.
+Wi-Fi входит в сетевую дорожную карту и использует общие абстракции драйверов и сети.
 
-## Documentation requirement
+## Требования к документации
 
-Each supported driver class eventually gets an architecture page, minimal reference driver, debugging guide, register/DMA safety checklist, test strategy, and hardware-enablement walkthrough.
+Каждый поддерживаемый класс устройств должен получить:
+
+- описание архитектуры;
+- минимальный эталонный драйвер;
+- руководство по отладке;
+- памятку безопасности регистров и DMA;
+- стратегию тестирования;
+- пошаговое руководство по добавлению нового оборудования.

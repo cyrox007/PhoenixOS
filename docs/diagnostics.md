@@ -1,40 +1,40 @@
-# Early Diagnostics
+# Ранняя диагностика
 
-PhoenixOS keeps its earliest diagnostics path deliberately independent from the future userspace logging stack.
+Ранний путь диагностики PhoenixOS намеренно не зависит от будущей системы журналов пользовательского пространства.
 
-## Serial console
+## Последовательный канал
 
-COM1 is the reference early-debug channel under QEMU and on compatible x86-64 hardware.
+COM1 — эталонный канал ранней отладки в QEMU и на совместимом оборудовании x86-64.
 
-The kernel keeps a normal serial console handle during boot for structured messages. Panic handling does not depend on that handle: it attempts to initialize an emergency serial writer independently so a panic can still be reported if the regular boot path has been disrupted.
+Во время загрузки ядро использует обычный дескриптор последовательной консоли для структурированных сообщений.
 
-## Current format
+Обработчик паники не зависит от этого дескриптора и пытается самостоятельно открыть аварийный вывод. Поэтому сообщение о критической ошибке можно получить даже после нарушения обычного пути загрузки.
 
-Early log lines use a compact level prefix:
+## Формат
 
 ```text
 [INFO] PhoenixOS bootstrap kernel
 [INFO] architecture: x86_64
 [INFO] firmware target: UEFI
-[INFO] memory regions: ...
+[INFO] memory: ...
 [INFO] bootstrap: OK
 ```
 
-Panics use:
+Паника:
 
 ```text
 [PANIC] ...
 ```
 
-## Future path
+## Дальнейшее развитие
 
-This early channel will later feed or coexist with:
+Ранний канал будет использоваться совместно с:
 
-- exception reports;
-- crash dumps;
-- in-memory ring buffers;
-- framebuffer panic output;
-- userspace log collection;
-- persistent diagnostic export from recovery.
+- отчётами об исключениях;
+- аварийными дампами;
+- кольцевым буфером журнала в памяти;
+- аварийным экраном framebuffer;
+- сбором журналов в пользовательском пространстве;
+- экспортом диагностики из среды восстановления.
 
-The early logger must stay allocation-free and usable before the heap, scheduler, filesystem, and userspace exist.
+Ранняя диагностика должна оставаться без выделения памяти и работать до появления кучи, планировщика, файловой системы и пользовательского пространства.

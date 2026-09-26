@@ -1,52 +1,72 @@
-# SDK and Porting Strategy
+# Комплект разработки и перенос программ
 
-PhoenixOS applications should not need to know that the kernel is written in Rust.
+Приложения PhoenixOS не должны зависеть от знания того, что ядро написано на Rust.
 
-## Stable ABI
+## Стабильный ABI
 
-The stable application boundary is C-compatible. Language SDKs wrap it.
+Стабильная граница приложений C-совместима. Языковые комплекты разработки оборачивают её.
 
-Planned SDKs/examples:
+Планируются:
 
 - C;
 - C++;
 - Rust;
 - Zig;
-- additional languages as runtimes are ported.
+- дополнительные языки после переноса их сред выполнения.
 
-## Native API themes
+## Основные интерфейсы
 
-- handles/capabilities;
-- asynchronous I/O;
-- processes/threads;
-- virtual memory;
-- filesystem;
-- sockets;
-- GUI surfaces and event loop;
-- timers;
-- shared memory;
-- package/application metadata.
+- дескрипторы и возможности;
+- асинхронный ввод-вывод;
+- процессы и потоки;
+- виртуальная память;
+- файловая система;
+- сокеты;
+- графические поверхности и цикл событий;
+- таймеры;
+- общая память;
+- метаданные пакетов и приложений.
 
-## POSIX compatibility
+## Совместимость POSIX
 
-A compatibility layer is a strategic porting tool.
+Слой совместимости — средство переноса существующего ПО.
 
-Initial priority APIs include file descriptors, open/read/write/close, directories and stat-like metadata, mmap, pthread-style threading subset, clocks/sleep, pipes, sockets, poll/select compatibility, process environment, and only as much signal behavior as useful ports require.
+Первый приоритет:
 
-The goal is practical source compatibility, not blindly reproducing every historical Unix behavior.
+- файловые дескрипторы;
+- `open/read/write/close`;
+- каталоги и сведения о файлах;
+- `mmap`;
+- необходимое подмножество потоков pthread;
+- часы и ожидание;
+- каналы;
+- сокеты;
+- совместимость `poll/select`;
+- окружение процесса;
+- сигналы только в объёме, который нужен полезным переносимым программам.
 
-## Reference projects
+Цель — практическая совместимость исходного кода, а не безусловное повторение исторического поведения Unix.
 
-The SDK is not considered complete without buildable examples:
+## Эталонные проекты
 
-1. hello-world CLI;
-2. file I/O CLI;
-3. TCP/HTTPS client;
-4. GUI hello-world;
-5. packaged GUI application;
-6. minimal device driver;
-7. simple 2D game.
+Комплект разработки не считается готовым без собираемых примеров:
 
-## Porting guide template
+1. простая консольная программа;
+2. работа с файлами;
+3. TCP/HTTPS-клиент;
+4. простое графическое приложение;
+5. упакованное графическое приложение;
+6. минимальный драйвер;
+7. простая 2D-игра.
 
-Each substantial port should document upstream version/commit, build-system changes, missing APIs, PhoenixOS patches, runtime assumptions, test coverage, and upgrade procedure.
+## Шаблон документации переноса
+
+Каждый значимый перенос должен фиксировать:
+
+- исходную версию или коммит внешнего проекта;
+- изменения системы сборки;
+- обнаруженные отсутствующие интерфейсы;
+- патчи PhoenixOS;
+- предположения среды выполнения;
+- проверочное покрытие;
+- процедуру обновления перенесённой версии.

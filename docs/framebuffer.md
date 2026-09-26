@@ -1,45 +1,43 @@
-# Early Framebuffer Output
+# Ранний графический вывод
 
-PhoenixOS uses the UEFI-provided framebuffer as the first graphical output path.
+PhoenixOS использует framebuffer, предоставленный UEFI, как первый графический путь.
 
-The early framebuffer layer is intentionally small. It is not the future compositor or graphics driver API.
+Этот слой намеренно небольшой. Он не является будущим компоновщиком окон или полноценным интерфейсом графических драйверов.
 
-## Responsibilities
+## Задачи слоя
 
-- validate framebuffer geometry;
-- handle RGB, BGR, and simple grayscale layouts;
-- perform bounds-checked pixel writes;
-- render an early PhoenixOS boot banner;
-- provide deterministic host-side tests for pixel addressing and channel order;
-- fail cleanly when a firmware pixel format is not yet supported.
+- проверять размеры и шаг строк framebuffer;
+- поддерживать RGB, BGR и простую шкалу серого;
+- выполнять записи пикселей с проверкой границ;
+- рисовать ранний экран PhoenixOS;
+- иметь воспроизводимые модульные тесты адресации пикселей и порядка каналов;
+- корректно отказываться от неизвестного формата пикселя.
 
-## Why keep it separate
+## Почему слой отдельный
 
-The kernel should not spread raw framebuffer offsets and pixel-format branching across unrelated subsystems.
-
-This module creates an early boundary:
+Необработанные смещения framebuffer и ветвления по формату пикселя не должны распространяться по ядру.
 
 ```text
-bootloader framebuffer
+framebuffer загрузчика
         |
 phoenix-framebuffer
         |
-boot diagnostics today
+ранняя диагностика
         |
-future early console / panic screen
+будущая ранняя консоль / аварийный экран
 ```
 
-The desktop compositor and accelerated graphics stack will later use a separate graphics abstraction.
+Настольная среда и аппаратно ускоренная графика позже используют отдельную графическую абстракцию.
 
-## Font
+## Шрифт
 
-The boot banner uses the no-std Noto Sans Mono bitmap crate with only the required ASCII/regular/16px feature set enabled.
+Ранний экран использует `no_std`-библиотеку Noto Sans Mono Bitmap только с необходимым набором ASCII, обычным начертанием и размером 16 пикселей.
 
-Third-party font/library licensing will be tracked as part of release packaging.
+Лицензии сторонних шрифтов и библиотек должны отслеживаться при подготовке выпусков.
 
-## Next steps
+## Следующие шаги
 
-- add an early graphical panic screen;
-- add a small framebuffer console for diagnostics;
-- exercise multiple framebuffer formats in tests;
-- later hand display ownership to the real graphics stack rather than keeping firmware framebuffer access globally available.
+- ранний графический экран критической ошибки;
+- небольшая графическая диагностическая консоль;
+- тесты нескольких форматов framebuffer;
+- передача владения дисплеем полноценному графическому стеку после его появления.

@@ -1,76 +1,80 @@
-# Architecture Decisions
+# Архитектурные решения
 
-This file records decisions that should not silently drift.
+Этот документ фиксирует решения, которые не должны меняться незаметно.
 
-## D-001: x86-64 + UEFI first
+## D-001: сначала x86-64 + UEFI
 
-**Status:** accepted.
+**Состояние:** принято.
 
-The first supported architecture is x86-64 and the first firmware path is UEFI. Legacy BIOS is not a release requirement.
+Первая архитектура — x86-64, первый способ загрузки — UEFI. Поддержка устаревшего BIOS не является требованием выпуска 1.0.
 
-## D-002: Rust kernel, language-neutral public ABI
+## D-002: ядро на Rust, публичный ABI не зависит от языка
 
-**Status:** accepted.
+**Состояние:** принято.
 
-The kernel and new first-party low-level components prefer Rust. Small assembly sections and unsafe Rust are allowed where the hardware boundary requires them.
+Ядро и новые низкоуровневые компоненты преимущественно пишутся на Rust. Небольшие участки ассемблера и `unsafe Rust` допустимы там, где это требует оборудование.
 
-Applications are not required to use Rust. Public OS ABI surfaces must remain C-compatible and language-neutral.
+Приложения не обязаны использовать Rust. Публичные интерфейсы ОС должны оставаться C-совместимыми и нейтральными к языку.
 
-## D-003: modular hybrid kernel
+## D-003: модульное гибридное ядро
 
-**Status:** accepted.
+**Состояние:** принято.
 
-PhoenixOS is not committed to a pure microkernel. Performance-sensitive primitives may remain in kernel space while drivers/services use narrow, versioned interfaces that can later support stronger isolation.
+PhoenixOS не привязывается к чистому микроядру. Чувствительные к производительности механизмы могут оставаться внутри ядра, а драйверы и службы должны использовать узкие версионируемые интерфейсы, допускающие усиление изоляции в будущем.
 
-## D-004: controlled hardware matrix before broad compatibility
+## D-004: ограниченный перечень оборудования перед широкой совместимостью
 
-**Status:** accepted.
+**Состояние:** принято.
 
-Early releases guarantee QEMU plus a small list of real machines/controllers. The project must provide DDK documentation so additional hardware can be enabled without redesigning the kernel.
+Ранние версии гарантируют работу в QEMU и на небольшом числе явно указанных физических конфигураций. Дополнительное оборудование подключается через документированную модель драйверов без переработки ядра.
 
-## D-005: networking is a core platform feature
+## D-005: сеть — базовая функция платформы
 
-**Status:** accepted.
+**Состояние:** принято.
 
-Networking is required for the desktop target and browser. IPv4 and IPv6, sockets, DNS, automatic address configuration, TCP/UDP, TLS, HTTP(S), proxy support, and certificate management are roadmap requirements. Ethernet is enabled before Wi-Fi; Wi-Fi enters through the same device/network abstractions.
+Для рабочего стола и браузера обязательны IPv4, IPv6, сокеты, DNS, автоматическая настройка адресов, TCP/UDP, TLS, HTTP(S), прокси и управление сертификатами.
 
-## D-006: port a browser engine
+Сначала реализуется проводная сеть, затем Wi-Fi через те же абстракции устройств и сети.
 
-**Status:** accepted.
+## D-006: браузерный движок переносится
 
-PhoenixOS will not build a modern HTML/CSS/JavaScript engine from scratch. The browser shell is first-party, while the standards engine is ported behind a platform abstraction. Servo is the primary research/porting candidate because its Rust implementation and embedding direction align well with PhoenixOS, but the browser/platform boundary must not make the OS permanently dependent on one engine.
+**Состояние:** принято.
 
-## D-007: native API first, POSIX compatibility second
+PhoenixOS не разрабатывает с нуля современный HTML/CSS/JavaScript-движок. Оболочка браузера является частью PhoenixOS, а движок стандартов подключается через отдельную платформенную границу.
 
-**Status:** accepted.
+Первый кандидат для исследования и переноса — Servo. Архитектура не должна делать ОС навсегда зависимой от одного движка.
 
-New PhoenixOS software should use the native asynchronous and handle-based API. POSIX compatibility is implemented as a portability layer for existing software.
+## D-007: собственный интерфейс первым, POSIX — слоем совместимости
 
-## D-008: documentation and reference code are release artifacts
+**Состояние:** принято.
 
-**Status:** accepted.
+Новое ПО PhoenixOS использует собственные асинхронные интерфейсы и дескрипторы. Совместимость POSIX предназначена прежде всего для переноса существующего ПО.
 
-Every stable public subsystem requires documentation plus at least one buildable reference example. Driver, CLI, GUI, networking, and packaging examples are part of the SDK deliverable.
+## D-008: документация и эталонный код входят в результат
 
-## D-009: OS updates are signed and transactional
+**Состояние:** принято.
 
-**Status:** accepted.
+Каждая стабильная публичная подсистема должна иметь документацию и хотя бы один собираемый пример. Примеры драйвера, консольной программы, графического приложения, сетевой программы и пакета входят в комплект разработки.
 
-System updates must not modify the currently booted system in a way that can leave it half-updated after a power loss or failed reboot.
+## D-009: системные обновления подписанные и транзакционные
 
-PhoenixOS will use an A/B-style or equivalent generation-based system-update model with:
+**Состояние:** принято.
 
-- cryptographically signed metadata and payloads;
-- download verification before activation;
-- installation into an inactive system generation/slot;
-- atomic activation for the next boot;
-- boot-success confirmation;
-- automatic rollback after failed boot/health checks;
-- recovery support independent of the active system;
-- separate release channels and staged rollout metadata;
-- resumable downloads;
-- update history and user-visible rollback controls.
+Обновление не должно изменять текущую рабочую систему способом, который оставит её наполовину обновлённой после сбоя питания или неудачной перезагрузки.
 
-Application/package updates may use finer-grained transactional package operations but must use the same trust/signature infrastructure.
+Используется схема A/B либо эквивалентная схема поколений с:
 
-Bootloader, kernel, firmware-facing components, base userspace, drivers, applications, and configuration migrations must each have explicit compatibility/version rules.
+- криптографически подписанными метаданными и полезной нагрузкой;
+- проверкой загрузки до активации;
+- установкой в неактивное поколение или раздел;
+- атомарным выбором новой версии для следующей загрузки;
+- подтверждением успешной загрузки;
+- автоматическим откатом после неудачных загрузок или проверок состояния;
+- независимой средой восстановления;
+- каналами выпуска и поэтапным распространением;
+- возобновляемыми загрузками;
+- историей обновлений и понятным пользователю откатом.
+
+Обновления приложений могут быть более мелкими, но используют ту же инфраструктуру доверия и подписей.
+
+Загрузчик, ядро, базовое пользовательское пространство, драйверы, приложения и миграции настроек должны иметь явные правила совместимости версий.

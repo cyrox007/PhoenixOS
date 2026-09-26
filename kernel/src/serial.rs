@@ -5,8 +5,7 @@ use uart_16550::{Config, Uart16550Tty};
 pub type Com1 = Uart16550Tty<PioBackend>;
 
 pub fn console() -> Com1 {
-    unsafe { Uart16550Tty::new_port(0x3F8, Config::default()) }
-        .expect("COM1 UART must initialize")
+    unsafe { Uart16550Tty::new_port(0x3F8, Config::default()) }.expect("COM1 UART must initialize")
 }
 
 pub fn try_console() -> Option<Com1> {

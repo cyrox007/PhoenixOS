@@ -15,6 +15,7 @@ The long-term goal is a complete general-purpose desktop platform: kernel, drive
 - Hardware strategy: a deliberately small supported-hardware matrix first, with a documented DDK/porting path for additional devices
 - Networking target: IPv4 + IPv6, sockets, DHCP/SLAAC, DNS, TCP/UDP, TLS, HTTP(S), proxy support, Ethernet first and Wi-Fi through the driver framework
 - Browser target: a real standards engine port; PhoenixOS will not attempt to write HTML/CSS/JS engines from scratch
+- Update target: signed, transactional OS/application updates with rollback, recovery, channels, staged rollout, and safe interruption/reboot behavior
 
 ## Repository flow
 

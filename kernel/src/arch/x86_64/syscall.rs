@@ -576,6 +576,11 @@ phoenix_user_test_image_start:
 
 4:
     mov rax, 0x102
+    xor rsi, rsi
+    xor rdx, rdx
+    xor r10, r10
+    xor r8, r8
+    xor r9, r9
     syscall
     ud2
 phoenix_user_test_image_end:

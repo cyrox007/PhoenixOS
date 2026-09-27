@@ -263,7 +263,7 @@ impl InactivePageTable {
             return None;
         }
 
-        self.mapper().translate_addr(address)
+        unsafe { self.mapper() }.translate_addr(address)
     }
 
     /// Снимает одно пользовательское отображение и возвращает принадлежащий
@@ -280,8 +280,7 @@ impl InactivePageTable {
             return Err(InactivePageTableError::NotUserAddress);
         }
 
-        let (frame, flush) = self
-            .mapper()
+        let (frame, flush) = unsafe { self.mapper() }
             .unmap(page)
             .map_err(|_| InactivePageTableError::UnmappingFailed)?;
         flush.ignore();

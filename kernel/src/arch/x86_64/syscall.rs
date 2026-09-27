@@ -2,11 +2,12 @@ use core::arch::{global_asm, x86_64::__cpuid};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use phoenix_capability::{CapabilityError, CapabilityHandle, ObjectKind, Rights};
-use phoenix_ipc::EndpointId;
-use phoenix_process::ProcessCapabilitySet;
+use phoenix_ipc::{EndpointId, EndpointRegistry, EndpointRegistryError, IpcError, Message};
+use phoenix_process::{ProcessCapabilitySet, ProcessId};
 use phoenix_syscall_abi::{
-    IpcReceiveArguments, IpcSendArguments, NO_TRANSFERRED_CAPABILITY, PackedCapabilityHandle,
-    SYSCALL_IPC_RECEIVE, SYSCALL_IPC_SEND, SyscallRequest, SyscallReturn, SyscallStatus,
+    IpcReceiveArguments, IpcReceiveMetadata, IpcSendArguments, NO_TRANSFERRED_CAPABILITY,
+    PackedCapabilityHandle, SYSCALL_IPC_RECEIVE, SYSCALL_IPC_SEND, SyscallRequest, SyscallReturn,
+    SyscallStatus,
 };
 
 use crate::ipc_user_memory::{self, IpcUserMemoryError};
@@ -49,14 +50,21 @@ const STATUS_OPERATION_NOT_READY: u32 = 3;
 const IPC_INLINE_WORD_CAPACITY: u64 = 6;
 const ENTRY_STACK_SIZE: u64 = 64 * 1024;
 pub const PROCESS_CAPABILITY_CAPACITY: usize = 64;
+pub const ENDPOINT_REGISTRY_CAPACITY: usize = 64;
+pub const ENDPOINT_QUEUE_CAPACITY: usize = 16;
+
+pub type KernelEndpointRegistry =
+    EndpointRegistry<ENDPOINT_REGISTRY_CAPACITY, ENDPOINT_QUEUE_CAPACITY>;
 
 static USER_SELF_TEST_RESULT: AtomicU64 = AtomicU64::new(0);
 static CURRENT_PROCESS_ADDRESS_SPACE: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_PROCESS_CAPABILITIES: AtomicUsize = AtomicUsize::new(0);
+static CURRENT_ENDPOINT_REGISTRY: AtomicUsize = AtomicUsize::new(0);
 
 pub struct CurrentProcessContextGuard {
     address_space: usize,
     capabilities: usize,
+    endpoint_registry: usize,
 }
 
 impl Drop for CurrentProcessContextGuard {
@@ -69,6 +77,12 @@ impl Drop for CurrentProcessContextGuard {
         );
         let _ = CURRENT_PROCESS_CAPABILITIES.compare_exchange(
             self.capabilities,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        let _ = CURRENT_ENDPOINT_REGISTRY.compare_exchange(
+            self.endpoint_registry,
             0,
             Ordering::AcqRel,
             Ordering::Acquire,
@@ -89,25 +103,61 @@ pub enum EndpointCapabilityError {
     WrongObjectKind,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EndpointOperationError {
+    ContextNotInstalled,
+    Registry(EndpointRegistryError),
+    Transport(IpcError),
+    UserMemory(IpcUserMemoryError),
+}
+
+impl From<EndpointRegistryError> for EndpointOperationError {
+    fn from(error: EndpointRegistryError) -> Self {
+        Self::Registry(error)
+    }
+}
+
+impl From<IpcError> for EndpointOperationError {
+    fn from(error: IpcError) -> Self {
+        Self::Transport(error)
+    }
+}
+
+impl From<IpcUserMemoryError> for EndpointOperationError {
+    fn from(error: IpcUserMemoryError) -> Self {
+        Self::UserMemory(error)
+    }
+}
+
 /// Registers the address space used by the current system-call execution context.
 ///
 /// # Safety
 ///
 /// `space` and `capabilities` must remain alive and exclusively owned until the
-/// returned guard is dropped. The early implementation is single-CPU and
-/// callers must keep interrupts disabled while user code can enter the
-/// system-call dispatcher.
+/// returned guard is dropped. `endpoint_registry` must remain alive and must
+/// not be accessed outside the dispatcher while the guard is active. The early
+/// implementation is single-CPU and callers must keep interrupts disabled while
+/// user code can enter the system-call dispatcher.
 pub unsafe fn install_current_process_context(
     space: &mut ProcessAddressSpace<PROCESS_REGION_CAPACITY>,
     capabilities: &mut ProcessCapabilitySet<PROCESS_CAPABILITY_CAPACITY>,
+    endpoint_registry: &mut KernelEndpointRegistry,
 ) -> Option<CurrentProcessContextGuard> {
     let address_space = space as *mut ProcessAddressSpace<PROCESS_REGION_CAPACITY> as usize;
     let capabilities =
         capabilities as *mut ProcessCapabilitySet<PROCESS_CAPABILITY_CAPACITY> as usize;
+    let endpoint_registry = endpoint_registry as *mut KernelEndpointRegistry as usize;
+    if CURRENT_ENDPOINT_REGISTRY
+        .compare_exchange(0, endpoint_registry, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return None;
+    }
     if CURRENT_PROCESS_CAPABILITIES
         .compare_exchange(0, capabilities, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
+        CURRENT_ENDPOINT_REGISTRY.store(0, Ordering::Release);
         return None;
     }
 
@@ -117,9 +167,11 @@ pub unsafe fn install_current_process_context(
         .map(|_| CurrentProcessContextGuard {
             address_space,
             capabilities,
+            endpoint_registry,
         })
         .or_else(|| {
             CURRENT_PROCESS_CAPABILITIES.store(0, Ordering::Release);
+            CURRENT_ENDPOINT_REGISTRY.store(0, Ordering::Release);
             None
         })
 }
@@ -135,6 +187,29 @@ fn with_current_process_address_space<T>(
     let space =
         unsafe { &mut *(address_space as *mut ProcessAddressSpace<PROCESS_REGION_CAPACITY>) };
     Some(operation(space))
+}
+
+fn with_current_endpoint_registry<T>(
+    operation: impl FnOnce(&mut KernelEndpointRegistry) -> T,
+) -> Option<T> {
+    let registry = CURRENT_ENDPOINT_REGISTRY.load(Ordering::Acquire);
+    if registry == 0 {
+        return None;
+    }
+
+    let registry = unsafe { &mut *(registry as *mut KernelEndpointRegistry) };
+    Some(operation(registry))
+}
+
+fn current_process_id() -> Option<ProcessId> {
+    let capabilities = CURRENT_PROCESS_CAPABILITIES.load(Ordering::Acquire);
+    if capabilities == 0 {
+        return None;
+    }
+
+    let capabilities =
+        unsafe { &*(capabilities as *const ProcessCapabilitySet<PROCESS_CAPABILITY_CAPACITY>) };
+    Some(capabilities.owner())
 }
 
 pub fn copy_ipc_receive_words_to_current_process(
@@ -652,21 +727,38 @@ fn dispatch_ipc_send(request: SyscallRequest) -> SyscallReturn {
         return syscall_failure(STATUS_BAD_ARGUMENTS);
     }
 
-    if matches!(
-        with_current_process_address_space(|space| {
-            ipc_user_memory::copy_send_words(space, arguments)
-        }),
-        Some(Err(_))
-    ) {
-        return syscall_failure(STATUS_BAD_ARGUMENTS);
+    if arguments.transferred_capability.is_some() {
+        return syscall_failure(STATUS_OPERATION_NOT_READY);
     }
 
-    match resolve_current_endpoint(arguments.endpoint, Rights::WRITE) {
-        Ok(_) | Err(EndpointCapabilityError::ContextNotInstalled) => {}
+    let words = match with_current_process_address_space(|space| {
+        ipc_user_memory::copy_send_words(space, arguments)
+    }) {
+        Some(Ok(words)) => words,
+        Some(Err(_)) => return syscall_failure(STATUS_BAD_ARGUMENTS),
+        None => return syscall_failure(STATUS_OPERATION_NOT_READY),
+    };
+    let endpoint_id = match resolve_current_endpoint(arguments.endpoint, Rights::WRITE) {
+        Ok(endpoint_id) => endpoint_id,
+        Err(EndpointCapabilityError::ContextNotInstalled) => {
+            return syscall_failure(STATUS_OPERATION_NOT_READY);
+        }
         Err(_) => return syscall_failure(STATUS_BAD_ARGUMENTS),
-    }
+    };
+    let Some(sender) = current_process_id() else {
+        return syscall_failure(STATUS_OPERATION_NOT_READY);
+    };
 
-    syscall_failure(STATUS_OPERATION_NOT_READY)
+    let Some(result) = with_current_endpoint_registry(|registry| {
+        let endpoint = registry.get_mut(endpoint_id)?;
+        let message = Message::new(sender, words.as_slice())?;
+        endpoint.send(message)?;
+        Ok::<_, EndpointOperationError>(message.len())
+    }) else {
+        return syscall_failure(STATUS_OPERATION_NOT_READY);
+    };
+
+    endpoint_operation_result(result)
 }
 
 fn dispatch_ipc_receive(request: SyscallRequest) -> SyscallReturn {
@@ -682,26 +774,55 @@ fn dispatch_ipc_receive(request: SyscallRequest) -> SyscallReturn {
     }
 
     if phoenix_vm::UserBuffer::for_array(words_address, word_capacity, 8, 8).is_err()
-        || phoenix_vm::UserBuffer::for_array(metadata_address, 1, 8, 8).is_err()
+        || phoenix_vm::UserBuffer::for_array(metadata_address, 3, 8, 8).is_err()
     {
         return syscall_failure(STATUS_BAD_ARGUMENTS);
     }
 
-    if matches!(
-        with_current_process_address_space(|space| {
-            ipc_user_memory::copy_receive_words(space, arguments, &[])
-        }),
-        Some(Err(_))
-    ) {
-        return syscall_failure(STATUS_BAD_ARGUMENTS);
-    }
-
-    match resolve_current_endpoint(arguments.endpoint, Rights::READ) {
-        Ok(_) | Err(EndpointCapabilityError::ContextNotInstalled) => {}
+    let endpoint_id = match resolve_current_endpoint(arguments.endpoint, Rights::READ) {
+        Ok(endpoint_id) => endpoint_id,
+        Err(EndpointCapabilityError::ContextNotInstalled) => {
+            return syscall_failure(STATUS_OPERATION_NOT_READY);
+        }
         Err(_) => return syscall_failure(STATUS_BAD_ARGUMENTS),
-    }
+    };
 
-    syscall_failure(STATUS_OPERATION_NOT_READY)
+    let Some(result) = with_current_endpoint_registry(|registry| {
+        let endpoint = registry.get_mut(endpoint_id)?;
+        let message = endpoint.peek()?;
+        let transferred_capability = message.transferred_capability().map(|handle| {
+            PackedCapabilityHandle::new(handle.slot, handle.generation)
+        });
+        let metadata = IpcReceiveMetadata::new(
+            message.sender.0,
+            message.len() as u64,
+            transferred_capability,
+        );
+        with_current_process_address_space(|space| {
+            ipc_user_memory::copy_receive_message(space, arguments, message.words(), metadata)
+        })
+        .ok_or(EndpointOperationError::ContextNotInstalled)??;
+        let received = endpoint.receive()?;
+        debug_assert_eq!(received, message);
+        Ok::<_, EndpointOperationError>(message.len())
+    }) else {
+        return syscall_failure(STATUS_OPERATION_NOT_READY);
+    };
+
+    endpoint_operation_result(result)
+}
+
+fn endpoint_operation_result(result: Result<usize, EndpointOperationError>) -> SyscallReturn {
+    match result {
+        Ok(word_count) => SyscallReturn::success(word_count as u64),
+        Err(EndpointOperationError::Transport(IpcError::QueueEmpty | IpcError::QueueFull))
+        | Err(EndpointOperationError::ContextNotInstalled) => {
+            syscall_failure(STATUS_OPERATION_NOT_READY)
+        }
+        Err(EndpointOperationError::Registry(_))
+        | Err(EndpointOperationError::Transport(IpcError::TooManyWords))
+        | Err(EndpointOperationError::UserMemory(_)) => syscall_failure(STATUS_BAD_ARGUMENTS),
+    }
 }
 
 fn ipc_send_arguments(request: SyscallRequest) -> IpcSendArguments {
@@ -725,26 +846,27 @@ fn ipc_receive_arguments(request: SyscallRequest) -> IpcReceiveArguments {
     }
 }
 
-pub fn ipc_user_memory_context_self_test(
+pub fn ipc_endpoint_operations_self_test(
     send: IpcSendArguments,
     unmapped_send: IpcSendArguments,
     denied_send: IpcSendArguments,
     receive: IpcReceiveArguments,
-    receive_words: &[u64],
     expected_endpoint: EndpointId,
 ) -> bool {
     let send_result = dispatch(SyscallRequest::ipc_send(send));
     let unmapped_result = dispatch(SyscallRequest::ipc_send(unmapped_send));
     let denied_result = dispatch(SyscallRequest::ipc_send(denied_send));
-    let receive_dispatch_result = dispatch(SyscallRequest::ipc_receive(receive));
-    let receive_result = copy_ipc_receive_words_to_current_process(receive, receive_words);
+    let receive_result = dispatch(SyscallRequest::ipc_receive(receive));
+    let empty_result = dispatch(SyscallRequest::ipc_receive(receive));
     let resolved = resolve_current_endpoint(send.endpoint, Rights::WRITE);
 
-    send_result.status.raw() == u64::from(STATUS_OPERATION_NOT_READY)
+    send_result.is_success()
+        && send_result.value == send.word_count
         && unmapped_result.status.raw() == u64::from(STATUS_BAD_ARGUMENTS)
         && denied_result.status.raw() == u64::from(STATUS_BAD_ARGUMENTS)
-        && receive_dispatch_result.status.raw() == u64::from(STATUS_OPERATION_NOT_READY)
-        && receive_result.is_ok()
+        && receive_result.is_success()
+        && receive_result.value == send.word_count
+        && empty_result.status.raw() == u64::from(STATUS_OPERATION_NOT_READY)
         && resolved == Ok(expected_endpoint)
 }
 

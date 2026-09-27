@@ -19,7 +19,7 @@ use bootloader_api::{BootInfo, entry_point};
 use core::alloc::Layout;
 use phoenix_framebuffer::draw_boot_banner;
 use phoenix_memory::{MemorySummary, SystemFrameAllocator};
-use phoenix_vm::ActivePageTable;
+use phoenix_vm::{ActivePageTable, InactivePageTable};
 use qemu::ExitCode;
 use x86_64::VirtAddr;
 use x86_64::structures::paging::{Page, PageTableFlags, Size4KiB};
@@ -64,19 +64,27 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!("physical memory: free_frames={}", frames.free_frames()),
     );
 
-    let physical_memory_offset = boot_info
-        .physical_memory_offset
-        .into_option()
-        .expect("загрузчик не передал отображение физической памяти");
+    let physical_memory_offset = VirtAddr::new(
+        boot_info
+            .physical_memory_offset
+            .into_option()
+            .expect("загрузчик не передал отображение физической памяти"),
+    );
 
-    let mut page_table =
-        unsafe { ActivePageTable::from_current(VirtAddr::new(physical_memory_offset)) };
+    let mut page_table = unsafe { ActivePageTable::from_current(physical_memory_offset) };
 
     virtual_memory_self_test(&mut page_table, &mut frames);
     serial::line(
         &mut out,
         "INFO",
         format_args!("virtual memory self-test: OK"),
+    );
+
+    inactive_page_table_self_test(physical_memory_offset, &mut frames);
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("process page table root self-test: OK"),
     );
 
     let heap_stats =
@@ -316,6 +324,35 @@ fn init_apic_timer(
         "INFO",
         format_args!("thread preemption hook self-test: OK tick={observed_tick}"),
     );
+}
+
+fn inactive_page_table_self_test(
+    physical_memory_offset: VirtAddr,
+    frames: &mut SystemFrameAllocator<SYSTEM_MEMORY_RANGE_CAPACITY>,
+) {
+    let free_before = frames.free_frames();
+
+    let root = unsafe { InactivePageTable::new(physical_memory_offset, frames) }
+        .expect("не удалось выделить корень таблиц страниц процесса");
+
+    if root.is_active() {
+        panic!("новый корень адресного пространства неожиданно стал активным");
+    }
+
+    if !root.is_empty() {
+        panic!("новый корень адресного пространства не обнулён");
+    }
+
+    if frames.free_frames() + 1 != free_before {
+        panic!("создание корня адресного пространства заняло неверное число страниц");
+    }
+
+    root.release_empty(frames)
+        .expect("не удалось освободить пустой корень адресного пространства");
+
+    if frames.free_frames() != free_before {
+        panic!("корень адресного пространства не вернул физическую страницу");
+    }
 }
 
 fn virtual_memory_self_test(

@@ -391,7 +391,9 @@ fn inactive_page_table_self_test(
         root.inherit_kernel_mappings(physical_memory_offset);
     }
 
-    if !root.user_space_is_empty() || !root.shared_kernel_mappings_match_active(physical_memory_offset) {
+    if !root.user_space_is_empty()
+        || !root.shared_kernel_mappings_match_active(physical_memory_offset)
+    {
         panic!("корень процесса неверно унаследовал отображения ядра");
     }
 

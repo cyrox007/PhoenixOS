@@ -112,10 +112,7 @@ impl<const CAPACITY: usize> CapabilityTable<CAPACITY> {
         self.len == 0
     }
 
-    pub fn insert(
-        &mut self,
-        capability: Capability,
-    ) -> Result<CapabilityHandle, CapabilityError> {
+    pub fn insert(&mut self, capability: Capability) -> Result<CapabilityHandle, CapabilityError> {
         let Some(index) = self.slots.iter().position(|slot| slot.capability.is_none()) else {
             return Err(CapabilityError::CapacityExceeded);
         };
@@ -164,10 +161,7 @@ impl<const CAPACITY: usize> CapabilityTable<CAPACITY> {
         })
     }
 
-    pub fn revoke(
-        &mut self,
-        handle: CapabilityHandle,
-    ) -> Result<Capability, CapabilityError> {
+    pub fn revoke(&mut self, handle: CapabilityHandle) -> Result<Capability, CapabilityError> {
         let index = self.index(handle)?;
         let slot = &mut self.slots[index];
 

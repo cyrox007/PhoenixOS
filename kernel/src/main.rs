@@ -112,6 +112,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!("process capability self-test: OK"),
     );
 
+    ipc_self_test();
+    serial::line(&mut out, "INFO", format_args!("ipc endpoint self-test: OK"));
+
     arch::x86_64::exceptions::smoke_test_breakpoint();
     serial::line(&mut out, "INFO", format_args!("breakpoint self-test: OK"));
 
@@ -275,6 +278,32 @@ fn process_capability_self_test() {
         || capability.kind != ObjectKind::Endpoint
     {
         panic!("переданная возможность повреждена");
+    }
+}
+
+fn ipc_self_test() {
+    use phoenix_ipc::{Endpoint, EndpointId, IpcError, Message};
+    use phoenix_process::ProcessId;
+
+    let mut endpoint = Endpoint::<2>::new(EndpointId(0x4950_435f_5445_5354));
+    let first = Message::new(ProcessId(100), &[0x11, 0x22])
+        .expect("не удалось создать первое IPC-сообщение");
+    let second =
+        Message::new(ProcessId(200), &[0x33]).expect("не удалось создать второе IPC-сообщение");
+
+    endpoint
+        .send(first)
+        .expect("не удалось отправить первое IPC-сообщение");
+    endpoint
+        .send(second)
+        .expect("не удалось отправить второе IPC-сообщение");
+
+    if !endpoint.is_full()
+        || endpoint.receive() != Ok(first)
+        || endpoint.receive() != Ok(second)
+        || endpoint.receive() != Err(IpcError::QueueEmpty)
+    {
+        panic!("кольцевая очередь IPC нарушила порядок или состояние");
     }
 }
 

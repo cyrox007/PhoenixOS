@@ -14,3 +14,4 @@ process user mapping self-test: OK
 process region mapping self-test: OK
 process cr3 switch self-test: OK
 syscall msr self-test: OK
+syscall entry self-test: OK

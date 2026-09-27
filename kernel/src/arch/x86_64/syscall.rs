@@ -878,10 +878,6 @@ fn dispatch_ipc_send(request: SyscallRequest) -> SyscallReturn {
         return syscall_failure(STATUS_BAD_ARGUMENTS);
     }
 
-    if arguments.transferred_capability.is_some() {
-        return syscall_failure(STATUS_OPERATION_NOT_READY);
-    }
-
     let words = match with_current_process_address_space(|space| {
         ipc_user_memory::copy_send_words(space, arguments)
     }) {
@@ -902,9 +898,40 @@ fn dispatch_ipc_send(request: SyscallRequest) -> SyscallReturn {
 
     let Some(result) = with_current_endpoint_registry(|registry| {
         let endpoint = registry.get_mut(endpoint_id)?;
-        let message = Message::new(sender, words.as_slice())?;
-        endpoint.send(message)?;
-        Ok::<_, EndpointOperationError>(message.len())
+        let Some(packed_capability) = arguments.transferred_capability else {
+            let message = Message::new(sender, words.as_slice())?;
+            endpoint.send(message)?;
+            return Ok::<_, EndpointOperationError>(message.len());
+        };
+
+        let receiver = endpoint
+            .owner()
+            .ok_or(EndpointOperationError::MissingEndpointOwner)?;
+        if receiver == sender {
+            return Err(EndpointOperationError::SameProcessTransfer);
+        }
+
+        let transfer_handle = CapabilityHandle {
+            slot: packed_capability.slot(),
+            generation: packed_capability.generation(),
+        };
+        let transfer = with_current_process_capabilities(|source| {
+            with_process_capability_registry(|processes| {
+                let target = processes.get_mut(receiver)?;
+                send_with_capability(
+                    endpoint,
+                    source,
+                    target,
+                    words.as_slice(),
+                    transfer_handle,
+                )?;
+                Ok::<_, EndpointOperationError>(words.len())
+            })
+            .ok_or(EndpointOperationError::ContextNotInstalled)?
+        })
+        .ok_or(EndpointOperationError::ContextNotInstalled)?;
+
+        transfer
     }) else {
         return syscall_failure(STATUS_OPERATION_NOT_READY);
     };
@@ -967,11 +994,20 @@ fn endpoint_operation_result(result: Result<usize, EndpointOperationError>) -> S
     match result {
         Ok(word_count) => SyscallReturn::success(word_count as u64),
         Err(EndpointOperationError::Transport(IpcError::QueueEmpty | IpcError::QueueFull))
+        | Err(EndpointOperationError::Transfer(IpcSendError::Transport(IpcError::QueueFull)))
+        | Err(EndpointOperationError::Transfer(IpcSendError::Capability(
+            CapabilityError::CapacityExceeded,
+        )))
+        | Err(EndpointOperationError::ProcessRegistry(ProcessCapabilityRegistryError::NotFound))
+        | Err(EndpointOperationError::MissingEndpointOwner)
         | Err(EndpointOperationError::ContextNotInstalled) => {
             syscall_failure(STATUS_OPERATION_NOT_READY)
         }
         Err(EndpointOperationError::Registry(_))
-        | Err(EndpointOperationError::Transport(IpcError::TooManyWords))
+        | Err(EndpointOperationError::ProcessRegistry(_))
+        | Err(EndpointOperationError::Transfer(_))
+        | Err(EndpointOperationError::SameProcessTransfer)
+        | Err(EndpointOperationError::Transport(IpcError::TooManyWords | IpcError::QueueEmpty))
         | Err(EndpointOperationError::UserMemory(_)) => syscall_failure(STATUS_BAD_ARGUMENTS),
     }
 }
@@ -995,6 +1031,19 @@ fn ipc_receive_arguments(request: SyscallRequest) -> IpcReceiveArguments {
         metadata_address: request.arguments[3],
         flags: request.arguments[4],
     }
+}
+
+pub fn ipc_capability_transfer_self_test(
+    send: IpcSendArguments,
+    receive: IpcReceiveArguments,
+) -> bool {
+    let send_result = dispatch(SyscallRequest::ipc_send(send));
+    let receive_result = dispatch(SyscallRequest::ipc_receive(receive));
+
+    send_result.is_success()
+        && send_result.value == send.word_count
+        && receive_result.is_success()
+        && receive_result.value == send.word_count
 }
 
 pub fn ipc_endpoint_operations_self_test(

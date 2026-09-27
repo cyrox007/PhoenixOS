@@ -188,9 +188,7 @@ pub fn prepare_kernel_timer_trampoline_frame(
     prepare_kernel_timer_frame_inner(stack, instruction_pointer, general_registers, 0)
 }
 
-pub fn prepared_kernel_timer_frame_registers(
-    frame_address: u64,
-) -> apic::TimerGeneralRegisters {
+pub fn prepared_kernel_timer_frame_registers(frame_address: u64) -> apic::TimerGeneralRegisters {
     let frame = unsafe { &*(frame_address as *const PreparedKernelTimerFrame) };
     frame.general_registers
 }

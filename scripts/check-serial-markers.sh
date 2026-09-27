@@ -19,7 +19,7 @@ missing=0
 while IFS= read -r marker || [[ -n "$marker" ]]; do
   marker="${marker%$'\r'}"
 
-  if [[ -z "$marker" || "$marker" == #* ]]; then
+  if [[ -z "$marker" || "${marker:0:1}" == "#" ]]; then
     continue
   fi
 

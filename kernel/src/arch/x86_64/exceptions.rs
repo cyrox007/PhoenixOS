@@ -132,6 +132,27 @@ pub fn smoke_test_breakpoint() {
     interrupts::int3();
 }
 
+pub fn prepare_kernel_timer_frame(
+    stack: &mut [u8],
+    instruction_pointer: u64,
+) -> Option<u64> {
+    let frame_size = size_of::<PreparedKernelTimerFrame>();
+    let base = stack.as_mut_ptr() as usize;
+    let end = base.checked_add(stack.len())?;
+    let aligned_end = (end & !0xf).checked_sub(8)?;
+    let frame_address = aligned_end.checked_sub(frame_size)?;
+
+    if frame_address < base {
+        return None;
+    }
+
+    let frame = frame_address as *mut PreparedKernelTimerFrame;
+    unsafe {
+        frame.write(PreparedKernelTimerFrame::new(instruction_pointer));
+    }
+    Some(frame_address as u64)
+}
+
 pub fn prepared_kernel_timer_frame_self_test() -> bool {
     const TEST_INSTRUCTION_POINTER: u64 = 0xffff_8000_1234_5678;
 

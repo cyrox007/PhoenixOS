@@ -21,3 +21,4 @@ syscall user selectors self-test: OK
 syscall entry self-test: OK
 syscall entry stack self-test: OK
 syscall return context self-test: OK
+user mode sysret self-test: OK

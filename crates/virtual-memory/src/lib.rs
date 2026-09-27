@@ -3,8 +3,8 @@
 use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::mapper::{MapToError, UnmapError};
 use x86_64::structures::paging::{
-    FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB,
-    Translate,
+    FrameAllocator, FrameDeallocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags,
+    PhysFrame, Size4KiB, Translate,
 };
 use x86_64::{PhysAddr, VirtAddr};
 
@@ -112,6 +112,89 @@ impl ActivePageTable {
 
     pub fn translate_addr(&self, address: VirtAddr) -> Option<PhysAddr> {
         self.mapper.translate_addr(address)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InactivePageTableError {
+    NoPhysicalFrame,
+    NotEmpty,
+}
+
+/// Отдельный неактивный корень таблиц страниц.
+///
+/// На текущем этапе объект владеет только физической страницей P4. Он не
+/// активируется автоматически и не наследует отображения ядра. Это позволяет
+/// безопасно проверить создание отдельного корня до фиксации постоянной схемы
+/// виртуальных адресов процессов.
+pub struct InactivePageTable {
+    root_frame: PhysFrame<Size4KiB>,
+    root_table: *mut PageTable,
+}
+
+impl InactivePageTable {
+    /// Выделяет и обнуляет отдельную таблицу P4.
+    ///
+    /// # Безопасность
+    ///
+    /// `physical_memory_offset` должен указывать на действующее линейное
+    /// отображение всей физической памяти, доступное текущему ядру.
+    pub unsafe fn new<A>(
+        physical_memory_offset: VirtAddr,
+        allocator: &mut A,
+    ) -> Result<Self, InactivePageTableError>
+    where
+        A: FrameAllocator<Size4KiB>,
+    {
+        let root_frame = allocator
+            .allocate_frame()
+            .ok_or(InactivePageTableError::NoPhysicalFrame)?;
+
+        let virtual_address = physical_memory_offset + root_frame.start_address().as_u64();
+        let root_table = virtual_address.as_mut_ptr::<PageTable>();
+
+        unsafe {
+            root_table.write(PageTable::new());
+        }
+
+        Ok(Self {
+            root_frame,
+            root_table,
+        })
+    }
+
+    pub fn root_frame(&self) -> PhysFrame<Size4KiB> {
+        self.root_frame
+    }
+
+    pub fn is_active(&self) -> bool {
+        let (active, _) = Cr3::read();
+        active == self.root_frame
+    }
+
+    pub fn is_empty(&self) -> bool {
+        let table = unsafe { &*self.root_table };
+
+        (0..512).all(|index| table[index].is_unused())
+    }
+
+    /// Возвращает физическую страницу пустого корня распределителю.
+    ///
+    /// Непустой корень освобождать этим методом нельзя: сначала должны быть
+    /// уничтожены его дочерние таблицы и отображения.
+    pub fn release_empty<A>(self, allocator: &mut A) -> Result<(), InactivePageTableError>
+    where
+        A: FrameDeallocator<Size4KiB>,
+    {
+        if !self.is_empty() {
+            return Err(InactivePageTableError::NotEmpty);
+        }
+
+        unsafe {
+            allocator.deallocate_frame(self.root_frame);
+        }
+
+        Ok(())
     }
 }
 

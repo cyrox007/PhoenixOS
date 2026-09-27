@@ -42,3 +42,4 @@ ipc syscall dispatch self-test: OK
 ipc syscall memory context self-test: OK
 ipc capability endpoint self-test: OK
 ipc endpoint syscall operations self-test: OK
+ipc capability transfer self-test: OK

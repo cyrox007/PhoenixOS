@@ -7,6 +7,8 @@ use x86_64::structures::paging::{
 };
 use x86_64::{PhysAddr, VirtAddr};
 
+pub const PROCESS_REGION_CAPACITY: usize = 64;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessAddressSpaceError {
     Region(RegionError),

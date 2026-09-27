@@ -32,7 +32,7 @@ pub struct ProcessAddressSpace<const CAPACITY: usize> {
 }
 
 impl<const CAPACITY: usize> ProcessAddressSpace<CAPACITY> {
-    /// Создаёт отдельный корень процесса и наследует общую верхнюю половину ядра.
+    /// Создаёт отдельный корень процесса и наследует системные P4-отображения вне пользовательского окна.
     ///
     /// # Безопасность
     ///
@@ -48,7 +48,7 @@ impl<const CAPACITY: usize> ProcessAddressSpace<CAPACITY> {
     {
         let mut page_table = unsafe { InactivePageTable::new(physical_memory_offset, allocator)? };
         unsafe {
-            page_table.inherit_kernel_half(physical_memory_offset);
+            page_table.inherit_kernel_mappings(physical_memory_offset);
         }
 
         Ok(Self {
@@ -156,8 +156,8 @@ impl<const CAPACITY: usize> ProcessAddressSpace<CAPACITY> {
 
     /// # Безопасность
     ///
-    /// Текущий код, стек и данные должны оставаться доступными через общую
-    /// ядерную половину этого адресного пространства до уничтожения guard.
+    /// Текущий код, стек и данные должны оставаться доступными через унаследованные
+    /// системные P4-отображения до уничтожения guard.
     pub unsafe fn activate(&self) -> AddressSpaceActivation<'_> {
         unsafe { self.page_table.activate() }
     }
@@ -166,9 +166,9 @@ impl<const CAPACITY: usize> ProcessAddressSpace<CAPACITY> {
     where
         A: FrameDeallocator<Size4KiB>,
     {
-        self.page_table.destroy_user_half(allocator)?;
+        self.page_table.destroy_user_space(allocator)?;
         unsafe {
-            self.page_table.clear_kernel_half();
+            self.page_table.clear_shared_kernel_mappings();
         }
         self.page_table.release_empty(allocator)?;
         Ok(())

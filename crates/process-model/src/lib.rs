@@ -1,5 +1,7 @@
 #![no_std]
 
+use phoenix_capability::{Capability, CapabilityError, CapabilityHandle, CapabilityTable, Rights};
+
 pub const PAGE_SIZE: u64 = 4096;
 
 const LOWER_CANONICAL_MAX: u64 = 0x0000_7fff_ffff_ffff;
@@ -208,6 +210,68 @@ impl<const CAPACITY: usize> AddressSpace<CAPACITY> {
             .flatten()
             .copied()
             .find(|region| region.contains(address))
+    }
+}
+
+pub struct ProcessCapabilitySet<const CAPACITY: usize> {
+    owner: ProcessId,
+    table: CapabilityTable<CAPACITY>,
+}
+
+impl<const CAPACITY: usize> ProcessCapabilitySet<CAPACITY> {
+    pub const fn new(owner: ProcessId) -> Self {
+        Self {
+            owner,
+            table: CapabilityTable::new(),
+        }
+    }
+
+    pub const fn owner(&self) -> ProcessId {
+        self.owner
+    }
+
+    pub const fn len(&self) -> usize {
+        self.table.len()
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.table.is_empty()
+    }
+
+    pub fn insert(&mut self, capability: Capability) -> Result<CapabilityHandle, CapabilityError> {
+        self.table.insert(capability)
+    }
+
+    pub fn get(&self, handle: CapabilityHandle) -> Result<Capability, CapabilityError> {
+        self.table.get(handle)
+    }
+
+    pub fn require(
+        &self,
+        handle: CapabilityHandle,
+        rights: Rights,
+    ) -> Result<Capability, CapabilityError> {
+        self.table.require(handle, rights)
+    }
+
+    pub fn derive(
+        &mut self,
+        handle: CapabilityHandle,
+        rights: Rights,
+    ) -> Result<CapabilityHandle, CapabilityError> {
+        self.table.derive(handle, rights)
+    }
+
+    pub fn revoke(&mut self, handle: CapabilityHandle) -> Result<Capability, CapabilityError> {
+        self.table.revoke(handle)
+    }
+
+    pub fn transfer_to<const TARGET_CAPACITY: usize>(
+        &mut self,
+        target: &mut ProcessCapabilitySet<TARGET_CAPACITY>,
+        handle: CapabilityHandle,
+    ) -> Result<CapabilityHandle, CapabilityError> {
+        self.table.transfer_to(&mut target.table, handle)
     }
 }
 
@@ -460,5 +524,43 @@ mod tests {
         table.create().unwrap();
 
         assert_eq!(table.create(), Err(ProcessError::CapacityExceeded));
+    }
+
+    #[test]
+    fn process_capabilities_keep_owner_and_rights() {
+        let mut set = ProcessCapabilitySet::<2>::new(ProcessId(7));
+        let handle = set
+            .insert(Capability {
+                object: phoenix_capability::ObjectId(11),
+                kind: phoenix_capability::ObjectKind::Endpoint,
+                rights: Rights::READ.union(Rights::DUPLICATE),
+            })
+            .unwrap();
+
+        assert_eq!(set.owner(), ProcessId(7));
+        assert_eq!(set.require(handle, Rights::READ).unwrap().object.0, 11);
+        assert_eq!(
+            set.require(handle, Rights::WRITE),
+            Err(CapabilityError::MissingRight)
+        );
+    }
+
+    #[test]
+    fn process_capability_transfer_moves_the_handle() {
+        let mut source = ProcessCapabilitySet::<1>::new(ProcessId(1));
+        let mut target = ProcessCapabilitySet::<1>::new(ProcessId(2));
+        let handle = source
+            .insert(Capability {
+                object: phoenix_capability::ObjectId(90),
+                kind: phoenix_capability::ObjectKind::Endpoint,
+                rights: Rights::READ.union(Rights::TRANSFER),
+            })
+            .unwrap();
+
+        let received = source.transfer_to(&mut target, handle).unwrap();
+
+        assert!(source.is_empty());
+        assert_eq!(source.get(handle), Err(CapabilityError::InvalidHandle));
+        assert_eq!(target.get(received).unwrap().object.0, 90);
     }
 }

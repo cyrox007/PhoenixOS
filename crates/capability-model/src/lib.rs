@@ -190,6 +190,32 @@ impl<const CAPACITY: usize> CapabilityTable<CAPACITY> {
         self.revoke(handle)
     }
 
+    pub fn transfer_to<const TARGET_CAPACITY: usize>(
+        &mut self,
+        target: &mut CapabilityTable<TARGET_CAPACITY>,
+        handle: CapabilityHandle,
+    ) -> Result<CapabilityHandle, CapabilityError> {
+        let capability = self.require(handle, Rights::TRANSFER)?;
+        let source_index = self.index(handle)?;
+        let source_generation = self.slots[source_index].generation;
+
+        if source_generation == u32::MAX {
+            return Err(CapabilityError::GenerationExhausted);
+        }
+
+        if target.len >= TARGET_CAPACITY {
+            return Err(CapabilityError::CapacityExceeded);
+        }
+
+        let target_handle = target.insert(capability)?;
+        let source_slot = &mut self.slots[source_index];
+        source_slot.capability = None;
+        source_slot.generation = source_generation + 1;
+        self.len -= 1;
+
+        Ok(target_handle)
+    }
+
     fn slot(&self, handle: CapabilityHandle) -> Result<&Slot, CapabilityError> {
         let index = self.index(handle)?;
         let slot = &self.slots[index];
@@ -305,5 +331,35 @@ mod tests {
             table.insert(capability(2)),
             Err(CapabilityError::CapacityExceeded)
         );
+    }
+
+    #[test]
+    fn transfer_between_tables_is_atomic() {
+        let mut source = CapabilityTable::<1>::new();
+        let mut target = CapabilityTable::<1>::new();
+        let source_handle = source.insert(capability(41)).unwrap();
+
+        let target_handle = source.transfer_to(&mut target, source_handle).unwrap();
+
+        assert!(source.is_empty());
+        assert_eq!(
+            source.get(source_handle),
+            Err(CapabilityError::InvalidHandle)
+        );
+        assert_eq!(target.get(target_handle).unwrap().object, ObjectId(41));
+    }
+
+    #[test]
+    fn failed_transfer_keeps_source_handle_valid() {
+        let mut source = CapabilityTable::<1>::new();
+        let mut target = CapabilityTable::<1>::new();
+        let source_handle = source.insert(capability(50)).unwrap();
+        target.insert(capability(60)).unwrap();
+
+        assert_eq!(
+            source.transfer_to(&mut target, source_handle),
+            Err(CapabilityError::CapacityExceeded)
+        );
+        assert_eq!(source.get(source_handle).unwrap().object, ObjectId(50));
     }
 }

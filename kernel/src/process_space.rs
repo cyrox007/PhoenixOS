@@ -1,5 +1,7 @@
 use phoenix_process::{AddressSpace, AddressSpaceId, PAGE_SIZE, RegionError, VirtualRegion};
-use phoenix_vm::{InactivePageTable, InactivePageTableError, USER_SPACE_END_EXCLUSIVE};
+use phoenix_vm::{
+    AddressSpaceActivation, InactivePageTable, InactivePageTableError, USER_SPACE_END_EXCLUSIVE,
+};
 use x86_64::structures::paging::{
     FrameAllocator, FrameDeallocator, Page, PageTableFlags, Size4KiB,
 };
@@ -146,6 +148,18 @@ impl<const CAPACITY: usize> ProcessAddressSpace<CAPACITY> {
 
     pub fn translate_addr(&mut self, address: VirtAddr) -> Option<PhysAddr> {
         self.page_table.translate_user_addr(address)
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.page_table.is_active()
+    }
+
+    /// # Безопасность
+    ///
+    /// Текущий код, стек и данные должны оставаться доступными через общую
+    /// ядерную половину этого адресного пространства до уничтожения guard.
+    pub unsafe fn activate(&self) -> AddressSpaceActivation<'_> {
+        unsafe { self.page_table.activate() }
     }
 
     pub fn destroy<A>(mut self, allocator: &mut A) -> Result<(), ProcessAddressSpaceError>

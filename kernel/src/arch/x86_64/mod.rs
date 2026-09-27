@@ -1,8 +1,8 @@
 pub mod apic;
 pub mod context;
 pub mod exceptions;
-pub mod syscall;
 mod gdt;
+pub mod syscall;
 
 pub fn init() {
     gdt::init();

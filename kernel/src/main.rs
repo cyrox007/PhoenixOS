@@ -1704,7 +1704,7 @@ fn elf_user_execution_self_test(
 
     let free_before = frames.free_frames();
     let mut space = unsafe {
-        process_space::ProcessAddressSpace::<4>::new(
+        process_space::ProcessAddressSpace::<{ process_space::PROCESS_REGION_CAPACITY }>::new(
             AddressSpaceId(47),
             physical_memory_offset,
             frames,

@@ -1,6 +1,6 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use phoenix_scheduler::{RoundRobinScheduler, ScheduleDecision, SchedulerError, TaskId};
 
@@ -250,9 +250,14 @@ struct ExitState {
     dispatcher_context: *mut Context,
 }
 
+struct PreemptiveExitState {
+    returned: AtomicBool,
+}
+
 struct ThreadSlot {
     thread: Box<KernelThread>,
     _exit_state: Option<Box<ExitState>>,
+    preemptive_exit_state: Option<Box<PreemptiveExitState>>,
     preemptive: bool,
 }
 
@@ -316,9 +321,29 @@ impl<const CAPACITY: usize> ThreadManager<CAPACITY> {
         &mut self,
         current_frame: u64,
     ) -> Result<Option<u64>, ThreadManagerError> {
+        self.reap_finished_preemptive();
+
         if let Some(current) = self.scheduler.current() {
             let id = ThreadId(current.0);
-            self.save_interrupt_frame(id, current_frame)?;
+            let index = self
+                .find_thread(id)
+                .ok_or(ThreadManagerError::MissingThread)?;
+            let returned = self.threads[index]
+                .preemptive_exit_state
+                .as_ref()
+                .is_some_and(|state| state.returned.load(Ordering::Acquire));
+
+            if returned {
+                self.threads[index]
+                    .thread
+                    .finish()
+                    .map_err(ThreadManagerError::Thread)?;
+                self.scheduler
+                    .remove(current)
+                    .map_err(ThreadManagerError::Scheduler)?;
+            } else {
+                self.save_interrupt_frame(id, current_frame)?;
+            }
         }
 
         match self.scheduler.on_tick() {
@@ -420,6 +445,51 @@ impl<const CAPACITY: usize> ThreadManager<CAPACITY> {
         Ok(id)
     }
 
+    pub fn spawn_preemptive_returning(
+        &mut self,
+        entry: ReturningThreadEntry,
+        argument: usize,
+        quantum_ticks: u32,
+    ) -> Result<ThreadId, ThreadManagerError> {
+        self.spawn_preemptive_returning_with_stack(
+            entry,
+            argument,
+            quantum_ticks,
+            DEFAULT_STACK_SIZE,
+        )
+    }
+
+    pub fn spawn_preemptive_returning_with_stack(
+        &mut self,
+        entry: ReturningThreadEntry,
+        argument: usize,
+        quantum_ticks: u32,
+        stack_size: usize,
+    ) -> Result<ThreadId, ThreadManagerError> {
+        let id = ThreadId(self.next_id);
+        let task_id = TaskId(id.0);
+        let next_id = self
+            .next_id
+            .checked_add(1)
+            .ok_or(ThreadManagerError::IdExhausted)?;
+
+        self.scheduler
+            .add(task_id, quantum_ticks)
+            .map_err(ThreadManagerError::Scheduler)?;
+
+        let slot = match self.build_preemptive_returning_slot(id, entry, argument, stack_size) {
+            Ok(slot) => slot,
+            Err(error) => {
+                let _ = self.scheduler.remove(task_id);
+                return Err(error);
+            }
+        };
+
+        self.threads.push(slot);
+        self.next_id = next_id;
+        Ok(id)
+    }
+
     pub fn set_blocked(&mut self, id: ThreadId, blocked: bool) -> Result<(), ThreadManagerError> {
         let index = self
             .find_thread(id)
@@ -504,6 +574,7 @@ impl<const CAPACITY: usize> ThreadManager<CAPACITY> {
         Ok(ThreadSlot {
             thread,
             _exit_state: Some(exit_state),
+            preemptive_exit_state: None,
             preemptive: false,
         })
     }
@@ -523,8 +594,53 @@ impl<const CAPACITY: usize> ThreadManager<CAPACITY> {
         Ok(ThreadSlot {
             thread,
             _exit_state: None,
+            preemptive_exit_state: None,
             preemptive: true,
         })
+    }
+
+    fn build_preemptive_returning_slot(
+        &mut self,
+        id: ThreadId,
+        entry: ReturningThreadEntry,
+        argument: usize,
+        stack_size: usize,
+    ) -> Result<ThreadSlot, ThreadManagerError> {
+        let mut exit_state = Box::new(PreemptiveExitState {
+            returned: AtomicBool::new(false),
+        });
+        let exit_argument = &mut *exit_state as *mut PreemptiveExitState as usize;
+        let thread = Box::new(
+            KernelThread::new_preemptive_returning(
+                id,
+                stack_size,
+                entry,
+                argument,
+                preemptive_thread_exit,
+                exit_argument,
+            )
+            .map_err(ThreadManagerError::Thread)?,
+        );
+
+        Ok(ThreadSlot {
+            thread,
+            _exit_state: None,
+            preemptive_exit_state: Some(exit_state),
+            preemptive: true,
+        })
+    }
+
+    fn reap_finished_preemptive(&mut self) {
+        let mut index = 0;
+        while index < self.threads.len() {
+            if self.threads[index].preemptive_exit_state.is_some()
+                && self.threads[index].thread.state() == ThreadState::Finished
+            {
+                self.threads.swap_remove(index);
+            } else {
+                index += 1;
+            }
+        }
     }
 
     fn start_if_ready(&mut self, index: usize) -> Result<(), ThreadManagerError> {
@@ -595,6 +711,16 @@ impl<const CAPACITY: usize> ThreadManager<CAPACITY> {
 impl<const CAPACITY: usize> Default for ThreadManager<CAPACITY> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+extern "C" fn preemptive_thread_exit(argument: usize) -> ! {
+    let state = unsafe { &*(argument as *const PreemptiveExitState) };
+    state.returned.store(true, Ordering::Release);
+    x86_64::instructions::interrupts::enable();
+
+    loop {
+        core::hint::spin_loop();
     }
 }
 

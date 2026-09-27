@@ -44,6 +44,8 @@ static HARDWARE_PREEMPTION_FIRST_SEEN: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 static HARDWARE_PREEMPTION_SECOND_SEEN: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
+static HARDWARE_PREEMPTION_THIRD_SEEN: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 
 pub static BOOTLOADER_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
@@ -737,6 +739,11 @@ extern "C" fn preemption_test_entry() -> ! {
     }
 }
 
+extern "C" fn hardware_preemption_returning_entry(argument: usize) {
+    let seen = unsafe { &*(argument as *const core::sync::atomic::AtomicBool) };
+    seen.store(true, core::sync::atomic::Ordering::Release);
+}
+
 extern "C" fn hardware_preemption_thread_entry(argument: usize) -> ! {
     let seen = unsafe { &*(argument as *const core::sync::atomic::AtomicBool) };
     seen.store(true, core::sync::atomic::Ordering::Release);
@@ -750,18 +757,19 @@ extern "C" fn hardware_preemption_thread_entry(argument: usize) -> ! {
 fn hardware_scheduler_preemption_self_test() {
     HARDWARE_PREEMPTION_FIRST_SEEN.store(false, core::sync::atomic::Ordering::Relaxed);
     HARDWARE_PREEMPTION_SECOND_SEEN.store(false, core::sync::atomic::Ordering::Relaxed);
+    HARDWARE_PREEMPTION_THIRD_SEEN.store(false, core::sync::atomic::Ordering::Relaxed);
 
     let mut manager = thread_manager::ThreadManager::<
         { thread_manager::HARDWARE_PREEMPTION_TEST_CAPACITY },
     >::new();
 
-    manager
-        .spawn_preemptive(
-            hardware_preemption_thread_entry,
+    let returning = manager
+        .spawn_preemptive_returning(
+            hardware_preemption_returning_entry,
             &HARDWARE_PREEMPTION_FIRST_SEEN as *const _ as usize,
             1,
         )
-        .expect("не удалось создать первый аппаратно вытесняемый поток");
+        .expect("не удалось создать возвращающийся аппаратно вытесняемый поток");
     manager
         .spawn_preemptive(
             hardware_preemption_thread_entry,
@@ -769,6 +777,13 @@ fn hardware_scheduler_preemption_self_test() {
             1,
         )
         .expect("не удалось создать второй аппаратно вытесняемый поток");
+    manager
+        .spawn_preemptive(
+            hardware_preemption_thread_entry,
+            &HARDWARE_PREEMPTION_THIRD_SEEN as *const _ as usize,
+            1,
+        )
+        .expect("не удалось создать третий аппаратно вытесняемый поток");
 
     let armed = unsafe { thread_manager::arm_hardware_preemption_test(&mut manager) };
     if !armed {
@@ -785,6 +800,9 @@ fn hardware_scheduler_preemption_self_test() {
         || thread_manager::hardware_preemption_test_switches() < 4
         || !HARDWARE_PREEMPTION_FIRST_SEEN.load(core::sync::atomic::Ordering::Acquire)
         || !HARDWARE_PREEMPTION_SECOND_SEEN.load(core::sync::atomic::Ordering::Acquire)
+        || !HARDWARE_PREEMPTION_THIRD_SEEN.load(core::sync::atomic::Ordering::Acquire)
+        || manager.state(returning).is_some()
+        || manager.live_count() != 2
     {
         panic!("аппаратный round-robin потоков завершился некорректно");
     }
@@ -926,6 +944,12 @@ fn init_apic_timer(
             "kernel thread hardware round robin self-test: OK switches={}",
             thread_manager::hardware_preemption_test_switches()
         ),
+    );
+
+    serial::line(
+        out,
+        "INFO",
+        format_args!("kernel thread preemptive return self-test: OK"),
     );
 }
 

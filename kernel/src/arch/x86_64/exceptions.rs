@@ -27,8 +27,20 @@ struct PreparedKernelTimerFrame {
 
 impl PreparedKernelTimerFrame {
     fn new(instruction_pointer: u64, stack_pointer: u64) -> Self {
+        Self::with_registers(
+            instruction_pointer,
+            stack_pointer,
+            apic::TimerGeneralRegisters::EMPTY,
+        )
+    }
+
+    fn with_registers(
+        instruction_pointer: u64,
+        stack_pointer: u64,
+        general_registers: apic::TimerGeneralRegisters,
+    ) -> Self {
         Self {
-            general_registers: apic::TimerGeneralRegisters::EMPTY,
+            general_registers,
             instruction_pointer,
             code_segment: u64::from(gdt::kernel_code_selector_raw()),
             cpu_flags: 1 << 1,
@@ -132,11 +144,16 @@ pub fn smoke_test_breakpoint() {
     interrupts::int3();
 }
 
-pub fn prepare_kernel_timer_frame(stack: &mut [u8], instruction_pointer: u64) -> Option<u64> {
+fn prepare_kernel_timer_frame_inner(
+    stack: &mut [u8],
+    instruction_pointer: u64,
+    general_registers: apic::TimerGeneralRegisters,
+    entry_stack_bias: usize,
+) -> Option<u64> {
     let frame_size = size_of::<PreparedKernelTimerFrame>();
     let base = stack.as_mut_ptr() as usize;
     let end = base.checked_add(stack.len())?;
-    let entry_stack_pointer = (end & !0xf).checked_sub(8)?;
+    let entry_stack_pointer = (end & !0xf).checked_sub(entry_stack_bias)?;
     let frame_address = entry_stack_pointer.checked_sub(frame_size)?;
 
     if frame_address < base {
@@ -145,12 +162,37 @@ pub fn prepare_kernel_timer_frame(stack: &mut [u8], instruction_pointer: u64) ->
 
     let frame = frame_address as *mut PreparedKernelTimerFrame;
     unsafe {
-        frame.write(PreparedKernelTimerFrame::new(
+        frame.write(PreparedKernelTimerFrame::with_registers(
             instruction_pointer,
             entry_stack_pointer as u64,
+            general_registers,
         ));
     }
     Some(frame_address as u64)
+}
+
+pub fn prepare_kernel_timer_frame(stack: &mut [u8], instruction_pointer: u64) -> Option<u64> {
+    prepare_kernel_timer_frame_inner(
+        stack,
+        instruction_pointer,
+        apic::TimerGeneralRegisters::EMPTY,
+        8,
+    )
+}
+
+pub fn prepare_kernel_timer_trampoline_frame(
+    stack: &mut [u8],
+    instruction_pointer: u64,
+    general_registers: apic::TimerGeneralRegisters,
+) -> Option<u64> {
+    prepare_kernel_timer_frame_inner(stack, instruction_pointer, general_registers, 0)
+}
+
+pub fn prepared_kernel_timer_frame_registers(
+    frame_address: u64,
+) -> apic::TimerGeneralRegisters {
+    let frame = unsafe { &*(frame_address as *const PreparedKernelTimerFrame) };
+    frame.general_registers
 }
 
 pub fn prepared_kernel_timer_frame_words(frame_address: u64) -> (u64, u64, u64) {

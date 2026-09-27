@@ -468,6 +468,7 @@ extern "C" fn scheduled_thread_test_entry(argument: usize) {
 
 extern "C" fn preemption_test_entry() -> ! {
     PREEMPTION_TEST_ENTERED.store(true, core::sync::atomic::Ordering::Release);
+    x86_64::instructions::interrupts::enable();
     loop {
         core::hint::spin_loop();
     }

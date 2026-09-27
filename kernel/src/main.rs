@@ -388,10 +388,10 @@ fn inactive_page_table_self_test(
     }
 
     unsafe {
-        root.inherit_kernel_half(physical_memory_offset);
+        root.inherit_kernel_mappings(physical_memory_offset);
     }
 
-    if !root.user_half_is_empty() || !root.kernel_half_matches_active(physical_memory_offset) {
+    if !root.user_space_is_empty() || !root.shared_kernel_mappings_match_active(physical_memory_offset) {
         panic!("корень процесса неверно унаследовал отображения ядра");
     }
 
@@ -419,17 +419,17 @@ fn inactive_page_table_self_test(
     }
 
     let released = root
-        .destroy_user_half(frames)
+        .destroy_user_space(frames)
         .expect("не удалось уничтожить пользовательскую половину адресного пространства");
 
-    if released < 4 || !root.user_half_is_empty() {
+    if released < 4 || !root.user_space_is_empty() {
         panic!("пользовательские страницы процесса освобождены некорректно");
     }
 
     // Разделяемые ядерные записи не принадлежат процессу, поэтому очищаем их
     // перед возвратом самой страницы P4 распределителю.
     unsafe {
-        root.clear_kernel_half();
+        root.clear_shared_kernel_mappings();
     }
 
     root.release_empty(frames)
@@ -504,7 +504,7 @@ fn process_cr3_switch_self_test(
 ) {
     use phoenix_process::{AddressSpaceId, MemoryPermissions, RegionKind, VirtualRegion};
 
-    let kernel_code = process_cr3_switch_self_test as usize as u64;
+    let kernel_code = process_cr3_switch_self_test as *const () as usize as u64;
     let kernel_stack: u64;
     unsafe {
         core::arch::asm!(
@@ -518,7 +518,7 @@ fn process_cr3_switch_self_test(
         || kernel_code < phoenix_vm::USER_SPACE_END_EXCLUSIVE
         || kernel_stack < phoenix_vm::USER_SPACE_END_EXCLUSIVE
     {
-        panic!("ядро или стек не находятся в общей верхней половине перед CR3 switch");
+        panic!("ядро, стек или physical-memory map пересекаются с пользовательским P4-окном");
     }
 
     let free_before = frames.free_frames();

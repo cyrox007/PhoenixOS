@@ -2,6 +2,7 @@
 set -euo pipefail
 
 IMAGE="${1:?usage: run-qemu-ci.sh <uefi-image>}"
+MARKERS_FILE="${PHOENIXOS_MARKERS_FILE:-tests/qemu/bootstrap.markers}"
 
 find_ovmf_file() {
   local explicit="${1:-}"
@@ -20,22 +21,6 @@ find_ovmf_file() {
     fi
   done
 
-  return 1
-}
-
-check_serial_marker() {
-  local marker="$1"
-  local log_file="$2"
-
-  if [[ -z "$marker" ]]; then
-    return 0
-  fi
-
-  if grep -Fq "$marker" "$log_file"; then
-    return 0
-  fi
-
-  echo "Не найден ожидаемый маркер последовательного вывода: $marker" >&2
   return 1
 }
 
@@ -64,13 +49,6 @@ if [[ "$status" -ne 33 ]]; then
   exit 1
 fi
 
-check_serial_marker "bootstrap: OK" "$serial_log"
-check_serial_marker "${PHOENIXOS_EXPECT_SERIAL:-}" "$serial_log"
-check_serial_marker "${PHOENIXOS_EXPECT_SERIAL_2:-}" "$serial_log"
-check_serial_marker "${PHOENIXOS_EXPECT_SERIAL_3:-}" "$serial_log"
-check_serial_marker "${PHOENIXOS_EXPECT_SERIAL_4:-}" "$serial_log"
-check_serial_marker "${PHOENIXOS_EXPECT_SERIAL_5:-}" "$serial_log"
-check_serial_marker "${PHOENIXOS_EXPECT_SERIAL_6:-}" "$serial_log"
-check_serial_marker "${PHOENIXOS_EXPECT_SERIAL_7:-}" "$serial_log"
+bash scripts/check-serial-markers.sh "$MARKERS_FILE" "$serial_log"
 
 echo "Проверочная UEFI-загрузка PhoenixOS успешно завершена"

@@ -7,6 +7,7 @@ extern crate alloc;
 
 mod arch;
 mod heap;
+mod ipc_user_memory;
 mod process_space;
 mod qemu;
 mod serial;
@@ -911,6 +912,58 @@ fn process_region_mapping_self_test(
         panic!("копирование из пользовательского региона повредило данные");
     }
     serial::emergency(format_args!("[INFO] process user copy-in self-test: OK\n"));
+
+    let ipc_words_address = PROCESS_VM_TEST_ADDRESS + phoenix_process::PAGE_SIZE - 8;
+    let send_words = [0x1111_2222_3333_4444_u64, 0xaaaa_bbbb_cccc_dddd_u64];
+    for (index, word) in send_words.iter().enumerate() {
+        space
+            .write_user_bytes(
+                VirtAddr::new(ipc_words_address + (index as u64) * 8),
+                &word.to_le_bytes(),
+            )
+            .expect("не удалось подготовить IPC-слова в пользовательской памяти");
+    }
+
+    let copied = ipc_user_memory::copy_send_words(
+        &mut space,
+        phoenix_syscall_abi::IpcSendArguments {
+            endpoint: phoenix_syscall_abi::PackedCapabilityHandle::new(1, 1),
+            words_address: ipc_words_address,
+            word_count: send_words.len() as u64,
+            transferred_capability: None,
+            flags: 0,
+        },
+    )
+    .expect("checked IPC copy-in отклонил отображённый буфер");
+
+    if copied.as_slice() != send_words {
+        panic!("checked IPC copy-in повредил слова сообщения");
+    }
+
+    let receive_words = [0x0123_4567_89ab_cdef_u64, 0xfedc_ba98_7654_3210_u64];
+    ipc_user_memory::copy_receive_words(
+        &mut space,
+        phoenix_syscall_abi::IpcReceiveArguments {
+            endpoint: phoenix_syscall_abi::PackedCapabilityHandle::new(1, 1),
+            words_address: ipc_words_address,
+            word_capacity: 2,
+            metadata_address: PROCESS_VM_TEST_ADDRESS + 0x100,
+            flags: 0,
+        },
+        &receive_words,
+    )
+    .expect("checked IPC copy-out отклонил отображённый буфер");
+
+    let mut copied_back = [0_u8; 16];
+    space
+        .read_user_bytes(VirtAddr::new(ipc_words_address), &mut copied_back)
+        .expect("не удалось проверить IPC copy-out");
+    let first = u64::from_le_bytes(copied_back[..8].try_into().unwrap());
+    let second = u64::from_le_bytes(copied_back[8..].try_into().unwrap());
+    if [first, second] != receive_words {
+        panic!("checked IPC copy-out повредил слова сообщения");
+    }
+    serial::emergency(format_args!("[INFO] ipc user word copy self-test: OK\n"));
 
     let unmapped = space
         .unmap_region(region.start, region.length, frames)

@@ -76,6 +76,15 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!("syscall entry self-test: OK"),
     );
 
+    if !arch::x86_64::syscall::entry_stack_self_test() {
+        panic!("SYSCALL не переключился на отдельный стек ядра");
+    }
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("syscall entry stack self-test: OK"),
+    );
+
     arch::x86_64::exceptions::smoke_test_breakpoint();
     serial::line(&mut out, "INFO", format_args!("breakpoint self-test: OK"));
 

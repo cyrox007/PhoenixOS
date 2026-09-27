@@ -164,13 +164,6 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!("process cr3 switch self-test: OK"),
     );
 
-    user_mode_sysret_self_test(physical_memory_offset, &mut frames);
-    serial::line(
-        &mut out,
-        "INFO",
-        format_args!("user mode sysret self-test: OK"),
-    );
-
     let heap_stats =
         heap::init(&mut page_table, &mut frames).expect("не удалось инициализировать кучу ядра");
 
@@ -186,6 +179,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     heap_self_test();
     serial::line(&mut out, "INFO", format_args!("kernel heap self-test: OK"));
+
+    user_mode_sysret_self_test(physical_memory_offset, &mut frames);
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("user mode sysret self-test: OK"),
+    );
 
     thread_context_self_test();
     serial::line(

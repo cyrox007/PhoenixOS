@@ -123,6 +123,7 @@ pub enum InactivePageTableError {
     NotEmpty,
     NotUserAddress,
     MappingFailed,
+    UnmappingFailed,
     CorruptHierarchy,
     UnsupportedHugePage,
 }
@@ -266,6 +267,33 @@ impl InactivePageTable {
         }
 
         self.mapper().translate_addr(address)
+    }
+
+    /// Снимает одно пользовательское отображение и возвращает принадлежащий
+    /// процессу физический кадр системному распределителю.
+    pub fn unmap_owned_user_4k<A>(
+        &mut self,
+        page: Page<Size4KiB>,
+        allocator: &mut A,
+    ) -> Result<(), InactivePageTableError>
+    where
+        A: FrameDeallocator<Size4KiB>,
+    {
+        if page.start_address().as_u64() >= USER_SPACE_END_EXCLUSIVE {
+            return Err(InactivePageTableError::NotUserAddress);
+        }
+
+        let (frame, flush) = self
+            .mapper()
+            .unmap(page)
+            .map_err(|_| InactivePageTableError::UnmappingFailed)?;
+        flush.ignore();
+
+        unsafe {
+            allocator.deallocate_frame(frame);
+        }
+
+        Ok(())
     }
 
     /// Освобождает все пользовательские листовые страницы и принадлежащие

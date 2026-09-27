@@ -90,6 +90,7 @@ pub struct TimerInterruptContext {
     pub cpu_flags: u64,
     pub general_registers: TimerGeneralRegisters,
     pub register_capture_marker: u64,
+    pub stack_frame_address: u64,
 }
 
 pub type TimerHook = fn(u64, TimerInterruptContext);

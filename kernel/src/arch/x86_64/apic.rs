@@ -6,9 +6,7 @@ use phoenix_vm::ActivePageTable;
 use x86_64::instructions::interrupts;
 use x86_64::instructions::port::Port;
 use x86_64::structures::paging::mapper::MapToError;
-use x86_64::structures::paging::{
-    Page, PageTableFlags, PhysFrame, Size4KiB,
-};
+use x86_64::structures::paging::{Page, PageTableFlags, PhysFrame, Size4KiB};
 use x86_64::{PhysAddr, VirtAddr};
 
 pub const TIMER_VECTOR: u8 = 0xe0;
@@ -135,9 +133,7 @@ fn init_xapic<const MAX_RANGES: usize>(
             .map_4k(
                 page,
                 frame,
-                PageTableFlags::WRITABLE
-                    | PageTableFlags::NO_EXECUTE
-                    | PageTableFlags::NO_CACHE,
+                PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE | PageTableFlags::NO_CACHE,
                 frames,
             )
             .map_err(InitError::Map)?;

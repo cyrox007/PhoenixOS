@@ -496,6 +496,15 @@ fn init_apic_timer(
         preemption_test_entry as *const () as u64,
     )
     .expect("не удалось подготовить кадр вытесняемого потока");
+    let (prepared_rip, prepared_cs, prepared_rflags) =
+        arch::x86_64::exceptions::prepared_kernel_timer_frame_words(preemption_frame);
+    serial::line(
+        out,
+        "INFO",
+        format_args!(
+            "prepared timer frame: address={preemption_frame:#x} rip={prepared_rip:#x} cs={prepared_cs:#x} rflags={prepared_rflags:#x}"
+        ),
+    );
     thread_manager::arm_preemption_frame_test(preemption_frame);
 
     arch::x86_64::apic::install_timer_hook(thread_manager::timer_tick_hook)

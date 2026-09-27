@@ -1015,7 +1015,7 @@ fn endpoint_operation_result(result: Result<usize, EndpointOperationError>) -> S
         | Err(EndpointOperationError::Transfer(_))
         | Err(EndpointOperationError::SameProcessTransfer)
         | Err(EndpointOperationError::WrongEndpointReceiver)
-        | Err(EndpointOperationError::Transport(IpcError::TooManyWords | IpcError::QueueEmpty))
+        | Err(EndpointOperationError::Transport(IpcError::TooManyWords))
         | Err(EndpointOperationError::UserMemory(_)) => syscall_failure(STATUS_BAD_ARGUMENTS),
     }
 }

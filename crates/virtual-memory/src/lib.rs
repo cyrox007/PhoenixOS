@@ -201,6 +201,17 @@ impl InactivePageTable {
         (0..KERNEL_P4_START_INDEX).all(|index| table[index].is_unused())
     }
 
+    /// Удаляет только разделяемые ссылки верхнего уровня на таблицы ядра.
+    ///
+    /// Дочерние таблицы не освобождаются: ими владеет системное адресное
+    /// пространство.
+    pub unsafe fn clear_kernel_half(&mut self) {
+        let table = unsafe { &mut *self.root_table };
+        for index in KERNEL_P4_START_INDEX..512 {
+            table[index].set_unused();
+        }
+    }
+
     pub fn is_active(&self) -> bool {
         let (active, _) = Cr3::read();
         active == self.root_frame

@@ -29,7 +29,7 @@ impl PreparedKernelTimerFrame {
             general_registers: apic::TimerGeneralRegisters::EMPTY,
             instruction_pointer,
             code_segment: u64::from(gdt::kernel_code_selector_raw()),
-            cpu_flags: (1 << 1) | (1 << 9),
+            cpu_flags: 1 << 1,
         }
     }
 
@@ -169,7 +169,7 @@ pub fn prepared_kernel_timer_frame_self_test() -> bool {
         && frame.instruction_pointer == TEST_INSTRUCTION_POINTER
         && frame.code_segment & 0b11 == 0
         && frame.cpu_flags & (1 << 1) != 0
-        && frame.cpu_flags & (1 << 9) != 0
+        && frame.cpu_flags & (1 << 9) == 0
 }
 
 fn build_idt() -> InterruptDescriptorTable {

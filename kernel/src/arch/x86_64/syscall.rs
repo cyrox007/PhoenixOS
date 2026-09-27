@@ -127,8 +127,7 @@ pub fn init() -> Result<SyscallMsrState, InitError> {
     }
 
     let kernel_code_selector = u64::from(super::gdt::kernel_code_selector_raw());
-    let user_selector_base =
-        user_return_selector_base().ok_or(InitError::InvalidSelectors)?;
+    let user_selector_base = user_return_selector_base().ok_or(InitError::InvalidSelectors)?;
     let star = (u64::from(user_selector_base) << 48) | (kernel_code_selector << 32);
     let lstar = phoenix_syscall_entry as *const () as u64;
     let fmask = RFLAGS_TRAP | RFLAGS_INTERRUPT | RFLAGS_DIRECTION;

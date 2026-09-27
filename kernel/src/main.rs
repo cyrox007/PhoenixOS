@@ -855,6 +855,15 @@ fn process_region_mapping_self_test(
         "[INFO] process user image write self-test: OK\n"
     ));
 
+    let mut copied_image = [0_u8; 7];
+    space
+        .read_user_bytes(VirtAddr::new(image_start), &mut copied_image)
+        .expect("не удалось скопировать байты из пользовательского региона");
+    if copied_image != image {
+        panic!("копирование из пользовательского региона повредило данные");
+    }
+    serial::emergency(format_args!("[INFO] process user copy-in self-test: OK\n"));
+
     let unmapped = space
         .unmap_region(region.start, region.length, frames)
         .expect("не удалось снять пользовательский регион процесса");

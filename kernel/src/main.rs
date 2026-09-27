@@ -117,6 +117,15 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!("syscall return context self-test: OK"),
     );
 
+    if !arch::x86_64::syscall::ipc_dispatch_self_test() {
+        panic!("IPC-вызовы не прошли проверку диспетчера");
+    }
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("ipc syscall dispatch self-test: OK"),
+    );
+
     process_capability_self_test();
     serial::line(
         &mut out,
@@ -993,6 +1002,15 @@ fn process_region_mapping_self_test(
     serial::emergency(format_args!(
         "[INFO] process user image write self-test: OK\n"
     ));
+
+    let mut copied_image = [0_u8; 7];
+    space
+        .read_user_bytes(VirtAddr::new(image_start), &mut copied_image)
+        .expect("не удалось скопировать байты из пользовательского региона");
+    if copied_image != image {
+        panic!("копирование из пользовательского региона повредило данные");
+    }
+    serial::emergency(format_args!("[INFO] process user copy-in self-test: OK\n"));
 
     let unmapped = space
         .unmap_region(region.start, region.length, frames)

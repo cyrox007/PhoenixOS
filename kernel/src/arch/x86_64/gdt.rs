@@ -98,7 +98,6 @@ fn double_fault_stack_end() -> VirtAddr {
     start + DOUBLE_FAULT_STACK_SIZE as u64
 }
 
-
 fn user_privilege_stack_end() -> VirtAddr {
     let start = VirtAddr::from_ptr(ptr::addr_of!(USER_PRIVILEGE_STACK));
     start + USER_PRIVILEGE_STACK_SIZE as u64

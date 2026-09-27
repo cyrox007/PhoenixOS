@@ -250,6 +250,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!("kernel thread initial irq frame self-test: OK"),
     );
 
+    kernel_thread_preemptive_manager_self_test();
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("kernel thread preemptive manager self-test: OK"),
+    );
+
     kernel_thread_preemptive_spawn_self_test();
     serial::line(
         &mut out,

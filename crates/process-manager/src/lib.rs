@@ -80,11 +80,7 @@ impl<const CAPACITY: usize> ProcessManager<CAPACITY> {
             .ok_or(ProcessManagerError::InconsistentState)
     }
 
-    pub fn set_blocked(
-        &mut self,
-        id: ProcessId,
-        blocked: bool,
-    ) -> Result<(), ProcessManagerError> {
+    pub fn set_blocked(&mut self, id: ProcessId, blocked: bool) -> Result<(), ProcessManagerError> {
         let record = self
             .processes
             .record(id)
@@ -214,7 +210,10 @@ mod tests {
         let process = manager.create_runnable(1).unwrap();
 
         manager.set_blocked(process.id, true).unwrap();
-        assert_eq!(manager.record(process.id).unwrap().state, ProcessState::Blocked);
+        assert_eq!(
+            manager.record(process.id).unwrap().state,
+            ProcessState::Blocked
+        );
         assert_eq!(manager.on_tick(), ProcessScheduleDecision::Idle);
 
         manager.set_blocked(process.id, false).unwrap();

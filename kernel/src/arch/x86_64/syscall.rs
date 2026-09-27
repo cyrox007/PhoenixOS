@@ -790,9 +790,9 @@ fn dispatch_ipc_receive(request: SyscallRequest) -> SyscallReturn {
     let Some(result) = with_current_endpoint_registry(|registry| {
         let endpoint = registry.get_mut(endpoint_id)?;
         let message = endpoint.peek()?;
-        let transferred_capability = message.transferred_capability().map(|handle| {
-            PackedCapabilityHandle::new(handle.slot, handle.generation)
-        });
+        let transferred_capability = message
+            .transferred_capability()
+            .map(|handle| PackedCapabilityHandle::new(handle.slot, handle.generation));
         let metadata = IpcReceiveMetadata::new(
             message.sender.0,
             message.len() as u64,

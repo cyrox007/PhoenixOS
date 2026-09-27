@@ -127,12 +127,8 @@ pub fn copy_receive_message<const CAPACITY: usize>(
         WORD_SIZE,
         WORD_SIZE,
     )?;
-    let metadata_buffer = UserBuffer::for_array(
-        arguments.metadata_address,
-        3,
-        WORD_SIZE,
-        WORD_SIZE,
-    )?;
+    let metadata_buffer =
+        UserBuffer::for_array(arguments.metadata_address, 3, WORD_SIZE, WORD_SIZE)?;
     preflight_words(space, word_buffer.start(), words.len())?;
     preflight_words(space, metadata_buffer.start(), 3)?;
 

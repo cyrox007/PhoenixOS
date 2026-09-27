@@ -1,0 +1,9 @@
+# Обязательные признаки успешной проверочной загрузки ядра.
+bootstrap: OK
+exception: breakpoint
+virtual memory self-test: OK
+kernel heap self-test: OK
+apic timer self-test: OK
+thread context self-test: OK
+kernel thread object self-test: OK
+kernel thread scheduler self-test: OK

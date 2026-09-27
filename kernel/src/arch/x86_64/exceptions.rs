@@ -1,4 +1,5 @@
 use core::arch::global_asm;
+use core::mem::size_of;
 
 use lazy_static::lazy_static;
 use x86_64::VirtAddr;
@@ -9,36 +10,86 @@ use super::{apic, gdt};
 use crate::qemu::{self, ExitCode};
 use crate::serial;
 
-#[unsafe(export_name = "phoenix_timer_registers")]
-static mut TIMER_REGISTER_SNAPSHOT: apic::TimerGeneralRegisters =
-    apic::TimerGeneralRegisters::EMPTY;
+#[repr(C)]
+struct TimerInterruptStackFrame {
+    general_registers: apic::TimerGeneralRegisters,
+}
 
-#[unsafe(export_name = "phoenix_timer_capture_marker")]
-static mut TIMER_CAPTURE_MARKER: u64 = 0;
+impl TimerInterruptStackFrame {
+    fn hardware_frame_address(&self) -> u64 {
+        self as *const Self as u64 + size_of::<Self>() as u64
+    }
+
+    fn hardware_word(&self, index: usize) -> u64 {
+        let address = self.hardware_frame_address() + (index * size_of::<u64>()) as u64;
+        unsafe { (address as *const u64).read() }
+    }
+
+    fn instruction_pointer(&self) -> u64 {
+        self.hardware_word(0)
+    }
+
+    fn code_segment(&self) -> u64 {
+        self.hardware_word(1)
+    }
+
+    fn cpu_flags(&self) -> u64 {
+        self.hardware_word(2)
+    }
+
+    fn interrupted_stack_pointer(&self) -> u64 {
+        if self.code_segment() & 0b11 != 0 {
+            return self.hardware_word(3);
+        }
+
+        self.hardware_frame_address() + 3 * size_of::<u64>() as u64
+    }
+}
 
 global_asm!(
     r#"
     .global phoenix_apic_timer_entry
     .type phoenix_apic_timer_entry,@function
 phoenix_apic_timer_entry:
-    mov [rip + phoenix_timer_registers + 0], rax
-    mov [rip + phoenix_timer_registers + 8], rbx
-    mov [rip + phoenix_timer_registers + 16], rcx
-    mov [rip + phoenix_timer_registers + 24], rdx
-    mov [rip + phoenix_timer_registers + 32], rsi
-    mov [rip + phoenix_timer_registers + 40], rdi
-    mov [rip + phoenix_timer_registers + 48], rbp
-    mov [rip + phoenix_timer_registers + 56], r8
-    mov [rip + phoenix_timer_registers + 64], r9
-    mov [rip + phoenix_timer_registers + 72], r10
-    mov [rip + phoenix_timer_registers + 80], r11
-    mov [rip + phoenix_timer_registers + 88], r12
-    mov [rip + phoenix_timer_registers + 96], r13
-    mov [rip + phoenix_timer_registers + 104], r14
-    mov [rip + phoenix_timer_registers + 112], r15
-    mov qword ptr [rip + phoenix_timer_capture_marker], 0x54494d52
+    push r15
+    push r14
+    push r13
+    push r12
+    push r11
+    push r10
+    push r9
+    push r8
+    push rbp
+    push rdi
+    push rsi
+    push rdx
+    push rcx
+    push rbx
+    push rax
+
     cld
-    jmp phoenix_apic_timer_rust_handler
+    mov r12, rsp
+    mov rdi, rsp
+    and rsp, -16
+    call phoenix_apic_timer_rust_handler
+    mov rsp, r12
+
+    pop rax
+    pop rbx
+    pop rcx
+    pop rdx
+    pop rsi
+    pop rdi
+    pop rbp
+    pop r8
+    pop r9
+    pop r10
+    pop r11
+    pop r12
+    pop r13
+    pop r14
+    pop r15
+    iretq
     .size phoenix_apic_timer_entry, .-phoenix_apic_timer_entry
 "#
 );
@@ -115,17 +166,15 @@ extern "x86-interrupt" fn double_fault_handler(
 }
 
 #[unsafe(export_name = "phoenix_apic_timer_rust_handler")]
-extern "x86-interrupt" fn apic_timer_handler(stack_frame: InterruptStackFrame) {
-    let general_registers =
-        unsafe { core::ptr::read_volatile(core::ptr::addr_of!(TIMER_REGISTER_SNAPSHOT)) };
-    let register_capture_marker =
-        unsafe { core::ptr::read_volatile(core::ptr::addr_of!(TIMER_CAPTURE_MARKER)) };
+extern "C" fn apic_timer_handler(frame: *mut TimerInterruptStackFrame) {
+    let frame = unsafe { &mut *frame };
     let context = apic::TimerInterruptContext {
-        instruction_pointer: stack_frame.instruction_pointer.as_u64(),
-        stack_pointer: stack_frame.stack_pointer.as_u64(),
-        cpu_flags: stack_frame.cpu_flags.bits(),
-        general_registers,
-        register_capture_marker,
+        instruction_pointer: frame.instruction_pointer(),
+        stack_pointer: frame.interrupted_stack_pointer(),
+        cpu_flags: frame.cpu_flags(),
+        general_registers: frame.general_registers,
+        register_capture_marker: apic::TIMER_REGISTER_CAPTURE_MARKER,
+        stack_frame_address: frame as *mut TimerInterruptStackFrame as u64,
     };
 
     apic::handle_timer_interrupt(context);

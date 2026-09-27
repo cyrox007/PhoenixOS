@@ -298,7 +298,10 @@ mod tests {
 
         assert_eq!(registry.len(), 1);
         assert_eq!(registry.get(endpoint_id).unwrap().len(), 1);
-        assert_eq!(registry.get_mut(endpoint_id).unwrap().receive(), Ok(message));
+        assert_eq!(
+            registry.get_mut(endpoint_id).unwrap().receive(),
+            Ok(message)
+        );
     }
 
     #[test]

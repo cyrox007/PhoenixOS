@@ -21,15 +21,19 @@ struct PreparedKernelTimerFrame {
     instruction_pointer: u64,
     code_segment: u64,
     cpu_flags: u64,
+    stack_pointer: u64,
+    stack_segment: u64,
 }
 
 impl PreparedKernelTimerFrame {
-    fn new(instruction_pointer: u64) -> Self {
+    fn new(instruction_pointer: u64, stack_pointer: u64) -> Self {
         Self {
             general_registers: apic::TimerGeneralRegisters::EMPTY,
             instruction_pointer,
             code_segment: u64::from(gdt::kernel_code_selector_raw()),
-            cpu_flags: (1 << 1) | (1 << 9),
+            cpu_flags: 1 << 1,
+            stack_pointer,
+            stack_segment: u64::from(gdt::kernel_data_selector_raw()),
         }
     }
 
@@ -61,11 +65,7 @@ impl TimerInterruptStackFrame {
     }
 
     fn interrupted_stack_pointer(&self) -> u64 {
-        if self.code_segment() & 0b11 != 0 {
-            return self.hardware_word(3);
-        }
-
-        self.hardware_frame_address() + 3 * size_of::<u64>() as u64
+        self.hardware_word(3)
     }
 }
 
@@ -132,26 +132,62 @@ pub fn smoke_test_breakpoint() {
     interrupts::int3();
 }
 
+pub fn prepare_kernel_timer_frame(stack: &mut [u8], instruction_pointer: u64) -> Option<u64> {
+    let frame_size = size_of::<PreparedKernelTimerFrame>();
+    let base = stack.as_mut_ptr() as usize;
+    let end = base.checked_add(stack.len())?;
+    let entry_stack_pointer = (end & !0xf).checked_sub(8)?;
+    let frame_address = entry_stack_pointer.checked_sub(frame_size)?;
+
+    if frame_address < base {
+        return None;
+    }
+
+    let frame = frame_address as *mut PreparedKernelTimerFrame;
+    unsafe {
+        frame.write(PreparedKernelTimerFrame::new(
+            instruction_pointer,
+            entry_stack_pointer as u64,
+        ));
+    }
+    Some(frame_address as u64)
+}
+
+pub fn prepared_kernel_timer_frame_words(frame_address: u64) -> (u64, u64, u64) {
+    let frame = unsafe { &*(frame_address as *const PreparedKernelTimerFrame) };
+    (
+        frame.instruction_pointer,
+        frame.code_segment,
+        frame.cpu_flags,
+    )
+}
+
 pub fn prepared_kernel_timer_frame_self_test() -> bool {
     const TEST_INSTRUCTION_POINTER: u64 = 0xffff_8000_1234_5678;
 
-    let frame = PreparedKernelTimerFrame::new(TEST_INSTRUCTION_POINTER);
+    let frame = PreparedKernelTimerFrame::new(TEST_INSTRUCTION_POINTER, 0x1008);
     let base = frame.stack_frame_address();
     let registers = &frame.general_registers as *const apic::TimerGeneralRegisters as u64;
     let instruction_pointer = &frame.instruction_pointer as *const u64 as u64;
     let code_segment = &frame.code_segment as *const u64 as u64;
     let cpu_flags = &frame.cpu_flags as *const u64 as u64;
+    let stack_pointer = &frame.stack_pointer as *const u64 as u64;
+    let stack_segment = &frame.stack_segment as *const u64 as u64;
 
     size_of::<PreparedKernelTimerFrame>()
-        == size_of::<apic::TimerGeneralRegisters>() + 3 * size_of::<u64>()
+        == size_of::<apic::TimerGeneralRegisters>() + 5 * size_of::<u64>()
         && registers == base
         && instruction_pointer == base + size_of::<apic::TimerGeneralRegisters>() as u64
         && code_segment == instruction_pointer + size_of::<u64>() as u64
         && cpu_flags == code_segment + size_of::<u64>() as u64
+        && stack_pointer == cpu_flags + size_of::<u64>() as u64
+        && stack_segment == stack_pointer + size_of::<u64>() as u64
         && frame.instruction_pointer == TEST_INSTRUCTION_POINTER
+        && frame.stack_pointer == 0x1008
+        && frame.stack_segment == u64::from(gdt::kernel_data_selector_raw())
         && frame.code_segment & 0b11 == 0
         && frame.cpu_flags & (1 << 1) != 0
-        && frame.cpu_flags & (1 << 9) != 0
+        && frame.cpu_flags & (1 << 9) == 0
 }
 
 fn build_idt() -> InterruptDescriptorTable {
@@ -189,6 +225,10 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
+    serial::emergency(format_args!(
+        "[INFO] preemption frame test phase={}\n",
+        crate::thread_manager::preemption_frame_test_phase()
+    ));
     fatal_exception("general protection fault", &stack_frame, Some(error_code));
 }
 

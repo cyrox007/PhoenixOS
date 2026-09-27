@@ -13,6 +13,7 @@ thread general register frame self-test: OK
 thread stack interrupt frame self-test: OK
 thread resumable interrupt frame self-test: OK
 thread prepared interrupt frame self-test: OK
+thread iretq stack switch self-test: OK
 process page table root self-test: OK
 process user mapping self-test: OK
 process region mapping self-test: OK

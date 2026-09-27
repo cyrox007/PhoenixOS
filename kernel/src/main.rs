@@ -533,29 +533,15 @@ extern "C" fn preemptive_start_test_exit(_argument: usize) -> ! {
 fn kernel_thread_preemptive_manager_self_test() {
     const FIRST_ARGUMENT: usize = 0x1111;
     const SECOND_ARGUMENT: usize = 0x2222;
-    const FIRST_EXIT_ARGUMENT: usize = 0x3333;
-    const SECOND_EXIT_ARGUMENT: usize = 0x4444;
     const FIRST_SAVED: u64 = 0x9000;
     const SECOND_SAVED: u64 = 0xa000;
 
     let mut manager = thread_manager::ThreadManager::<4>::new();
     let first = manager
-        .spawn_preemptive(
-            scheduled_thread_test_entry,
-            FIRST_ARGUMENT,
-            preemptive_start_test_exit,
-            FIRST_EXIT_ARGUMENT,
-            1,
-        )
+        .spawn_preemptive(preemptive_spawn_test_entry, FIRST_ARGUMENT, 1)
         .expect("не удалось создать первый preemptive-поток менеджера");
     let second = manager
-        .spawn_preemptive(
-            scheduled_thread_test_entry,
-            SECOND_ARGUMENT,
-            preemptive_start_test_exit,
-            SECOND_EXIT_ARGUMENT,
-            1,
-        )
+        .spawn_preemptive(preemptive_spawn_test_entry, SECOND_ARGUMENT, 1)
         .expect("не удалось создать второй preemptive-поток менеджера");
 
     let first_frame = manager

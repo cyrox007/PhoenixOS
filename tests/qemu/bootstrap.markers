@@ -13,6 +13,7 @@ thread general register frame self-test: OK
 process page table root self-test: OK
 process user mapping self-test: OK
 process region mapping self-test: OK
+process user image write self-test: OK
 process cr3 switch self-test: OK
 user privilege stack self-test: OK
 syscall msr self-test: OK

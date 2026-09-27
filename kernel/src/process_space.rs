@@ -150,6 +150,15 @@ impl<const CAPACITY: usize> ProcessAddressSpace<CAPACITY> {
         self.page_table.translate_user_addr(address)
     }
 
+    pub fn write_user_bytes(
+        &mut self,
+        address: VirtAddr,
+        bytes: &[u8],
+    ) -> Result<(), ProcessAddressSpaceError> {
+        self.page_table.write_user_bytes(address, bytes)?;
+        Ok(())
+    }
+
     pub fn is_active(&self) -> bool {
         self.page_table.is_active()
     }

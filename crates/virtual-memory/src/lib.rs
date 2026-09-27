@@ -123,6 +123,7 @@ pub enum InactivePageTableError {
     NoPhysicalFrame,
     NotEmpty,
     NotUserAddress,
+    UnmappedUserAddress,
     MappingFailed,
     UnmappingFailed,
     CorruptHierarchy,
@@ -308,6 +309,51 @@ impl InactivePageTable {
         }
 
         unsafe { self.mapper() }.translate_addr(address)
+    }
+
+    pub fn write_user_bytes(
+        &mut self,
+        start: VirtAddr,
+        bytes: &[u8],
+    ) -> Result<(), InactivePageTableError> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+
+        let start_raw = start.as_u64();
+        let length =
+            u64::try_from(bytes.len()).map_err(|_| InactivePageTableError::NotUserAddress)?;
+        let end = start_raw
+            .checked_add(length)
+            .ok_or(InactivePageTableError::NotUserAddress)?;
+
+        if start_raw >= USER_SPACE_END_EXCLUSIVE || end > USER_SPACE_END_EXCLUSIVE {
+            return Err(InactivePageTableError::NotUserAddress);
+        }
+
+        let mut copied = 0_usize;
+        let mut virtual_address = start_raw;
+
+        while copied < bytes.len() {
+            let physical = self
+                .translate_user_addr(VirtAddr::new(virtual_address))
+                .ok_or(InactivePageTableError::UnmappedUserAddress)?;
+            let page_offset = virtual_address % PAGE_SIZE;
+            let page_remaining = usize::try_from(PAGE_SIZE - page_offset)
+                .map_err(|_| InactivePageTableError::NotUserAddress)?;
+            let remaining = bytes.len() - copied;
+            let chunk = core::cmp::min(page_remaining, remaining);
+            let target = (self.physical_memory_offset + physical.as_u64()).as_mut_ptr::<u8>();
+
+            unsafe {
+                core::ptr::copy_nonoverlapping(bytes[copied..].as_ptr(), target, chunk);
+            }
+
+            copied += chunk;
+            virtual_address += chunk as u64;
+        }
+
+        Ok(())
     }
 
     /// Снимает одно пользовательское отображение и возвращает принадлежащий

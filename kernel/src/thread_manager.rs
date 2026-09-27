@@ -72,10 +72,7 @@ pub fn timer_tick_hook(
     }
 }
 
-fn record_timer_context(
-    tick: u64,
-    context: crate::arch::x86_64::apic::TimerInterruptContext,
-) {
+fn record_timer_context(tick: u64, context: crate::arch::x86_64::apic::TimerInterruptContext) {
     LAST_TIMER_RIP.store(context.instruction_pointer, Ordering::Relaxed);
     LAST_TIMER_RSP.store(context.stack_pointer, Ordering::Relaxed);
     LAST_TIMER_RFLAGS.store(context.cpu_flags, Ordering::Relaxed);
@@ -106,9 +103,7 @@ fn preemption_frame_test_tick(current_frame: u64) -> Option<u64> {
     }
 }
 
-fn schedule_active_preemptive_frame(
-    current_frame: u64,
-) -> Result<Option<u64>, ThreadManagerError> {
+fn schedule_active_preemptive_frame(current_frame: u64) -> Result<Option<u64>, ThreadManagerError> {
     let manager_ptr = ACTIVE_PREEMPTIVE_MANAGER.load(Ordering::Acquire);
     if manager_ptr == 0 {
         return Ok(None);

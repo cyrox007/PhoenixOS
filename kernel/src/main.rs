@@ -31,6 +31,8 @@ const VM_TEST_VALUE: u64 = 0x5048_4f45_4e49_584f;
 const PROCESS_VM_TEST_ADDRESS: u64 = 0x0000_0000_4000_0000;
 const PROCESS_VM_TEST_VALUE: u64 = 0x5052_4f43_5f56_4d21;
 const PROCESS_CR3_TEST_VALUE: u64 = 0x4352_335f_5357_4954;
+const USER_MODE_TEST_CODE_ADDRESS: u64 = 0x0000_0000_4000_0000;
+const USER_MODE_TEST_STACK_ADDRESS: u64 = 0x0000_0000_4000_1000;
 const HEAP_TEST_VALUE: u64 = 0x4845_4150_5f4f_4b21;
 const APIC_TIMER_TEST_TICKS: u64 = 3;
 const THREAD_CONTEXT_TEST_STACK_SIZE: usize = 64 * 1024;
@@ -160,6 +162,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         &mut out,
         "INFO",
         format_args!("process cr3 switch self-test: OK"),
+    );
+
+    user_mode_syscall_self_test(physical_memory_offset, &mut frames);
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("user mode syscall self-test: OK"),
     );
 
     let heap_stats =
@@ -662,6 +671,86 @@ fn process_cr3_switch_self_test(
 
     if frames.free_frames() != free_before {
         panic!("CR3 self-test не вернул всю физическую память");
+    }
+}
+
+fn user_mode_syscall_self_test(
+    physical_memory_offset: VirtAddr,
+    frames: &mut SystemFrameAllocator<SYSTEM_MEMORY_RANGE_CAPACITY>,
+) {
+    use phoenix_process::{AddressSpaceId, MemoryPermissions, RegionKind, VirtualRegion};
+
+    let free_before = frames.free_frames();
+    let mut space = unsafe {
+        process_space::ProcessAddressSpace::<2>::new(
+            AddressSpaceId(44),
+            physical_memory_offset,
+            frames,
+        )
+    }
+    .expect("не удалось создать адресное пространство пользовательской самопроверки");
+
+    let code_region = VirtualRegion::new(
+        USER_MODE_TEST_CODE_ADDRESS,
+        phoenix_process::PAGE_SIZE,
+        MemoryPermissions::USER_READ_EXECUTE,
+        RegionKind::Program,
+    )
+    .expect("не удалось описать пользовательский код");
+
+    let stack_region = VirtualRegion::new(
+        USER_MODE_TEST_STACK_ADDRESS,
+        phoenix_process::PAGE_SIZE,
+        MemoryPermissions::USER_READ_WRITE,
+        RegionKind::Stack,
+    )
+    .expect("не удалось описать пользовательский стек");
+
+    space
+        .map_region(code_region, frames)
+        .expect("не удалось отобразить пользовательский код");
+    space
+        .map_region(stack_region, frames)
+        .expect("не удалось отобразить пользовательский стек");
+
+    let image = arch::x86_64::syscall::user_mode_test_image();
+    if image.is_empty() || image.len() > phoenix_process::PAGE_SIZE as usize {
+        panic!("пользовательская самопроверка имеет недопустимый размер");
+    }
+
+    space
+        .write_user_bytes(VirtAddr::new(USER_MODE_TEST_CODE_ADDRESS), image)
+        .expect("не удалось загрузить пользовательскую самопроверку");
+
+    let stack_pointer =
+        USER_MODE_TEST_STACK_ADDRESS + phoenix_process::PAGE_SIZE - 16;
+
+    let passed = x86_64::instructions::interrupts::without_interrupts(|| {
+        let guard = unsafe { space.activate() };
+        let result = arch::x86_64::syscall::run_user_mode_self_test(
+            USER_MODE_TEST_CODE_ADDRESS,
+            stack_pointer,
+        );
+        drop(guard);
+        result
+    });
+
+    if !passed {
+        panic!("пользовательский цикл CPL3/SYSCALL/SYSRET завершился ошибкой");
+    }
+
+    space
+        .unmap_region(code_region.start, code_region.length, frames)
+        .expect("не удалось снять пользовательский код");
+    space
+        .unmap_region(stack_region.start, stack_region.length, frames)
+        .expect("не удалось снять пользовательский стек");
+    space
+        .destroy(frames)
+        .expect("не удалось уничтожить адресное пространство пользовательской самопроверки");
+
+    if frames.free_frames() != free_before {
+        panic!("пользовательская самопроверка не вернула всю физическую память");
     }
 }
 

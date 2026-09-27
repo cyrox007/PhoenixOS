@@ -107,9 +107,7 @@ impl<const CAPACITY: usize> Endpoint<CAPACITY> {
             return Err(IpcError::QueueEmpty);
         }
 
-        let message = self.queue[self.head]
-            .take()
-            .ok_or(IpcError::QueueEmpty)?;
+        let message = self.queue[self.head].take().ok_or(IpcError::QueueEmpty)?;
         self.head = (self.head + 1) % CAPACITY;
         self.len -= 1;
 

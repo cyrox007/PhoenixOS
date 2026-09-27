@@ -41,6 +41,7 @@ jobs:
           cargo test -p phoenix-memory
           cargo test -p phoenix-vm
           cargo test -p phoenix-scheduler
+          cargo test -p phoenix-process
 
       - name: Собрать UEFI-образ
         run: |

@@ -1,7 +1,10 @@
 use core::arch::{global_asm, x86_64::__cpuid};
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use phoenix_syscall_abi::{SyscallRequest, SyscallReturn, SyscallStatus};
+use phoenix_syscall_abi::{
+    IpcReceiveArguments, IpcSendArguments, PackedCapabilityHandle, SYSCALL_IPC_RECEIVE,
+    SYSCALL_IPC_SEND, SyscallRequest, SyscallReturn, SyscallStatus,
+};
 
 const IA32_EFER: u32 = 0xc000_0080;
 const IA32_STAR: u32 = 0xc000_0081;
@@ -36,6 +39,8 @@ const USER_SELF_TEST_SUCCESS: u64 = 0x5553_4552_5f4f_4b21;
 const USER_SELF_TEST_FAILURE: u64 = 0x5553_4552_5f42_4144;
 const STATUS_UNKNOWN_CALL: u32 = 1;
 const STATUS_BAD_ARGUMENTS: u32 = 2;
+const STATUS_OPERATION_NOT_READY: u32 = 3;
+const IPC_INLINE_WORD_CAPACITY: u64 = 6;
 const ENTRY_STACK_SIZE: u64 = 64 * 1024;
 
 static USER_SELF_TEST_RESULT: AtomicU64 = AtomicU64::new(0);
@@ -487,8 +492,11 @@ fn dispatch(request: SyscallRequest) -> SyscallReturn {
         return SyscallReturn::success(0);
     }
 
-    if request.number != SELF_TEST_NUMBER {
-        return syscall_failure(STATUS_UNKNOWN_CALL);
+    match request.number {
+        SYSCALL_IPC_SEND => return dispatch_ipc_send(request),
+        SYSCALL_IPC_RECEIVE => return dispatch_ipc_receive(request),
+        SELF_TEST_NUMBER => {}
+        _ => return syscall_failure(STATUS_UNKNOWN_CALL),
     }
 
     if request.arguments != SELF_TEST_ARGUMENTS {
@@ -496,6 +504,76 @@ fn dispatch(request: SyscallRequest) -> SyscallReturn {
     }
 
     SyscallReturn::success(SELF_TEST_RESULT)
+}
+
+fn dispatch_ipc_send(request: SyscallRequest) -> SyscallReturn {
+    let words_address = request.arguments[1];
+    let word_count = request.arguments[2];
+    let flags = request.arguments[4];
+    let reserved = request.arguments[5];
+
+    if flags != 0 || reserved != 0 || word_count > IPC_INLINE_WORD_CAPACITY {
+        return syscall_failure(STATUS_BAD_ARGUMENTS);
+    }
+
+    if phoenix_vm::UserBuffer::for_array(words_address, word_count, 8, 8).is_err() {
+        return syscall_failure(STATUS_BAD_ARGUMENTS);
+    }
+
+    syscall_failure(STATUS_OPERATION_NOT_READY)
+}
+
+fn dispatch_ipc_receive(request: SyscallRequest) -> SyscallReturn {
+    let words_address = request.arguments[1];
+    let word_capacity = request.arguments[2];
+    let metadata_address = request.arguments[3];
+    let flags = request.arguments[4];
+    let reserved = request.arguments[5];
+
+    if flags != 0 || reserved != 0 {
+        return syscall_failure(STATUS_BAD_ARGUMENTS);
+    }
+
+    if phoenix_vm::UserBuffer::for_array(words_address, word_capacity, 8, 8).is_err()
+        || phoenix_vm::UserBuffer::for_array(metadata_address, 1, 8, 8).is_err()
+    {
+        return syscall_failure(STATUS_BAD_ARGUMENTS);
+    }
+
+    syscall_failure(STATUS_OPERATION_NOT_READY)
+}
+
+pub fn ipc_dispatch_self_test() -> bool {
+    let valid_send = SyscallRequest::ipc_send(IpcSendArguments {
+        endpoint: PackedCapabilityHandle::new(1, 1),
+        words_address: 0x4000,
+        word_count: 2,
+        transferred_capability: None,
+        flags: 0,
+    });
+    let send_result = dispatch(valid_send);
+
+    let valid_receive = SyscallRequest::ipc_receive(IpcReceiveArguments {
+        endpoint: PackedCapabilityHandle::new(1, 1),
+        words_address: 0x5000,
+        word_capacity: IPC_INLINE_WORD_CAPACITY,
+        metadata_address: 0x6000,
+        flags: 0,
+    });
+    let receive_result = dispatch(valid_receive);
+
+    let invalid_send = SyscallRequest::ipc_send(IpcSendArguments {
+        endpoint: PackedCapabilityHandle::new(1, 1),
+        words_address: phoenix_vm::USER_SPACE_END_EXCLUSIVE - 8,
+        word_count: 2,
+        transferred_capability: None,
+        flags: 0,
+    });
+    let invalid_send_result = dispatch(invalid_send);
+
+    send_result.status.raw() == u64::from(STATUS_OPERATION_NOT_READY)
+        && receive_result.status.raw() == u64::from(STATUS_OPERATION_NOT_READY)
+        && invalid_send_result.status.raw() == u64::from(STATUS_BAD_ARGUMENTS)
 }
 
 fn syscall_failure(code: u32) -> SyscallReturn {

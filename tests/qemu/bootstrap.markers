@@ -1,3 +1,4 @@
+syscall msr self-test: OK
 # Обязательные признаки успешной проверочной загрузки ядра.
 bootstrap: OK
 exception: breakpoint

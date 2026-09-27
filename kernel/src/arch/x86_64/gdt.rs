@@ -44,6 +44,10 @@ pub fn init() {
     }
 }
 
+pub fn kernel_code_selector_raw() -> u16 {
+    GDT.1.code_selector.0
+}
+
 fn build_gdt() -> (GlobalDescriptorTable, Selectors) {
     let mut gdt = GlobalDescriptorTable::new();
     let code_selector = gdt.append(Descriptor::kernel_code_segment());

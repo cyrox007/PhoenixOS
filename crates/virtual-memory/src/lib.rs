@@ -339,7 +339,10 @@ impl InactivePageTable {
     /// Освобождает пользовательские листовые страницы и принадлежащие процессу
     /// таблицы P1/P2/P3 внутри выделенного пользовательского P4-окна.
     /// Системные P4-записи за пределами окна не затрагиваются.
-    pub fn destroy_user_space<A>(&mut self, allocator: &mut A) -> Result<u64, InactivePageTableError>
+    pub fn destroy_user_space<A>(
+        &mut self,
+        allocator: &mut A,
+    ) -> Result<u64, InactivePageTableError>
     where
         A: FrameDeallocator<Size4KiB>,
     {

@@ -382,6 +382,16 @@ fn init_apic_timer(
         panic!("таймерный IRQ передал неполный аппаратный контекст");
     }
 
+    if observed_context.register_capture_marker
+        != arch::x86_64::apic::TIMER_REGISTER_CAPTURE_MARKER
+    {
+        panic!("таймерный IRQ не прошёл через вход сохранения регистров");
+    }
+
+    if core::mem::size_of::<arch::x86_64::apic::TimerGeneralRegisters>() != 15 * 8 {
+        panic!("снимок регистров таймера имеет неожиданный размер");
+    }
+
     serial::line(
         out,
         "INFO",
@@ -406,6 +416,12 @@ fn init_apic_timer(
             observed_context.stack_pointer,
             observed_context.cpu_flags
         ),
+    );
+
+    serial::line(
+        out,
+        "INFO",
+        format_args!("thread general register frame self-test: OK"),
     );
 }
 

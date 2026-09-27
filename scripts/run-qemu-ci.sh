@@ -69,5 +69,6 @@ check_serial_marker "${PHOENIXOS_EXPECT_SERIAL:-}" "$serial_log"
 check_serial_marker "${PHOENIXOS_EXPECT_SERIAL_2:-}" "$serial_log"
 check_serial_marker "${PHOENIXOS_EXPECT_SERIAL_3:-}" "$serial_log"
 check_serial_marker "${PHOENIXOS_EXPECT_SERIAL_4:-}" "$serial_log"
+check_serial_marker "${PHOENIXOS_EXPECT_SERIAL_5:-}" "$serial_log"
 
 echo "Проверочная UEFI-загрузка PhoenixOS успешно завершена"

@@ -150,6 +150,15 @@ pub fn prepare_kernel_timer_frame(stack: &mut [u8], instruction_pointer: u64) ->
     Some(frame_address as u64)
 }
 
+pub fn prepared_kernel_timer_frame_words(frame_address: u64) -> (u64, u64, u64) {
+    let frame = unsafe { &*(frame_address as *const PreparedKernelTimerFrame) };
+    (
+        frame.instruction_pointer,
+        frame.code_segment,
+        frame.cpu_flags,
+    )
+}
+
 pub fn prepared_kernel_timer_frame_self_test() -> bool {
     const TEST_INSTRUCTION_POINTER: u64 = 0xffff_8000_1234_5678;
 
@@ -207,6 +216,10 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
+    serial::emergency(format_args!(
+        "[INFO] preemption frame test phase={}\n",
+        crate::thread_manager::preemption_frame_test_phase()
+    ));
     fatal_exception("general protection fault", &stack_frame, Some(error_code));
 }
 

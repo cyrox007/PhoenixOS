@@ -135,6 +135,44 @@ pub fn disarm_preemption_frame_test() {
     PREEMPTION_TEST_TARGET_FRAME.store(0, Ordering::Release);
 }
 
+pub unsafe fn arm_hardware_preemption_test(
+    manager: &mut ThreadManager<HARDWARE_PREEMPTION_TEST_CAPACITY>,
+) -> bool {
+    if HARDWARE_PREEMPTION_TEST_MANAGER.load(Ordering::Acquire) != 0 {
+        return false;
+    }
+
+    HARDWARE_PREEMPTION_TEST_BOOT_FRAME.store(0, Ordering::Relaxed);
+    HARDWARE_PREEMPTION_TEST_SWITCHES.store(0, Ordering::Relaxed);
+    HARDWARE_PREEMPTION_TEST_DONE.store(0, Ordering::Relaxed);
+    HARDWARE_PREEMPTION_TEST_FAILED.store(0, Ordering::Relaxed);
+
+    HARDWARE_PREEMPTION_TEST_MANAGER
+        .compare_exchange(
+            0,
+            manager as *mut ThreadManager<HARDWARE_PREEMPTION_TEST_CAPACITY> as usize,
+            Ordering::Release,
+            Ordering::Relaxed,
+        )
+        .is_ok()
+}
+
+pub fn hardware_preemption_test_completed() -> bool {
+    HARDWARE_PREEMPTION_TEST_DONE.load(Ordering::Acquire) != 0
+}
+
+pub fn hardware_preemption_test_failed() -> bool {
+    HARDWARE_PREEMPTION_TEST_FAILED.load(Ordering::Acquire) != 0
+}
+
+pub fn hardware_preemption_test_switches() -> u64 {
+    HARDWARE_PREEMPTION_TEST_SWITCHES.load(Ordering::Acquire)
+}
+
+pub fn disarm_hardware_preemption_test() {
+    HARDWARE_PREEMPTION_TEST_MANAGER.store(0, Ordering::Release);
+}
+
 pub fn last_timer_tick() -> u64 {
     LAST_TIMER_TICK.load(Ordering::Acquire)
 }
@@ -262,6 +300,17 @@ impl<const CAPACITY: usize> ThreadManager<CAPACITY> {
             .thread
             .save_interrupt_frame(frame)
             .map_err(ThreadManagerError::Thread)
+    }
+
+    pub fn save_current_interrupt_frame(
+        &mut self,
+        current_frame: u64,
+    ) -> Result<(), ThreadManagerError> {
+        let current = self
+            .scheduler
+            .current()
+            .ok_or(ThreadManagerError::InvalidState)?;
+        self.save_interrupt_frame(ThreadId(current.0), current_frame)
     }
 
     pub fn schedule_interrupt_frame(

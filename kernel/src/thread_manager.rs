@@ -15,6 +15,9 @@ static LAST_TIMER_RSP: AtomicU64 = AtomicU64::new(0);
 static LAST_TIMER_RFLAGS: AtomicU64 = AtomicU64::new(0);
 static LAST_TIMER_REGISTER_MARKER: AtomicU64 = AtomicU64::new(0);
 static LAST_TIMER_STACK_FRAME: AtomicU64 = AtomicU64::new(0);
+static PREEMPTION_TEST_TARGET_FRAME: AtomicU64 = AtomicU64::new(0);
+static PREEMPTION_TEST_ORIGINAL_FRAME: AtomicU64 = AtomicU64::new(0);
+static PREEMPTION_TEST_PHASE: AtomicU64 = AtomicU64::new(0);
 static LAST_TIMER_REGISTERS: [AtomicU64; 15] = [
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -44,7 +47,39 @@ pub fn timer_tick_hook(
     LAST_TIMER_STACK_FRAME.store(context.stack_frame_address, Ordering::Relaxed);
     store_timer_registers(context.general_registers);
     LAST_TIMER_TICK.store(tick, Ordering::Release);
+
+    let target = PREEMPTION_TEST_TARGET_FRAME.load(Ordering::Acquire);
+    if target != 0 {
+        match PREEMPTION_TEST_PHASE.load(Ordering::Acquire) {
+            0 => {
+                PREEMPTION_TEST_ORIGINAL_FRAME.store(context.stack_frame_address, Ordering::Release);
+                PREEMPTION_TEST_PHASE.store(1, Ordering::Release);
+                return Some(target);
+            }
+            1 => {
+                let original = PREEMPTION_TEST_ORIGINAL_FRAME.load(Ordering::Acquire);
+                PREEMPTION_TEST_PHASE.store(2, Ordering::Release);
+                return Some(original);
+            }
+            _ => {}
+        }
+    }
+
     None
+}
+
+pub fn arm_preemption_frame_test(target_frame: u64) {
+    PREEMPTION_TEST_ORIGINAL_FRAME.store(0, Ordering::Relaxed);
+    PREEMPTION_TEST_PHASE.store(0, Ordering::Relaxed);
+    PREEMPTION_TEST_TARGET_FRAME.store(target_frame, Ordering::Release);
+}
+
+pub fn preemption_frame_test_completed() -> bool {
+    PREEMPTION_TEST_PHASE.load(Ordering::Acquire) == 2
+}
+
+pub fn disarm_preemption_frame_test() {
+    PREEMPTION_TEST_TARGET_FRAME.store(0, Ordering::Release);
 }
 
 pub fn last_timer_tick() -> u64 {

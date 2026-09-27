@@ -2,17 +2,21 @@ use core::arch::x86_64::__cpuid;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use x86_64::instructions::interrupts;
+use x86_64::instructions::port::Port;
 
 pub const TIMER_VECTOR: u8 = 0xe0;
+pub const SPURIOUS_VECTOR: u8 = 0xff;
 
 const IA32_APIC_BASE: u32 = 0x1b;
 const IA32_X2APIC_EOI: u32 = 0x80b;
+const IA32_X2APIC_SPURIOUS_VECTOR: u32 = 0x80f;
 const IA32_X2APIC_LVT_TIMER: u32 = 0x832;
 const IA32_X2APIC_INITIAL_COUNT: u32 = 0x838;
 const IA32_X2APIC_DIVIDE_CONFIGURATION: u32 = 0x83e;
 
 const APIC_GLOBAL_ENABLE: u64 = 1 << 11;
 const X2APIC_ENABLE: u64 = 1 << 10;
+const APIC_SOFTWARE_ENABLE: u64 = 1 << 8;
 const TIMER_PERIODIC_MODE: u64 = 1 << 17;
 const TIMER_DIVIDE_BY_ONE: u64 = 0b1011;
 const TIMER_INITIAL_COUNT: u64 = 10_000_000;
@@ -29,13 +33,10 @@ pub fn init_periodic_timer() -> Result<(), InitError> {
     verify_capabilities()?;
 
     interrupts::without_interrupts(|| unsafe {
+        mask_legacy_pic();
         enable_x2apic();
-        write_msr(IA32_X2APIC_DIVIDE_CONFIGURATION, TIMER_DIVIDE_BY_ONE);
-        write_msr(
-            IA32_X2APIC_LVT_TIMER,
-            u64::from(TIMER_VECTOR) | TIMER_PERIODIC_MODE,
-        );
-        write_msr(IA32_X2APIC_INITIAL_COUNT, TIMER_INITIAL_COUNT);
+        enable_local_apic();
+        configure_periodic_timer();
     });
 
     Ok(())
@@ -73,10 +74,44 @@ fn verify_capabilities() -> Result<(), InitError> {
     Ok(())
 }
 
+unsafe fn mask_legacy_pic() {
+    let mut primary_mask = Port::<u8>::new(0x21);
+    let mut secondary_mask = Port::<u8>::new(0xa1);
+
+    unsafe {
+        primary_mask.write(0xff);
+        secondary_mask.write(0xff);
+    }
+}
+
 unsafe fn enable_x2apic() {
-    let current = unsafe { read_msr(IA32_APIC_BASE) };
-    let enabled = current | APIC_GLOBAL_ENABLE | X2APIC_ENABLE;
-    unsafe { write_msr(IA32_APIC_BASE, enabled) };
+    let mut current = unsafe { read_msr(IA32_APIC_BASE) };
+
+    if current & APIC_GLOBAL_ENABLE == 0 {
+        current |= APIC_GLOBAL_ENABLE;
+        unsafe { write_msr(IA32_APIC_BASE, current) };
+    }
+
+    if current & X2APIC_ENABLE == 0 {
+        current |= X2APIC_ENABLE;
+        unsafe { write_msr(IA32_APIC_BASE, current) };
+    }
+}
+
+unsafe fn enable_local_apic() {
+    let value = APIC_SOFTWARE_ENABLE | u64::from(SPURIOUS_VECTOR);
+    unsafe { write_msr(IA32_X2APIC_SPURIOUS_VECTOR, value) };
+}
+
+unsafe fn configure_periodic_timer() {
+    unsafe {
+        write_msr(IA32_X2APIC_DIVIDE_CONFIGURATION, TIMER_DIVIDE_BY_ONE);
+        write_msr(
+            IA32_X2APIC_LVT_TIMER,
+            u64::from(TIMER_VECTOR) | TIMER_PERIODIC_MODE,
+        );
+        write_msr(IA32_X2APIC_INITIAL_COUNT, TIMER_INITIAL_COUNT);
+    }
 }
 
 unsafe fn read_msr(register: u32) -> u64 {

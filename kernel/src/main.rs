@@ -39,6 +39,18 @@ const THREAD_CONTEXT_TEST_STACK_SIZE: usize = 64 * 1024;
 const PREEMPTION_TEST_STACK_SIZE: usize = 16 * 1024;
 static PREEMPTION_TEST_ENTERED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
+static APIC_ROUND_ROBIN_FIRST_ENTERED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+static APIC_ROUND_ROBIN_SECOND_ENTERED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+static APIC_ROUND_ROBIN_FAILED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+static APIC_ROUND_ROBIN_PHASE: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+static APIC_ROUND_ROBIN_BOOTSTRAP_FRAME: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+static APIC_ROUND_ROBIN_MANAGER: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 static HARDWARE_PREEMPTION_FIRST_SEEN: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 static HARDWARE_PREEMPTION_SECOND_SEEN: core::sync::atomic::AtomicBool =

@@ -50,8 +50,8 @@ const STATUS_OPERATION_NOT_READY: u32 = 3;
 const IPC_INLINE_WORD_CAPACITY: u64 = 6;
 const ENTRY_STACK_SIZE: u64 = 64 * 1024;
 pub const PROCESS_CAPABILITY_CAPACITY: usize = 64;
-pub const ENDPOINT_REGISTRY_CAPACITY: usize = 64;
-pub const ENDPOINT_QUEUE_CAPACITY: usize = 16;
+pub const ENDPOINT_REGISTRY_CAPACITY: usize = 8;
+pub const ENDPOINT_QUEUE_CAPACITY: usize = 4;
 
 pub type KernelEndpointRegistry =
     EndpointRegistry<ENDPOINT_REGISTRY_CAPACITY, ENDPOINT_QUEUE_CAPACITY>;

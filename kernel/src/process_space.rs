@@ -129,7 +129,9 @@ impl<const CAPACITY: usize> ProcessAddressSpace<CAPACITY> {
             .model
             .find(start)
             .filter(|region| region.start == start && region.length == length)
-            .ok_or(ProcessAddressSpaceError::Region(RegionError::RegionNotFound))?;
+            .ok_or(ProcessAddressSpaceError::Region(
+                RegionError::RegionNotFound,
+            ))?;
 
         let page_count = region.length / PAGE_SIZE;
         for index in 0..page_count {

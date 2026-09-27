@@ -759,9 +759,8 @@ fn hardware_scheduler_preemption_self_test() {
     HARDWARE_PREEMPTION_SECOND_SEEN.store(false, core::sync::atomic::Ordering::Relaxed);
     HARDWARE_PREEMPTION_THIRD_SEEN.store(false, core::sync::atomic::Ordering::Relaxed);
 
-    let mut manager = thread_manager::ThreadManager::<
-        { thread_manager::HARDWARE_PREEMPTION_TEST_CAPACITY },
-    >::new();
+    let mut manager =
+        thread_manager::ThreadManager::<{ thread_manager::KERNEL_THREAD_CAPACITY }>::new();
 
     let returning = manager
         .spawn_preemptive_returning(
@@ -785,9 +784,13 @@ fn hardware_scheduler_preemption_self_test() {
         )
         .expect("не удалось создать третий аппаратно вытесняемый поток");
 
-    let armed = unsafe { thread_manager::arm_hardware_preemption_test(&mut manager) };
-    if !armed {
-        panic!("аппаратный тест планировщика уже занят");
+    let installed = unsafe { thread_manager::install_preemptive_manager(&mut manager) };
+    if !installed {
+        panic!("постоянный контроллер вытеснения уже занят");
+    }
+    if !thread_manager::arm_hardware_preemption_test() {
+        thread_manager::remove_preemptive_manager();
+        panic!("не удалось включить аппаратную проверку контроллера вытеснения");
     }
 
     while !thread_manager::hardware_preemption_test_completed() {
@@ -795,8 +798,10 @@ fn hardware_scheduler_preemption_self_test() {
     }
 
     thread_manager::disarm_hardware_preemption_test();
+    thread_manager::remove_preemptive_manager();
 
     if thread_manager::hardware_preemption_test_failed()
+        || thread_manager::preemptive_scheduler_failed()
         || thread_manager::hardware_preemption_test_switches() < 4
         || !HARDWARE_PREEMPTION_FIRST_SEEN.load(core::sync::atomic::Ordering::Acquire)
         || !HARDWARE_PREEMPTION_SECOND_SEEN.load(core::sync::atomic::Ordering::Acquire)
@@ -950,6 +955,12 @@ fn init_apic_timer(
         out,
         "INFO",
         format_args!("kernel thread preemptive return self-test: OK"),
+    );
+
+    serial::line(
+        out,
+        "INFO",
+        format_args!("kernel thread preemption controller self-test: OK"),
     );
 }
 

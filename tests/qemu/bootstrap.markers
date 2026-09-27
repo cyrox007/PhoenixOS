@@ -12,6 +12,7 @@ kernel thread initial irq frame self-test: OK
 kernel thread preemptive spawn self-test: OK
 kernel thread hardware round robin self-test: OK
 kernel thread preemptive return self-test: OK
+kernel thread preemption controller self-test: OK
 kernel thread scheduler self-test: OK
 thread preemption hook self-test: OK
 thread interrupt frame self-test: OK

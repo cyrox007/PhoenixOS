@@ -382,8 +382,7 @@ fn init_apic_timer(
         panic!("таймерный IRQ передал неполный аппаратный контекст");
     }
 
-    if observed_context.register_capture_marker
-        != arch::x86_64::apic::TIMER_REGISTER_CAPTURE_MARKER
+    if observed_context.register_capture_marker != arch::x86_64::apic::TIMER_REGISTER_CAPTURE_MARKER
     {
         panic!("таймерный IRQ не прошёл через вход сохранения регистров");
     }

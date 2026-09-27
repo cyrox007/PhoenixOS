@@ -213,10 +213,17 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!("thread context self-test: OK"),
     );
 
+    kernel_thread_interrupt_frame_self_test();
+
     serial::line(
         &mut out,
         "INFO",
         format_args!("kernel thread object self-test: OK"),
+    );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("kernel thread interrupt frame self-test: OK"),
     );
 
     kernel_thread_scheduler_self_test();
@@ -395,6 +402,34 @@ extern "C" fn thread_context_test_entry(argument: usize) -> ! {
 
     loop {
         core::hint::spin_loop();
+    }
+}
+
+fn kernel_thread_interrupt_frame_self_test() {
+    let mut thread = thread::KernelThread::new(
+        thread::ThreadId(0x1f),
+        THREAD_CONTEXT_TEST_STACK_SIZE,
+        thread_context_test_entry,
+        0,
+    )
+    .expect("не удалось создать поток для проверки IRQ-кадра");
+
+    if thread.interrupt_frame().is_some() {
+        panic!("новый поток неожиданно содержит IRQ-кадр");
+    }
+    if thread.save_interrupt_frame(0).is_ok() || thread.save_interrupt_frame(3).is_ok() {
+        panic!("поток принял некорректный адрес IRQ-кадра");
+    }
+
+    const FRAME: u64 = 0x8000;
+    thread
+        .save_interrupt_frame(FRAME)
+        .expect("не удалось сохранить IRQ-кадр потока");
+    if thread.interrupt_frame() != Some(FRAME) || thread.take_interrupt_frame() != Some(FRAME) {
+        panic!("IRQ-кадр потока не прошёл полный жизненный цикл");
+    }
+    if thread.interrupt_frame().is_some() {
+        panic!("изъятый IRQ-кадр остался привязан к потоку");
     }
 }
 

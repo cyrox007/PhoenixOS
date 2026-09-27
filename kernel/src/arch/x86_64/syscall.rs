@@ -11,6 +11,13 @@ const EFER_SCE: u64 = 1 << 0;
 const RFLAGS_TRAP: u64 = 1 << 8;
 const RFLAGS_INTERRUPT: u64 = 1 << 9;
 const RFLAGS_DIRECTION: u64 = 1 << 10;
+const RFLAGS_RESERVED_ONE: u64 = 1 << 1;
+const RFLAGS_IOPL: u64 = 0b11 << 12;
+const RFLAGS_NESTED_TASK: u64 = 1 << 14;
+const RFLAGS_RESUME: u64 = 1 << 16;
+const RFLAGS_VIRTUAL_8086: u64 = 1 << 17;
+const RFLAGS_FORBIDDEN_USER_RETURN: u64 =
+    RFLAGS_IOPL | RFLAGS_NESTED_TASK | RFLAGS_RESUME | RFLAGS_VIRTUAL_8086;
 const SYSCALL_CPUID_BIT: u32 = 1 << 11;
 
 const SELF_TEST_NUMBER: u64 = u64::MAX;
@@ -138,6 +145,56 @@ pub struct SyscallMsrState {
     pub efer: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserReturnError {
+    NullInstructionPointer,
+    NullStackPointer,
+    InstructionPointerOutsideUserSpace,
+    StackPointerOutsideUserSpace,
+    ForbiddenFlags,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserReturnContext {
+    pub instruction_pointer: u64,
+    pub stack_pointer: u64,
+    pub cpu_flags: u64,
+}
+
+impl UserReturnContext {
+    pub fn new(
+        instruction_pointer: u64,
+        stack_pointer: u64,
+        cpu_flags: u64,
+    ) -> Result<Self, UserReturnError> {
+        if instruction_pointer == 0 {
+            return Err(UserReturnError::NullInstructionPointer);
+        }
+
+        if stack_pointer == 0 {
+            return Err(UserReturnError::NullStackPointer);
+        }
+
+        if instruction_pointer >= phoenix_vm::USER_SPACE_END_EXCLUSIVE {
+            return Err(UserReturnError::InstructionPointerOutsideUserSpace);
+        }
+
+        if stack_pointer >= phoenix_vm::USER_SPACE_END_EXCLUSIVE {
+            return Err(UserReturnError::StackPointerOutsideUserSpace);
+        }
+
+        if cpu_flags & RFLAGS_FORBIDDEN_USER_RETURN != 0 {
+            return Err(UserReturnError::ForbiddenFlags);
+        }
+
+        Ok(Self {
+            instruction_pointer,
+            stack_pointer,
+            cpu_flags: cpu_flags | RFLAGS_RESERVED_ONE,
+        })
+    }
+}
+
 pub fn supported() -> bool {
     let maximum = unsafe { __cpuid(0x8000_0000) }.eax;
     if maximum < 0x8000_0001 {
@@ -237,6 +294,35 @@ pub fn entry_stack_self_test() -> bool {
     }
 
     observed_rsp >= stack_start && observed_rsp <= stack_end && observed_rsp & 0xf == 0
+}
+
+pub fn return_context_self_test() -> bool {
+    let flags = RFLAGS_RESERVED_ONE | RFLAGS_INTERRUPT;
+    let Ok(context) = UserReturnContext::new(0x4000_0000, 0x4000_2000, flags) else {
+        return false;
+    };
+
+    if context.cpu_flags & RFLAGS_RESERVED_ONE == 0 {
+        return false;
+    }
+
+    if UserReturnContext::new(0, 0x4000_2000, flags).is_ok() {
+        return false;
+    }
+
+    if UserReturnContext::new(0x4000_0000, 0, flags).is_ok() {
+        return false;
+    }
+
+    if UserReturnContext::new(phoenix_vm::USER_SPACE_END_EXCLUSIVE, 0x4000_2000, flags).is_ok() {
+        return false;
+    }
+
+    if UserReturnContext::new(0x4000_0000, phoenix_vm::USER_SPACE_END_EXCLUSIVE, flags).is_ok() {
+        return false;
+    }
+
+    UserReturnContext::new(0x4000_0000, 0x4000_2000, flags | RFLAGS_IOPL).is_err()
 }
 
 #[unsafe(no_mangle)]

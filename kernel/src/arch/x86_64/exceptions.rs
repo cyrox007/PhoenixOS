@@ -68,11 +68,10 @@ phoenix_apic_timer_entry:
     push rax
 
     cld
-    mov r12, rsp
     mov rdi, rsp
     and rsp, -16
     call phoenix_apic_timer_rust_handler
-    mov rsp, r12
+    mov rsp, rax
 
     pop rax
     pop rbx
@@ -166,7 +165,7 @@ extern "x86-interrupt" fn double_fault_handler(
 }
 
 #[unsafe(export_name = "phoenix_apic_timer_rust_handler")]
-extern "C" fn apic_timer_handler(frame: *mut TimerInterruptStackFrame) {
+extern "C" fn apic_timer_handler(frame: *mut TimerInterruptStackFrame) -> u64 {
     let frame = unsafe { &mut *frame };
     let context = apic::TimerInterruptContext {
         instruction_pointer: frame.instruction_pointer(),
@@ -177,7 +176,7 @@ extern "C" fn apic_timer_handler(frame: *mut TimerInterruptStackFrame) {
         stack_frame_address: frame as *mut TimerInterruptStackFrame as u64,
     };
 
-    apic::handle_timer_interrupt(context);
+    apic::handle_timer_interrupt(context)
 }
 
 extern "x86-interrupt" fn apic_spurious_handler(_stack_frame: InterruptStackFrame) {}

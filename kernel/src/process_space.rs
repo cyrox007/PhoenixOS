@@ -1,6 +1,8 @@
-use phoenix_process::{AddressSpace, AddressSpaceId, RegionError, VirtualRegion, PAGE_SIZE};
+use phoenix_process::{AddressSpace, AddressSpaceId, PAGE_SIZE, RegionError, VirtualRegion};
 use phoenix_vm::{InactivePageTable, InactivePageTableError, USER_SPACE_END_EXCLUSIVE};
-use x86_64::structures::paging::{FrameAllocator, FrameDeallocator, Page, PageTableFlags, Size4KiB};
+use x86_64::structures::paging::{
+    FrameAllocator, FrameDeallocator, Page, PageTableFlags, Size4KiB,
+};
 use x86_64::{PhysAddr, VirtAddr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

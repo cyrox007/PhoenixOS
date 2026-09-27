@@ -119,8 +119,10 @@ impl KernelProcessCapabilityRegistry {
     fn get_mut(
         &mut self,
         owner: ProcessId,
-    ) -> Result<&mut ProcessCapabilitySet<PROCESS_CAPABILITY_CAPACITY>, ProcessCapabilityRegistryError>
-    {
+    ) -> Result<
+        &mut ProcessCapabilitySet<PROCESS_CAPABILITY_CAPACITY>,
+        ProcessCapabilityRegistryError,
+    > {
         let entry = self
             .entries
             .iter()
@@ -919,13 +921,7 @@ fn dispatch_ipc_send(request: SyscallRequest) -> SyscallReturn {
         let transfer = with_current_process_capabilities(|source| {
             with_process_capability_registry(|processes| {
                 let target = processes.get_mut(receiver)?;
-                send_with_capability(
-                    endpoint,
-                    source,
-                    target,
-                    words.as_slice(),
-                    transfer_handle,
-                )?;
+                send_with_capability(endpoint, source, target, words.as_slice(), transfer_handle)?;
                 Ok::<_, EndpointOperationError>(words.len())
             })
             .ok_or(EndpointOperationError::ContextNotInstalled)?

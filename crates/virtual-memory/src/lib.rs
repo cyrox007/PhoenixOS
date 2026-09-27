@@ -14,6 +14,80 @@ pub const USER_P4_ENTRY_COUNT: usize = 1;
 pub const USER_SPACE_END_EXCLUSIVE: u64 = 0x0000_0080_0000_0000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserBufferError {
+    InvalidElementSize,
+    InvalidAlignment,
+    NullAddress,
+    Misaligned,
+    SizeOverflow,
+    OutsideUserSpace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserBuffer {
+    start: u64,
+    len: u64,
+}
+
+impl UserBuffer {
+    pub fn for_array(
+        start: u64,
+        element_count: u64,
+        element_size: u64,
+        alignment: u64,
+    ) -> Result<Self, UserBufferError> {
+        if element_size == 0 {
+            return Err(UserBufferError::InvalidElementSize);
+        }
+
+        if alignment == 0 || !alignment.is_power_of_two() {
+            return Err(UserBufferError::InvalidAlignment);
+        }
+
+        if element_count == 0 {
+            return Ok(Self { start: 0, len: 0 });
+        }
+
+        if start == 0 {
+            return Err(UserBufferError::NullAddress);
+        }
+
+        if start & (alignment - 1) != 0 {
+            return Err(UserBufferError::Misaligned);
+        }
+
+        let len = element_count
+            .checked_mul(element_size)
+            .ok_or(UserBufferError::SizeOverflow)?;
+        let end = start
+            .checked_add(len)
+            .ok_or(UserBufferError::SizeOverflow)?;
+
+        if start >= USER_SPACE_END_EXCLUSIVE || end > USER_SPACE_END_EXCLUSIVE {
+            return Err(UserBufferError::OutsideUserSpace);
+        }
+
+        Ok(Self { start, len })
+    }
+
+    pub const fn start(self) -> u64 {
+        self.start
+    }
+
+    pub const fn len(self) -> u64 {
+        self.len
+    }
+
+    pub const fn end_exclusive(self) -> u64 {
+        self.start + self.len
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.len == 0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageSpan {
     pub first: Page<Size4KiB>,
     pub count: u64,
@@ -536,6 +610,61 @@ extern crate std;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_buffer_validates_array_range() {
+        let buffer = UserBuffer::for_array(0x1ff8, 3, 8, 8).unwrap();
+
+        assert_eq!(buffer.start(), 0x1ff8);
+        assert_eq!(buffer.len(), 24);
+        assert_eq!(buffer.end_exclusive(), 0x2010);
+        assert!(!buffer.is_empty());
+    }
+
+    #[test]
+    fn empty_user_buffer_is_normalized_without_dereference() {
+        let buffer = UserBuffer::for_array(0, 0, 8, 8).unwrap();
+
+        assert_eq!(buffer.start(), 0);
+        assert_eq!(buffer.len(), 0);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn user_buffer_rejects_invalid_pointer_shape() {
+        assert_eq!(
+            UserBuffer::for_array(0, 1, 8, 8),
+            Err(UserBufferError::NullAddress)
+        );
+        assert_eq!(
+            UserBuffer::for_array(0x1001, 1, 8, 8),
+            Err(UserBufferError::Misaligned)
+        );
+        assert_eq!(
+            UserBuffer::for_array(0x1000, 1, 0, 8),
+            Err(UserBufferError::InvalidElementSize)
+        );
+        assert_eq!(
+            UserBuffer::for_array(0x1000, 1, 8, 3),
+            Err(UserBufferError::InvalidAlignment)
+        );
+    }
+
+    #[test]
+    fn user_buffer_rejects_overflow_and_kernel_range() {
+        assert_eq!(
+            UserBuffer::for_array(0x1000, u64::MAX, 8, 8),
+            Err(UserBufferError::SizeOverflow)
+        );
+        assert_eq!(
+            UserBuffer::for_array(USER_SPACE_END_EXCLUSIVE - 8, 2, 8, 8),
+            Err(UserBufferError::OutsideUserSpace)
+        );
+        assert_eq!(
+            UserBuffer::for_array(USER_SPACE_END_EXCLUSIVE, 1, 8, 8),
+            Err(UserBufferError::OutsideUserSpace)
+        );
+    }
 
     #[test]
     fn byte_span_covers_unaligned_edges() {

@@ -1,6 +1,9 @@
 use core::arch::{global_asm, x86_64::__cpuid};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+use phoenix_capability::{CapabilityError, CapabilityHandle, ObjectKind, Rights};
+use phoenix_ipc::EndpointId;
+use phoenix_process::ProcessCapabilitySet;
 use phoenix_syscall_abi::{
     IpcReceiveArguments, IpcSendArguments, NO_TRANSFERRED_CAPABILITY, PackedCapabilityHandle,
     SYSCALL_IPC_RECEIVE, SYSCALL_IPC_SEND, SyscallRequest, SyscallReturn, SyscallStatus,
@@ -45,18 +48,27 @@ const STATUS_BAD_ARGUMENTS: u32 = 2;
 const STATUS_OPERATION_NOT_READY: u32 = 3;
 const IPC_INLINE_WORD_CAPACITY: u64 = 6;
 const ENTRY_STACK_SIZE: u64 = 64 * 1024;
+pub const PROCESS_CAPABILITY_CAPACITY: usize = 64;
 
 static USER_SELF_TEST_RESULT: AtomicU64 = AtomicU64::new(0);
 static CURRENT_PROCESS_ADDRESS_SPACE: AtomicUsize = AtomicUsize::new(0);
+static CURRENT_PROCESS_CAPABILITIES: AtomicUsize = AtomicUsize::new(0);
 
 pub struct CurrentProcessContextGuard {
     address_space: usize,
+    capabilities: usize,
 }
 
 impl Drop for CurrentProcessContextGuard {
     fn drop(&mut self) {
         let _ = CURRENT_PROCESS_ADDRESS_SPACE.compare_exchange(
             self.address_space,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        let _ = CURRENT_PROCESS_CAPABILITIES.compare_exchange(
+            self.capabilities,
             0,
             Ordering::AcqRel,
             Ordering::Acquire,
@@ -70,21 +82,46 @@ pub enum CurrentProcessContextError {
     UserMemory(IpcUserMemoryError),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointCapabilityError {
+    ContextNotInstalled,
+    Capability(CapabilityError),
+    WrongObjectKind,
+}
+
 /// Registers the address space used by the current system-call execution context.
 ///
 /// # Safety
 ///
-/// `space` must remain alive and exclusively owned until the returned guard is
-/// dropped. The early implementation is single-CPU and callers must keep
-/// interrupts disabled while user code can enter the system-call dispatcher.
+/// `space` and `capabilities` must remain alive and exclusively owned until the
+/// returned guard is dropped. The early implementation is single-CPU and
+/// callers must keep interrupts disabled while user code can enter the
+/// system-call dispatcher.
 pub unsafe fn install_current_process_context(
     space: &mut ProcessAddressSpace<PROCESS_REGION_CAPACITY>,
+    capabilities: &mut ProcessCapabilitySet<PROCESS_CAPABILITY_CAPACITY>,
 ) -> Option<CurrentProcessContextGuard> {
     let address_space = space as *mut ProcessAddressSpace<PROCESS_REGION_CAPACITY> as usize;
+    let capabilities =
+        capabilities as *mut ProcessCapabilitySet<PROCESS_CAPABILITY_CAPACITY> as usize;
+    if CURRENT_PROCESS_CAPABILITIES
+        .compare_exchange(0, capabilities, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return None;
+    }
+
     CURRENT_PROCESS_ADDRESS_SPACE
         .compare_exchange(0, address_space, Ordering::AcqRel, Ordering::Acquire)
         .ok()
-        .map(|_| CurrentProcessContextGuard { address_space })
+        .map(|_| CurrentProcessContextGuard {
+            address_space,
+            capabilities,
+        })
+        .or_else(|| {
+            CURRENT_PROCESS_CAPABILITIES.store(0, Ordering::Release);
+            None
+        })
 }
 
 fn with_current_process_address_space<T>(
@@ -109,6 +146,34 @@ pub fn copy_ipc_receive_words_to_current_process(
     })
     .ok_or(CurrentProcessContextError::NotInstalled)?
     .map_err(CurrentProcessContextError::UserMemory)
+}
+
+pub fn resolve_current_endpoint(
+    packed: PackedCapabilityHandle,
+    required_rights: Rights,
+) -> Result<EndpointId, EndpointCapabilityError> {
+    let capabilities = CURRENT_PROCESS_CAPABILITIES.load(Ordering::Acquire);
+    if capabilities == 0 {
+        return Err(EndpointCapabilityError::ContextNotInstalled);
+    }
+
+    let capabilities =
+        unsafe { &*(capabilities as *const ProcessCapabilitySet<PROCESS_CAPABILITY_CAPACITY>) };
+    let capability = capabilities
+        .require(
+            CapabilityHandle {
+                slot: packed.slot(),
+                generation: packed.generation(),
+            },
+            required_rights,
+        )
+        .map_err(EndpointCapabilityError::Capability)?;
+
+    if capability.kind != ObjectKind::Endpoint {
+        return Err(EndpointCapabilityError::WrongObjectKind);
+    }
+
+    Ok(EndpointId(capability.object.0))
 }
 
 #[unsafe(export_name = "phoenix_user_test_active")]
@@ -596,6 +661,11 @@ fn dispatch_ipc_send(request: SyscallRequest) -> SyscallReturn {
         return syscall_failure(STATUS_BAD_ARGUMENTS);
     }
 
+    match resolve_current_endpoint(arguments.endpoint, Rights::WRITE) {
+        Ok(_) | Err(EndpointCapabilityError::ContextNotInstalled) => {}
+        Err(_) => return syscall_failure(STATUS_BAD_ARGUMENTS),
+    }
+
     syscall_failure(STATUS_OPERATION_NOT_READY)
 }
 
@@ -626,6 +696,11 @@ fn dispatch_ipc_receive(request: SyscallRequest) -> SyscallReturn {
         return syscall_failure(STATUS_BAD_ARGUMENTS);
     }
 
+    match resolve_current_endpoint(arguments.endpoint, Rights::READ) {
+        Ok(_) | Err(EndpointCapabilityError::ContextNotInstalled) => {}
+        Err(_) => return syscall_failure(STATUS_BAD_ARGUMENTS),
+    }
+
     syscall_failure(STATUS_OPERATION_NOT_READY)
 }
 
@@ -653,16 +728,24 @@ fn ipc_receive_arguments(request: SyscallRequest) -> IpcReceiveArguments {
 pub fn ipc_user_memory_context_self_test(
     send: IpcSendArguments,
     unmapped_send: IpcSendArguments,
+    denied_send: IpcSendArguments,
     receive: IpcReceiveArguments,
     receive_words: &[u64],
+    expected_endpoint: EndpointId,
 ) -> bool {
     let send_result = dispatch(SyscallRequest::ipc_send(send));
     let unmapped_result = dispatch(SyscallRequest::ipc_send(unmapped_send));
+    let denied_result = dispatch(SyscallRequest::ipc_send(denied_send));
+    let receive_dispatch_result = dispatch(SyscallRequest::ipc_receive(receive));
     let receive_result = copy_ipc_receive_words_to_current_process(receive, receive_words);
+    let resolved = resolve_current_endpoint(send.endpoint, Rights::WRITE);
 
     send_result.status.raw() == u64::from(STATUS_OPERATION_NOT_READY)
         && unmapped_result.status.raw() == u64::from(STATUS_BAD_ARGUMENTS)
+        && denied_result.status.raw() == u64::from(STATUS_BAD_ARGUMENTS)
+        && receive_dispatch_result.status.raw() == u64::from(STATUS_OPERATION_NOT_READY)
         && receive_result.is_ok()
+        && resolved == Ok(expected_endpoint)
 }
 
 pub fn ipc_dispatch_self_test() -> bool {

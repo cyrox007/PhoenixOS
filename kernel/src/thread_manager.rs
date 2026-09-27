@@ -79,6 +79,10 @@ pub fn preemption_frame_test_completed() -> bool {
     PREEMPTION_TEST_PHASE.load(Ordering::Acquire) == 2
 }
 
+pub fn preemption_frame_test_phase() -> u64 {
+    PREEMPTION_TEST_PHASE.load(Ordering::Acquire)
+}
+
 pub fn disarm_preemption_frame_test() {
     PREEMPTION_TEST_TARGET_FRAME.store(0, Ordering::Release);
 }

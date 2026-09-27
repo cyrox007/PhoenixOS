@@ -93,6 +93,7 @@ impl Message {
 
 pub struct Endpoint<const CAPACITY: usize> {
     id: EndpointId,
+    owner: Option<ProcessId>,
     queue: [Option<Message>; CAPACITY],
     head: usize,
     tail: usize,
@@ -101,8 +102,17 @@ pub struct Endpoint<const CAPACITY: usize> {
 
 impl<const CAPACITY: usize> Endpoint<CAPACITY> {
     pub const fn new(id: EndpointId) -> Self {
+        Self::new_with_owner(id, None)
+    }
+
+    pub const fn new_owned(id: EndpointId, owner: ProcessId) -> Self {
+        Self::new_with_owner(id, Some(owner))
+    }
+
+    const fn new_with_owner(id: EndpointId, owner: Option<ProcessId>) -> Self {
         Self {
             id,
+            owner,
             queue: [None; CAPACITY],
             head: 0,
             tail: 0,
@@ -112,6 +122,10 @@ impl<const CAPACITY: usize> Endpoint<CAPACITY> {
 
     pub const fn id(&self) -> EndpointId {
         self.id
+    }
+
+    pub const fn owner(&self) -> Option<ProcessId> {
+        self.owner
     }
 
     pub const fn len(&self) -> usize {
@@ -267,6 +281,15 @@ impl<const REGISTRY_CAPACITY: usize, const QUEUE_CAPACITY: usize> Default
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_endpoint_exposes_receiver() {
+        let endpoint = Endpoint::<1>::new_owned(EndpointId(7), ProcessId(20));
+
+        assert_eq!(endpoint.id(), EndpointId(7));
+        assert_eq!(endpoint.owner(), Some(ProcessId(20)));
+        assert_eq!(Endpoint::<1>::new(EndpointId(8)).owner(), None);
+    }
 
     #[test]
     fn endpoint_preserves_fifo_order_and_sender() {

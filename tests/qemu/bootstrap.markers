@@ -37,6 +37,7 @@ syscall entry stack self-test: OK
 syscall return context self-test: OK
 process capability self-test: OK
 ipc endpoint self-test: OK
+ipc endpoint registry self-test: OK
 ipc syscall dispatch self-test: OK
 ipc syscall memory context self-test: OK
 ipc capability endpoint self-test: OK

@@ -16,6 +16,13 @@ pub enum IpcError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointRegistryError {
+    CapacityExceeded,
+    DuplicateId,
+    NotFound,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpcSendError {
     Transport(IpcError),
     Capability(CapabilityError),
@@ -176,6 +183,79 @@ impl<const CAPACITY: usize> Default for Endpoint<CAPACITY> {
     }
 }
 
+pub struct EndpointRegistry<const REGISTRY_CAPACITY: usize, const QUEUE_CAPACITY: usize> {
+    endpoints: [Option<Endpoint<QUEUE_CAPACITY>>; REGISTRY_CAPACITY],
+    len: usize,
+}
+
+impl<const REGISTRY_CAPACITY: usize, const QUEUE_CAPACITY: usize>
+    EndpointRegistry<REGISTRY_CAPACITY, QUEUE_CAPACITY>
+{
+    pub fn new() -> Self {
+        Self {
+            endpoints: core::array::from_fn(|_| None),
+            len: 0,
+        }
+    }
+
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn insert(
+        &mut self,
+        endpoint: Endpoint<QUEUE_CAPACITY>,
+    ) -> Result<(), EndpointRegistryError> {
+        if self
+            .endpoints
+            .iter()
+            .flatten()
+            .any(|registered| registered.id() == endpoint.id())
+        {
+            return Err(EndpointRegistryError::DuplicateId);
+        }
+
+        let Some(slot) = self.endpoints.iter_mut().find(|entry| entry.is_none()) else {
+            return Err(EndpointRegistryError::CapacityExceeded);
+        };
+
+        *slot = Some(endpoint);
+        self.len += 1;
+        Ok(())
+    }
+
+    pub fn get(&self, id: EndpointId) -> Result<&Endpoint<QUEUE_CAPACITY>, EndpointRegistryError> {
+        self.endpoints
+            .iter()
+            .flatten()
+            .find(|endpoint| endpoint.id() == id)
+            .ok_or(EndpointRegistryError::NotFound)
+    }
+
+    pub fn get_mut(
+        &mut self,
+        id: EndpointId,
+    ) -> Result<&mut Endpoint<QUEUE_CAPACITY>, EndpointRegistryError> {
+        self.endpoints
+            .iter_mut()
+            .flatten()
+            .find(|endpoint| endpoint.id() == id)
+            .ok_or(EndpointRegistryError::NotFound)
+    }
+}
+
+impl<const REGISTRY_CAPACITY: usize, const QUEUE_CAPACITY: usize> Default
+    for EndpointRegistry<REGISTRY_CAPACITY, QUEUE_CAPACITY>
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,6 +285,47 @@ mod tests {
             endpoint.send(Message::new(ProcessId(2), &[22]).unwrap()),
             Err(IpcError::QueueFull)
         );
+    }
+
+    #[test]
+    fn registry_resolves_endpoint_and_preserves_queue_state() {
+        let mut registry = EndpointRegistry::<2, 2>::new();
+        let endpoint_id = EndpointId(0x55);
+        let message = Message::new(ProcessId(10), &[1, 2]).unwrap();
+
+        registry.insert(Endpoint::new(endpoint_id)).unwrap();
+        registry
+            .get_mut(endpoint_id)
+            .unwrap()
+            .send(message)
+            .unwrap();
+
+        assert_eq!(registry.len(), 1);
+        assert_eq!(registry.get(endpoint_id).unwrap().len(), 1);
+        assert_eq!(
+            registry.get_mut(endpoint_id).unwrap().receive(),
+            Ok(message)
+        );
+    }
+
+    #[test]
+    fn registry_rejects_duplicate_full_and_missing_entries() {
+        let mut registry = EndpointRegistry::<1, 1>::new();
+        let endpoint_id = EndpointId(1);
+
+        registry.insert(Endpoint::new(endpoint_id)).unwrap();
+        assert_eq!(
+            registry.insert(Endpoint::new(endpoint_id)),
+            Err(EndpointRegistryError::DuplicateId)
+        );
+        assert_eq!(
+            registry.insert(Endpoint::new(EndpointId(2))),
+            Err(EndpointRegistryError::CapacityExceeded)
+        );
+        assert!(matches!(
+            registry.get(EndpointId(3)),
+            Err(EndpointRegistryError::NotFound)
+        ));
     }
 
     #[test]

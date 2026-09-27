@@ -142,6 +142,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     ipc_self_test();
     serial::line(&mut out, "INFO", format_args!("ipc endpoint self-test: OK"));
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("ipc endpoint registry self-test: OK"),
+    );
 
     arch::x86_64::exceptions::smoke_test_breakpoint();
     serial::line(&mut out, "INFO", format_args!("breakpoint self-test: OK"));
@@ -345,10 +350,28 @@ fn process_capability_self_test() {
 }
 
 fn ipc_self_test() {
-    use phoenix_ipc::{Endpoint, EndpointId, IpcError, Message};
+    use phoenix_ipc::{
+        Endpoint, EndpointId, EndpointRegistry, EndpointRegistryError, IpcError, Message,
+    };
     use phoenix_process::ProcessId;
 
-    let mut endpoint = Endpoint::<2>::new(EndpointId(0x4950_435f_5445_5354));
+    let endpoint_id = EndpointId(0x4950_435f_5445_5354);
+    let mut registry = EndpointRegistry::<2, 2>::new();
+    registry
+        .insert(Endpoint::new(endpoint_id))
+        .expect("не удалось зарегистрировать IPC endpoint");
+    if registry.insert(Endpoint::new(endpoint_id)) != Err(EndpointRegistryError::DuplicateId)
+        || !matches!(
+            registry.get(EndpointId(endpoint_id.0 + 1)),
+            Err(EndpointRegistryError::NotFound)
+        )
+    {
+        panic!("реестр IPC endpoint не проверяет идентификаторы");
+    }
+
+    let endpoint = registry
+        .get_mut(endpoint_id)
+        .expect("зарегистрированный IPC endpoint не найден");
     let first = Message::new(ProcessId(100), &[0x11, 0x22])
         .expect("не удалось создать первое IPC-сообщение");
     let second =

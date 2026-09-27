@@ -1,6 +1,6 @@
 #![no_std]
 
-use x86_64::registers::control::Cr3;
+use x86_64::registers::control::{Cr3, Cr3Flags};
 use x86_64::structures::paging::mapper::{MapToError, UnmapError};
 use x86_64::structures::paging::{
     FrameAllocator, FrameDeallocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags,
@@ -140,6 +140,26 @@ pub struct InactivePageTable {
     physical_memory_offset: VirtAddr,
 }
 
+pub struct AddressSpaceActivation<'a> {
+    previous_root: PhysFrame<Size4KiB>,
+    previous_flags: Cr3Flags,
+    active_root: &'a InactivePageTable,
+}
+
+impl AddressSpaceActivation<'_> {
+    pub fn active_root_frame(&self) -> PhysFrame<Size4KiB> {
+        self.active_root.root_frame
+    }
+}
+
+impl Drop for AddressSpaceActivation<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            Cr3::write(self.previous_root, self.previous_flags);
+        }
+    }
+}
+
 impl InactivePageTable {
     /// Выделяет и обнуляет отдельную таблицу P4.
     ///
@@ -174,6 +194,27 @@ impl InactivePageTable {
 
     pub fn root_frame(&self) -> PhysFrame<Size4KiB> {
         self.root_frame
+    }
+
+    /// Временно активирует этот корень таблиц страниц.
+    ///
+    /// Возвращаемый guard автоматически восстанавливает предыдущий CR3.
+    ///
+    /// # Безопасность
+    ///
+    /// Код, текущий стек и все данные, к которым выполняется доступ до
+    /// уничтожения guard, обязаны быть отображены в новом адресном пространстве.
+    pub unsafe fn activate(&self) -> AddressSpaceActivation<'_> {
+        let (previous_root, previous_flags) = Cr3::read();
+        unsafe {
+            Cr3::write(self.root_frame, previous_flags);
+        }
+
+        AddressSpaceActivation {
+            previous_root,
+            previous_flags,
+            active_root: self,
+        }
     }
 
     /// Копирует верхнюю каноническую половину активной P4 в корень процесса.

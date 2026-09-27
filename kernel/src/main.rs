@@ -535,6 +535,32 @@ fn process_region_mapping_self_test(
         }
     }
 
+    let image_start = PROCESS_VM_TEST_ADDRESS + phoenix_process::PAGE_SIZE - 3;
+    let image = [0x48, 0x31, 0xc0, 0x48, 0xff, 0xc0, 0xc3];
+    space
+        .write_user_bytes(VirtAddr::new(image_start), &image)
+        .expect("не удалось загрузить байты в пользовательский регион");
+
+    for (index, expected) in image.iter().copied().enumerate() {
+        let address = VirtAddr::new(image_start + index as u64);
+        let physical = space
+            .translate_addr(address)
+            .expect("байт загруженного образа потерял отображение");
+        let actual = unsafe {
+            (physical_memory_offset + physical.as_u64())
+                .as_ptr::<u8>()
+                .read_volatile()
+        };
+
+        if actual != expected {
+            panic!("байты пользовательского образа записаны неверно");
+        }
+    }
+
+    serial::emergency(format_args!(
+        "[INFO] process user image write self-test: OK\n"
+    ));
+
     let unmapped = space
         .unmap_region(region.start, region.length, frames)
         .expect("не удалось снять пользовательский регион процесса");

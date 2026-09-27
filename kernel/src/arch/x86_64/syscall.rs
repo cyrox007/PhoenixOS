@@ -2,8 +2,8 @@ use core::arch::{global_asm, x86_64::__cpuid};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use phoenix_syscall_abi::{
-    IpcReceiveArguments, IpcSendArguments, PackedCapabilityHandle, SyscallRequest, SyscallReturn,
-    SyscallStatus, SYSCALL_IPC_RECEIVE, SYSCALL_IPC_SEND,
+    IpcReceiveArguments, IpcSendArguments, PackedCapabilityHandle, SYSCALL_IPC_RECEIVE,
+    SYSCALL_IPC_SEND, SyscallRequest, SyscallReturn, SyscallStatus,
 };
 
 const IA32_EFER: u32 = 0xc000_0080;

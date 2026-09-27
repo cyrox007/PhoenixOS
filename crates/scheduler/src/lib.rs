@@ -18,10 +18,7 @@ pub enum SchedulerError {
 pub enum ScheduleDecision {
     Idle,
     Continue(TaskId),
-    Switch {
-        from: Option<TaskId>,
-        to: TaskId,
-    },
+    Switch { from: Option<TaskId>, to: TaskId },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

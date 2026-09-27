@@ -20,6 +20,7 @@ process page table root self-test: OK
 process user mapping self-test: OK
 process region mapping self-test: OK
 process user image write self-test: OK
+process user copy-in self-test: OK
 process cr3 switch self-test: OK
 user mode syscall self-test: OK
 user privilege stack self-test: OK

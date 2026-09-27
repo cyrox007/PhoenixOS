@@ -9,6 +9,7 @@ mod arch;
 mod heap;
 mod qemu;
 mod serial;
+mod thread;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -100,6 +101,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!("thread context self-test: OK"),
     );
 
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("kernel thread object self-test: OK"),
+    );
+
     init_apic_timer(&mut out, &mut page_table, &mut frames);
 
     render_boot_banner(boot_info, &mut out);
@@ -135,32 +142,45 @@ struct ThreadContextTestState {
 }
 
 fn thread_context_self_test() {
-    let mut stack = Vec::new();
-    stack.resize(THREAD_CONTEXT_TEST_STACK_SIZE, 0);
-
     let mut main = arch::x86_64::context::Context::empty();
-    let mut worker = arch::x86_64::context::Context::empty();
-
     let mut state = ThreadContextTestState {
         main: &mut main,
-        worker: &mut worker,
+        worker: core::ptr::null_mut(),
         completed: false,
     };
 
     let argument = &mut state as *mut ThreadContextTestState as usize;
-    worker = arch::x86_64::context::Context::for_stack(
-        stack.as_mut_slice(),
+    let mut worker = thread::KernelThread::new(
+        thread::ThreadId(1),
+        THREAD_CONTEXT_TEST_STACK_SIZE,
         thread_context_test_entry,
         argument,
     )
-    .expect("не удалось подготовить стек тестового потока");
+    .expect("не удалось создать тестовый поток");
+
+    if worker.id() != thread::ThreadId(1)
+        || worker.state() != thread::ThreadState::Ready
+        || worker.stack_size() != THREAD_CONTEXT_TEST_STACK_SIZE
+    {
+        panic!("объект тестового потока создан с неверными свойствами");
+    }
+
+    state.worker = worker.context_mut();
+    worker.start().expect("не удалось запустить тестовый поток");
 
     unsafe {
-        arch::x86_64::context::switch(&mut main, &worker);
+        arch::x86_64::context::switch(&mut main, worker.context());
     }
 
     if !state.completed {
         panic!("тестовый поток не вернул управление основному контексту");
+    }
+
+    worker
+        .finish()
+        .expect("не удалось завершить тестовый поток");
+    if worker.state() != thread::ThreadState::Finished {
+        panic!("тестовый поток не перешёл в завершённое состояние");
     }
 }
 

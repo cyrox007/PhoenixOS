@@ -40,6 +40,10 @@ const THREAD_CONTEXT_TEST_STACK_SIZE: usize = 64 * 1024;
 const PREEMPTION_TEST_STACK_SIZE: usize = 16 * 1024;
 static PREEMPTION_TEST_ENTERED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
+static HARDWARE_PREEMPTION_FIRST_SEEN: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+static HARDWARE_PREEMPTION_SECOND_SEEN: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 
 pub static BOOTLOADER_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
@@ -733,6 +737,59 @@ extern "C" fn preemption_test_entry() -> ! {
     }
 }
 
+extern "C" fn hardware_preemption_thread_entry(argument: usize) -> ! {
+    let seen = unsafe { &*(argument as *const core::sync::atomic::AtomicBool) };
+    seen.store(true, core::sync::atomic::Ordering::Release);
+    x86_64::instructions::interrupts::enable();
+
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+fn hardware_scheduler_preemption_self_test() {
+    HARDWARE_PREEMPTION_FIRST_SEEN.store(false, core::sync::atomic::Ordering::Relaxed);
+    HARDWARE_PREEMPTION_SECOND_SEEN.store(false, core::sync::atomic::Ordering::Relaxed);
+
+    let mut manager = thread_manager::ThreadManager::<
+        { thread_manager::HARDWARE_PREEMPTION_TEST_CAPACITY },
+    >::new();
+
+    manager
+        .spawn_preemptive(
+            hardware_preemption_thread_entry,
+            &HARDWARE_PREEMPTION_FIRST_SEEN as *const _ as usize,
+            1,
+        )
+        .expect("не удалось создать первый аппаратно вытесняемый поток");
+    manager
+        .spawn_preemptive(
+            hardware_preemption_thread_entry,
+            &HARDWARE_PREEMPTION_SECOND_SEEN as *const _ as usize,
+            1,
+        )
+        .expect("не удалось создать второй аппаратно вытесняемый поток");
+
+    let armed = unsafe { thread_manager::arm_hardware_preemption_test(&mut manager) };
+    if !armed {
+        panic!("аппаратный тест планировщика уже занят");
+    }
+
+    while !thread_manager::hardware_preemption_test_completed() {
+        core::hint::spin_loop();
+    }
+
+    thread_manager::disarm_hardware_preemption_test();
+
+    if thread_manager::hardware_preemption_test_failed()
+        || thread_manager::hardware_preemption_test_switches() < 4
+        || !HARDWARE_PREEMPTION_FIRST_SEEN.load(core::sync::atomic::Ordering::Acquire)
+        || !HARDWARE_PREEMPTION_SECOND_SEEN.load(core::sync::atomic::Ordering::Acquire)
+    {
+        panic!("аппаратный round-robin потоков завершился некорректно");
+    }
+}
+
 fn init_apic_timer(
     out: &mut serial::Com1,
     page_table: &mut ActivePageTable,
@@ -778,7 +835,6 @@ fn init_apic_timer(
     let observed_tick = thread_manager::last_timer_tick();
     let observed_context = thread_manager::last_timer_context()
         .expect("планировочный слой не получил прерываемый контекст таймера");
-    arch::x86_64::apic::remove_timer_hook();
     thread_manager::disarm_preemption_frame_test();
 
     if !PREEMPTION_TEST_ENTERED.load(core::sync::atomic::Ordering::Acquire)
@@ -809,6 +865,9 @@ fn init_apic_timer(
     {
         panic!("таймерный IRQ не передал стековый кадр прерывания");
     }
+
+    hardware_scheduler_preemption_self_test();
+    arch::x86_64::apic::remove_timer_hook();
 
     serial::line(
         out,
@@ -858,6 +917,15 @@ fn init_apic_timer(
         out,
         "INFO",
         format_args!("thread iretq stack switch self-test: OK"),
+    );
+
+    serial::line(
+        out,
+        "INFO",
+        format_args!(
+            "kernel thread hardware round robin self-test: OK switches={}",
+            thread_manager::hardware_preemption_test_switches()
+        ),
     );
 }
 

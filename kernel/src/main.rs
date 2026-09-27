@@ -101,7 +101,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!("thread context self-test: OK"),
     );
 
-    serial::line(&mut out, "INFO", format_args!("kernel thread object self-test: OK"));
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("kernel thread object self-test: OK"),
+    );
 
     init_apic_timer(&mut out, &mut page_table, &mut frames);
 
@@ -172,7 +176,9 @@ fn thread_context_self_test() {
         panic!("тестовый поток не вернул управление основному контексту");
     }
 
-    worker.finish().expect("не удалось завершить тестовый поток");
+    worker
+        .finish()
+        .expect("не удалось завершить тестовый поток");
     if worker.state() != thread::ThreadState::Finished {
         panic!("тестовый поток не перешёл в завершённое состояние");
     }

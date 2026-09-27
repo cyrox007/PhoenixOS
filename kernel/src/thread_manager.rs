@@ -14,6 +14,7 @@ static LAST_TIMER_RIP: AtomicU64 = AtomicU64::new(0);
 static LAST_TIMER_RSP: AtomicU64 = AtomicU64::new(0);
 static LAST_TIMER_RFLAGS: AtomicU64 = AtomicU64::new(0);
 static LAST_TIMER_REGISTER_MARKER: AtomicU64 = AtomicU64::new(0);
+static LAST_TIMER_STACK_FRAME: AtomicU64 = AtomicU64::new(0);
 static LAST_TIMER_REGISTERS: [AtomicU64; 15] = [
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -37,6 +38,7 @@ pub fn timer_tick_hook(tick: u64, context: crate::arch::x86_64::apic::TimerInter
     LAST_TIMER_RSP.store(context.stack_pointer, Ordering::Relaxed);
     LAST_TIMER_RFLAGS.store(context.cpu_flags, Ordering::Relaxed);
     LAST_TIMER_REGISTER_MARKER.store(context.register_capture_marker, Ordering::Relaxed);
+    LAST_TIMER_STACK_FRAME.store(context.stack_frame_address, Ordering::Relaxed);
     store_timer_registers(context.general_registers);
     LAST_TIMER_TICK.store(tick, Ordering::Release);
 }
@@ -56,6 +58,7 @@ pub fn last_timer_context() -> Option<crate::arch::x86_64::apic::TimerInterruptC
         cpu_flags: LAST_TIMER_RFLAGS.load(Ordering::Relaxed),
         general_registers: load_timer_registers(),
         register_capture_marker: LAST_TIMER_REGISTER_MARKER.load(Ordering::Relaxed),
+        stack_frame_address: LAST_TIMER_STACK_FRAME.load(Ordering::Relaxed),
     })
 }
 

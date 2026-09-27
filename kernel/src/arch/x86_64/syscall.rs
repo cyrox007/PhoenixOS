@@ -1,4 +1,5 @@
 use core::arch::{global_asm, x86_64::__cpuid};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use phoenix_syscall_abi::{SyscallRequest, SyscallReturn, SyscallStatus};
 
@@ -30,9 +31,20 @@ const SELF_TEST_ARGUMENTS: [u64; 6] = [
     0xfedc_ba98_7654_3210,
 ];
 const SELF_TEST_RESULT: u64 = 0x5359_5343_414c_4c21;
+const USER_SELF_TEST_EXIT_NUMBER: u64 = u64::MAX - 1;
+const USER_SELF_TEST_SUCCESS: u64 = 0x5553_4552_5f4f_4b21;
+const USER_SELF_TEST_FAILURE: u64 = 0x5553_4552_5f42_4144;
 const STATUS_UNKNOWN_CALL: u32 = 1;
 const STATUS_BAD_ARGUMENTS: u32 = 2;
 const ENTRY_STACK_SIZE: u64 = 64 * 1024;
+
+static USER_SELF_TEST_RESULT: AtomicU64 = AtomicU64::new(0);
+
+#[unsafe(export_name = "phoenix_user_test_active")]
+static mut USER_TEST_ACTIVE: u64 = 0;
+
+#[unsafe(export_name = "phoenix_user_test_kernel_rsp")]
+static mut USER_TEST_KERNEL_RSP: u64 = 0;
 
 global_asm!(
     r#"
@@ -74,16 +86,29 @@ phoenix_syscall_entry:
     lea rsi, [rsp + 64]
     call phoenix_syscall_dispatch
 
+    cmp qword ptr [rsp + 0], -2
+    jne 1f
+    cmp qword ptr [rip + phoenix_user_test_active], 1
+    je phoenix_user_test_return_from_syscall
+1:
     mov rax, [rsp + 64]
     mov rdx, [rsp + 72]
 
     add rsp, 80
     pop r11
     pop rcx
+
+    cmp qword ptr [rip + phoenix_user_test_active], 1
+    je 2f
+
     push r11
     popfq
     mov rsp, [rip + phoenix_syscall_saved_rsp]
     jmp rcx
+
+2:
+    mov rsp, [rip + phoenix_syscall_saved_rsp]
+    sysretq
     .size phoenix_syscall_entry, .-phoenix_syscall_entry
 
     .global phoenix_syscall_kernel_test_invoke
@@ -114,6 +139,79 @@ phoenix_syscall_kernel_test_invoke:
     pop rbx
     ret
     .size phoenix_syscall_kernel_test_invoke, .-phoenix_syscall_kernel_test_invoke
+
+    .global phoenix_user_test_enter
+    .type phoenix_user_test_enter,@function
+phoenix_user_test_enter:
+    push rbx
+    push rbp
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov [rip + phoenix_user_test_kernel_rsp], rsp
+    mov qword ptr [rip + phoenix_user_test_active], 1
+
+    push rcx
+    push rsi
+    push r8
+    push rdx
+    push rdi
+    iretq
+    .size phoenix_user_test_enter, .-phoenix_user_test_enter
+
+phoenix_user_test_return_from_syscall:
+    mov qword ptr [rip + phoenix_user_test_active], 0
+    mov rsp, [rip + phoenix_user_test_kernel_rsp]
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbp
+    pop rbx
+    ret
+
+    .global phoenix_user_test_image_start
+    .global phoenix_user_test_image_end
+phoenix_user_test_image_start:
+    mov rax, -1
+    mov rdi, 0x11
+    mov rsi, 0x2233
+    mov rdx, 0x44556677
+    mov r10, 0x8899aabbccddeeff
+    mov r8, 0x123456789abcdef0
+    mov r9, 0xfedcba9876543210
+    syscall
+
+    test rdx, rdx
+    jne 3f
+    mov rbx, 0x53595343414c4c21
+    cmp rax, rbx
+    jne 3f
+
+    mov ax, cs
+    and eax, 3
+    cmp eax, 3
+    jne 3f
+
+    mov ax, ss
+    and eax, 3
+    cmp eax, 3
+    jne 3f
+
+    mov rdi, 0x555345525f4f4b21
+    jmp 4f
+
+3:
+    mov rdi, 0x555345525f424144
+
+4:
+    mov rax, -2
+    syscall
+    ud2
+phoenix_user_test_image_end:
 "#
 );
 
@@ -122,11 +220,20 @@ unsafe extern "C" {
     static phoenix_syscall_entry_stack_end: u8;
     static phoenix_syscall_saved_rsp: u64;
     static phoenix_syscall_observed_rsp: u64;
+    static phoenix_user_test_image_start: u8;
+    static phoenix_user_test_image_end: u8;
 
     fn phoenix_syscall_entry();
     fn phoenix_syscall_kernel_test_invoke(
         request: *const SyscallRequest,
         result: *mut SyscallReturn,
+    );
+    fn phoenix_user_test_enter(
+        instruction_pointer: u64,
+        stack_pointer: u64,
+        code_selector: u64,
+        data_selector: u64,
+        cpu_flags: u64,
     );
 }
 
@@ -296,6 +403,38 @@ pub fn entry_stack_self_test() -> bool {
     observed_rsp >= stack_start && observed_rsp <= stack_end && observed_rsp & 0xf == 0
 }
 
+pub fn user_mode_test_image() -> &'static [u8] {
+    let start = core::ptr::addr_of!(phoenix_user_test_image_start) as usize;
+    let end = core::ptr::addr_of!(phoenix_user_test_image_end) as usize;
+    let length = end.saturating_sub(start);
+
+    unsafe { core::slice::from_raw_parts(start as *const u8, length) }
+}
+
+pub fn run_user_mode_self_test(instruction_pointer: u64, stack_pointer: u64) -> bool {
+    let Ok(context) = UserReturnContext::new(
+        instruction_pointer,
+        stack_pointer,
+        RFLAGS_RESERVED_ONE,
+    ) else {
+        return false;
+    };
+
+    USER_SELF_TEST_RESULT.store(0, Ordering::Release);
+
+    unsafe {
+        phoenix_user_test_enter(
+            context.instruction_pointer,
+            context.stack_pointer,
+            u64::from(super::gdt::user_code_selector_raw()),
+            u64::from(super::gdt::user_data_selector_raw()),
+            context.cpu_flags,
+        );
+    }
+
+    USER_SELF_TEST_RESULT.load(Ordering::Acquire) == USER_SELF_TEST_SUCCESS
+}
+
 pub fn return_context_self_test() -> bool {
     let flags = RFLAGS_RESERVED_ONE | RFLAGS_INTERRUPT;
     let Ok(context) = UserReturnContext::new(0x4000_0000, 0x4000_2000, flags) else {
@@ -340,6 +479,16 @@ extern "C" fn phoenix_syscall_dispatch(request: *const SyscallRequest, result: *
 }
 
 fn dispatch(request: SyscallRequest) -> SyscallReturn {
+    if request.number == USER_SELF_TEST_EXIT_NUMBER {
+        let result = request.arguments[0];
+        if result != USER_SELF_TEST_SUCCESS && result != USER_SELF_TEST_FAILURE {
+            return syscall_failure(STATUS_BAD_ARGUMENTS);
+        }
+
+        USER_SELF_TEST_RESULT.store(result, Ordering::Release);
+        return SyscallReturn::success(0);
+    }
+
     if request.number != SELF_TEST_NUMBER {
         return syscall_failure(STATUS_UNKNOWN_CALL);
     }

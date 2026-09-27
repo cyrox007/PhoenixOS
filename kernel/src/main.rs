@@ -58,6 +58,15 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     }
     serial::line(&mut out, "INFO", format_args!("syscall msr self-test: OK"));
 
+    if !arch::x86_64::syscall::entry_self_test() {
+        panic!("аппаратный вход SYSCALL повредил запрос или результат");
+    }
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("syscall entry self-test: OK"),
+    );
+
     arch::x86_64::exceptions::smoke_test_breakpoint();
     serial::line(&mut out, "INFO", format_args!("breakpoint self-test: OK"));
 

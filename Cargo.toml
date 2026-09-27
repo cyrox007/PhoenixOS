@@ -10,6 +10,7 @@ members = [
     "crates/syscall-abi",
     "crates/capability-model",
     "crates/ipc-model",
+    "crates/elf-loader",
 ]
 
 [package]

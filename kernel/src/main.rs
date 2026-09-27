@@ -113,11 +113,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     );
 
     ipc_self_test();
-    serial::line(
-        &mut out,
-        "INFO",
-        format_args!("ipc endpoint self-test: OK"),
-    );
+    serial::line(&mut out, "INFO", format_args!("ipc endpoint self-test: OK"));
 
     arch::x86_64::exceptions::smoke_test_breakpoint();
     serial::line(&mut out, "INFO", format_args!("breakpoint self-test: OK"));
@@ -292,8 +288,8 @@ fn ipc_self_test() {
     let mut endpoint = Endpoint::<2>::new(EndpointId(0x4950_435f_5445_5354));
     let first = Message::new(ProcessId(100), &[0x11, 0x22])
         .expect("не удалось создать первое IPC-сообщение");
-    let second = Message::new(ProcessId(200), &[0x33])
-        .expect("не удалось создать второе IPC-сообщение");
+    let second =
+        Message::new(ProcessId(200), &[0x33]).expect("не удалось создать второе IPC-сообщение");
 
     endpoint
         .send(first)

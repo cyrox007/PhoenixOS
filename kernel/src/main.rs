@@ -7,6 +7,7 @@ extern crate alloc;
 
 mod arch;
 mod heap;
+mod process_resources;
 mod process_space;
 mod qemu;
 mod serial;
@@ -155,6 +156,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         &mut out,
         "INFO",
         format_args!("process region mapping self-test: OK"),
+    );
+
+    process_resource_capability_self_test();
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("process capability table self-test: OK"),
     );
 
     process_cr3_switch_self_test(physical_memory_offset, &mut frames);
@@ -765,6 +773,49 @@ fn user_mode_syscall_self_test(
 
     if frames.free_frames() != free_before {
         panic!("пользовательская самопроверка не вернула всю физическую память");
+    }
+}
+
+fn process_resource_capability_self_test() {
+    use phoenix_capability::{Capability, CapabilityError, ObjectId, ObjectKind, Rights};
+    use phoenix_process::ProcessId;
+
+    let mut resources = process_resources::ProcessResources::<4>::new(ProcessId(77));
+    let handle = resources
+        .grant(Capability {
+            object: ObjectId(1001),
+            kind: ObjectKind::Endpoint,
+            rights: Rights::READ
+                .union(Rights::SIGNAL)
+                .union(Rights::TRANSFER)
+                .union(Rights::DUPLICATE),
+        })
+        .expect("не удалось выдать возможность процессу");
+
+    if resources.owner() != ProcessId(77) {
+        panic!("таблица возможностей потеряла владельца");
+    }
+
+    if resources.require(handle, Rights::SIGNAL).is_err() {
+        panic!("выданное право процесса недоступно");
+    }
+
+    if resources.require(handle, Rights::MANAGE) != Err(CapabilityError::MissingRight) {
+        panic!("таблица возможностей допустила повышение прав");
+    }
+
+    let read_only = resources
+        .derive(handle, Rights::READ)
+        .expect("не удалось создать ограниченную возможность");
+    if resources.require(read_only, Rights::READ).is_err() {
+        panic!("ограниченная возможность процесса недоступна");
+    }
+
+    let revoked = resources
+        .revoke(read_only)
+        .expect("не удалось отозвать возможность процесса");
+    if revoked.object != ObjectId(1001) || resources.get(read_only).is_ok() {
+        panic!("устаревший дескриптор процесса остался действительным");
     }
 }
 

@@ -36,6 +36,9 @@ const USER_MODE_TEST_STACK_ADDRESS: u64 = 0x0000_0000_4000_1000;
 const HEAP_TEST_VALUE: u64 = 0x4845_4150_5f4f_4b21;
 const APIC_TIMER_TEST_TICKS: u64 = 3;
 const THREAD_CONTEXT_TEST_STACK_SIZE: usize = 64 * 1024;
+const PREEMPTION_TEST_STACK_SIZE: usize = 16 * 1024;
+static PREEMPTION_TEST_ENTERED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 
 pub static BOOTLOADER_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
@@ -463,6 +466,13 @@ extern "C" fn scheduled_thread_test_entry(argument: usize) {
     *value += 1;
 }
 
+extern "C" fn preemption_test_entry() -> ! {
+    PREEMPTION_TEST_ENTERED.store(true, core::sync::atomic::Ordering::Release);
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
 fn init_apic_timer(
     out: &mut serial::Com1,
     page_table: &mut ActivePageTable,
@@ -479,6 +489,14 @@ fn init_apic_timer(
         format_args!("local APIC: mode={}", mode.name()),
     );
 
+    let mut preemption_stack = alloc::vec![0u8; PREEMPTION_TEST_STACK_SIZE].into_boxed_slice();
+    let preemption_frame = arch::x86_64::exceptions::prepare_kernel_timer_frame(
+        &mut preemption_stack,
+        preemption_test_entry as *const () as u64,
+    )
+    .expect("не удалось подготовить кадр вытесняемого потока");
+    thread_manager::arm_preemption_frame_test(preemption_frame);
+
     arch::x86_64::apic::install_timer_hook(thread_manager::timer_tick_hook)
         .expect("не удалось установить обработчик планировочного тика");
 
@@ -492,6 +510,13 @@ fn init_apic_timer(
     let observed_context = thread_manager::last_timer_context()
         .expect("планировочный слой не получил прерываемый контекст таймера");
     arch::x86_64::apic::remove_timer_hook();
+    thread_manager::disarm_preemption_frame_test();
+
+    if !PREEMPTION_TEST_ENTERED.load(core::sync::atomic::Ordering::Acquire)
+        || !thread_manager::preemption_frame_test_completed()
+    {
+        panic!("таймер не выполнил iretq-переход на отдельный стек и обратно");
+    }
 
     if observed_tick < target_tick {
         panic!("планировочный слой не получил ожидаемые аппаратные тики");
@@ -558,6 +583,12 @@ fn init_apic_timer(
         out,
         "INFO",
         format_args!("thread resumable interrupt frame self-test: OK"),
+    );
+
+    serial::line(
+        out,
+        "INFO",
+        format_args!("thread iretq stack switch self-test: OK"),
     );
 }
 

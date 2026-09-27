@@ -250,6 +250,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!("kernel thread initial irq frame self-test: OK"),
     );
 
+    kernel_thread_preemptive_spawn_self_test();
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("kernel thread preemptive spawn self-test: OK"),
+    );
+
     init_apic_timer(&mut out, &mut page_table, &mut frames);
 
     render_boot_banner(boot_info, &mut out);
@@ -447,6 +454,38 @@ fn kernel_thread_interrupt_frame_self_test() {
     }
     if thread.interrupt_frame().is_some() {
         panic!("изъятый IRQ-кадр остался привязан к потоку");
+    }
+}
+
+fn kernel_thread_preemptive_spawn_self_test() {
+    let mut manager = thread_manager::ThreadManager::<2>::new();
+    let id = manager
+        .spawn_preemptive(preemptive_spawn_test_entry, 0x42, 1)
+        .expect("не удалось создать preemptive-поток через ThreadManager");
+
+    let frame = manager
+        .interrupt_frame(id)
+        .expect("ThreadManager не сохранил стартовый IRQ-кадр");
+    if manager.state(id) != Some(thread::ThreadState::Ready) {
+        panic!("новый preemptive-поток имеет неверное состояние");
+    }
+
+    if manager
+        .schedule_interrupt_frame(0)
+        .expect("ошибка первого выбора preemptive-потока")
+        != Some(frame)
+    {
+        panic!("round-robin не выбрал стартовый кадр preemptive-потока");
+    }
+
+    if manager.interrupt_frame(id).is_some() {
+        panic!("выбранный стартовый кадр не был изъят у потока");
+    }
+}
+
+extern "C" fn preemptive_spawn_test_entry(_argument: usize) -> ! {
+    loop {
+        core::hint::spin_loop();
     }
 }
 

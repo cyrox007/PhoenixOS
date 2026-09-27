@@ -189,7 +189,9 @@ impl<const CAPACITY: usize> AddressSpace<CAPACITY> {
         let index = self
             .regions
             .iter()
-            .position(|region| region.is_some_and(|entry| entry.start == start && entry.length == length))
+            .position(|region| {
+                region.is_some_and(|entry| entry.start == start && entry.length == length)
+            })
             .ok_or(RegionError::RegionNotFound)?;
 
         let region = self.regions[index]
@@ -279,14 +281,9 @@ impl<const CAPACITY: usize> ProcessTable<CAPACITY> {
         })
     }
 
-    pub fn transition(
-        &mut self,
-        id: ProcessId,
-        target: ProcessState,
-    ) -> Result<(), ProcessError> {
+    pub fn transition(&mut self, id: ProcessId, target: ProcessState) -> Result<(), ProcessError> {
         let index = self.find(id).ok_or(ProcessError::ProcessNotFound)?;
-        let current = self.entries[index]
-            .ok_or(ProcessError::ProcessNotFound)?;
+        let current = self.entries[index].ok_or(ProcessError::ProcessNotFound)?;
 
         if !valid_transition(current.state, target) {
             return Err(ProcessError::InvalidTransition {
@@ -305,8 +302,7 @@ impl<const CAPACITY: usize> ProcessTable<CAPACITY> {
 
     pub fn remove_exited(&mut self, id: ProcessId) -> Result<ProcessRecord, ProcessError> {
         let index = self.find(id).ok_or(ProcessError::ProcessNotFound)?;
-        let record = self.entries[index]
-            .ok_or(ProcessError::ProcessNotFound)?;
+        let record = self.entries[index].ok_or(ProcessError::ProcessNotFound)?;
 
         if record.state != ProcessState::Exited {
             return Err(ProcessError::InvalidTransition {
@@ -386,10 +382,7 @@ mod tests {
 
         assert_eq!(space.find(0x20_1000), Some(region));
         assert_eq!(space.find(0x30_0000), None);
-        assert_eq!(
-            space.unmap_exact(region.start, region.length),
-            Ok(region)
-        );
+        assert_eq!(space.unmap_exact(region.start, region.length), Ok(region));
         assert_eq!(space.region_count(), 0);
     }
 
@@ -433,7 +426,9 @@ mod tests {
 
         assert_eq!(process.state, ProcessState::Created);
 
-        table.transition(process.id, ProcessState::Runnable).unwrap();
+        table
+            .transition(process.id, ProcessState::Runnable)
+            .unwrap();
         table.transition(process.id, ProcessState::Blocked).unwrap();
         table.transition(process.id, ProcessState::Runnable).unwrap();
         table.transition(process.id, ProcessState::Exited).unwrap();

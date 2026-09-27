@@ -1,6 +1,6 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use phoenix_scheduler::{RoundRobinScheduler, ScheduleDecision, SchedulerError, TaskId};
 
@@ -8,6 +8,9 @@ use crate::arch::x86_64::context::{self, Context, ReturningThreadEntry, ThreadEn
 use crate::thread::{KernelThread, ThreadError, ThreadId, ThreadState};
 
 const DEFAULT_STACK_SIZE: usize = 64 * 1024;
+
+pub const HARDWARE_PREEMPTION_TEST_CAPACITY: usize = 4;
+const HARDWARE_PREEMPTION_TEST_SWITCH_TARGET: u64 = 4;
 
 static LAST_TIMER_TICK: AtomicU64 = AtomicU64::new(0);
 static LAST_TIMER_RIP: AtomicU64 = AtomicU64::new(0);
@@ -18,6 +21,11 @@ static LAST_TIMER_STACK_FRAME: AtomicU64 = AtomicU64::new(0);
 static PREEMPTION_TEST_TARGET_FRAME: AtomicU64 = AtomicU64::new(0);
 static PREEMPTION_TEST_ORIGINAL_FRAME: AtomicU64 = AtomicU64::new(0);
 static PREEMPTION_TEST_PHASE: AtomicU64 = AtomicU64::new(0);
+static HARDWARE_PREEMPTION_TEST_MANAGER: AtomicUsize = AtomicUsize::new(0);
+static HARDWARE_PREEMPTION_TEST_BOOT_FRAME: AtomicU64 = AtomicU64::new(0);
+static HARDWARE_PREEMPTION_TEST_SWITCHES: AtomicU64 = AtomicU64::new(0);
+static HARDWARE_PREEMPTION_TEST_DONE: AtomicU64 = AtomicU64::new(0);
+static HARDWARE_PREEMPTION_TEST_FAILED: AtomicU64 = AtomicU64::new(0);
 static LAST_TIMER_REGISTERS: [AtomicU64; 15] = [
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -63,6 +71,46 @@ pub fn timer_tick_hook(
                 return Some(original);
             }
             _ => {}
+        }
+    }
+
+    let manager_ptr = HARDWARE_PREEMPTION_TEST_MANAGER.load(Ordering::Acquire);
+    if manager_ptr != 0 {
+        let mut boot_frame = HARDWARE_PREEMPTION_TEST_BOOT_FRAME.load(Ordering::Acquire);
+        if boot_frame == 0 {
+            boot_frame = context.stack_frame_address;
+            HARDWARE_PREEMPTION_TEST_BOOT_FRAME.store(boot_frame, Ordering::Release);
+        }
+
+        let manager = unsafe {
+            &mut *(manager_ptr as *mut ThreadManager<HARDWARE_PREEMPTION_TEST_CAPACITY>)
+        };
+        let switches = HARDWARE_PREEMPTION_TEST_SWITCHES.load(Ordering::Acquire);
+
+        if switches >= HARDWARE_PREEMPTION_TEST_SWITCH_TARGET {
+            if manager
+                .save_current_interrupt_frame(context.stack_frame_address)
+                .is_err()
+            {
+                HARDWARE_PREEMPTION_TEST_FAILED.store(1, Ordering::Release);
+            }
+            HARDWARE_PREEMPTION_TEST_MANAGER.store(0, Ordering::Release);
+            HARDWARE_PREEMPTION_TEST_DONE.store(1, Ordering::Release);
+            return Some(boot_frame);
+        }
+
+        match manager.schedule_interrupt_frame(context.stack_frame_address) {
+            Ok(Some(next_frame)) => {
+                HARDWARE_PREEMPTION_TEST_SWITCHES.fetch_add(1, Ordering::AcqRel);
+                return Some(next_frame);
+            }
+            Ok(None) => {}
+            Err(_) => {
+                HARDWARE_PREEMPTION_TEST_FAILED.store(1, Ordering::Release);
+                HARDWARE_PREEMPTION_TEST_MANAGER.store(0, Ordering::Release);
+                HARDWARE_PREEMPTION_TEST_DONE.store(1, Ordering::Release);
+                return Some(boot_frame);
+            }
         }
     }
 

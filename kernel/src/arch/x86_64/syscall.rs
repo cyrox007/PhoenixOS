@@ -95,7 +95,8 @@ fn with_current_process_address_space<T>(
         return None;
     }
 
-    let space = unsafe { &mut *(address_space as *mut ProcessAddressSpace<PROCESS_REGION_CAPACITY>) };
+    let space =
+        unsafe { &mut *(address_space as *mut ProcessAddressSpace<PROCESS_REGION_CAPACITY>) };
     Some(operation(space))
 }
 

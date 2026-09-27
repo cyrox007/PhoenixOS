@@ -1332,8 +1332,9 @@ fn user_mode_syscall_self_test(
     }
 
     let receive_words = [0x0123_4567_89ab_cdef_u64, 0xfedc_ba98_7654_3210_u64];
-    let context_guard = unsafe { arch::x86_64::syscall::install_current_process_context(&mut space) }
-        .expect("контекст текущего процесса уже установлен");
+    let context_guard =
+        unsafe { arch::x86_64::syscall::install_current_process_context(&mut space) }
+            .expect("контекст текущего процесса уже установлен");
     let context_ok = arch::x86_64::syscall::ipc_user_memory_context_self_test(
         phoenix_syscall_abi::IpcSendArguments {
             endpoint: phoenix_syscall_abi::PackedCapabilityHandle::new(1, 1),
@@ -1378,10 +1379,9 @@ fn user_mode_syscall_self_test(
     let stack_pointer = USER_MODE_TEST_STACK_ADDRESS + phoenix_process::PAGE_SIZE - 16;
 
     let passed = x86_64::instructions::interrupts::without_interrupts(|| {
-        let context_guard = unsafe {
-            arch::x86_64::syscall::install_current_process_context(&mut space)
-        }
-        .expect("контекст пользовательского системного вызова уже установлен");
+        let context_guard =
+            unsafe { arch::x86_64::syscall::install_current_process_context(&mut space) }
+                .expect("контекст пользовательского системного вызова уже установлен");
         let guard = unsafe { space.activate() };
         let result = arch::x86_64::syscall::run_user_mode_self_test(
             USER_MODE_TEST_CODE_ADDRESS,

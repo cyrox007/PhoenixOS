@@ -13,11 +13,31 @@ static LAST_TIMER_TICK: AtomicU64 = AtomicU64::new(0);
 static LAST_TIMER_RIP: AtomicU64 = AtomicU64::new(0);
 static LAST_TIMER_RSP: AtomicU64 = AtomicU64::new(0);
 static LAST_TIMER_RFLAGS: AtomicU64 = AtomicU64::new(0);
+static LAST_TIMER_REGISTER_MARKER: AtomicU64 = AtomicU64::new(0);
+static LAST_TIMER_REGISTERS: [AtomicU64; 15] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
 
 pub fn timer_tick_hook(tick: u64, context: crate::arch::x86_64::apic::TimerInterruptContext) {
     LAST_TIMER_RIP.store(context.instruction_pointer, Ordering::Relaxed);
     LAST_TIMER_RSP.store(context.stack_pointer, Ordering::Relaxed);
     LAST_TIMER_RFLAGS.store(context.cpu_flags, Ordering::Relaxed);
+    LAST_TIMER_REGISTER_MARKER.store(context.register_capture_marker, Ordering::Relaxed);
+    store_timer_registers(context.general_registers);
     LAST_TIMER_TICK.store(tick, Ordering::Release);
 }
 
@@ -34,7 +54,47 @@ pub fn last_timer_context() -> Option<crate::arch::x86_64::apic::TimerInterruptC
         instruction_pointer: LAST_TIMER_RIP.load(Ordering::Relaxed),
         stack_pointer: LAST_TIMER_RSP.load(Ordering::Relaxed),
         cpu_flags: LAST_TIMER_RFLAGS.load(Ordering::Relaxed),
+        general_registers: load_timer_registers(),
+        register_capture_marker: LAST_TIMER_REGISTER_MARKER.load(Ordering::Relaxed),
     })
+}
+
+fn store_timer_registers(registers: crate::arch::x86_64::apic::TimerGeneralRegisters) {
+    LAST_TIMER_REGISTERS[0].store(registers.rax, Ordering::Relaxed);
+    LAST_TIMER_REGISTERS[1].store(registers.rbx, Ordering::Relaxed);
+    LAST_TIMER_REGISTERS[2].store(registers.rcx, Ordering::Relaxed);
+    LAST_TIMER_REGISTERS[3].store(registers.rdx, Ordering::Relaxed);
+    LAST_TIMER_REGISTERS[4].store(registers.rsi, Ordering::Relaxed);
+    LAST_TIMER_REGISTERS[5].store(registers.rdi, Ordering::Relaxed);
+    LAST_TIMER_REGISTERS[6].store(registers.rbp, Ordering::Relaxed);
+    LAST_TIMER_REGISTERS[7].store(registers.r8, Ordering::Relaxed);
+    LAST_TIMER_REGISTERS[8].store(registers.r9, Ordering::Relaxed);
+    LAST_TIMER_REGISTERS[9].store(registers.r10, Ordering::Relaxed);
+    LAST_TIMER_REGISTERS[10].store(registers.r11, Ordering::Relaxed);
+    LAST_TIMER_REGISTERS[11].store(registers.r12, Ordering::Relaxed);
+    LAST_TIMER_REGISTERS[12].store(registers.r13, Ordering::Relaxed);
+    LAST_TIMER_REGISTERS[13].store(registers.r14, Ordering::Relaxed);
+    LAST_TIMER_REGISTERS[14].store(registers.r15, Ordering::Relaxed);
+}
+
+fn load_timer_registers() -> crate::arch::x86_64::apic::TimerGeneralRegisters {
+    crate::arch::x86_64::apic::TimerGeneralRegisters {
+        rax: LAST_TIMER_REGISTERS[0].load(Ordering::Relaxed),
+        rbx: LAST_TIMER_REGISTERS[1].load(Ordering::Relaxed),
+        rcx: LAST_TIMER_REGISTERS[2].load(Ordering::Relaxed),
+        rdx: LAST_TIMER_REGISTERS[3].load(Ordering::Relaxed),
+        rsi: LAST_TIMER_REGISTERS[4].load(Ordering::Relaxed),
+        rdi: LAST_TIMER_REGISTERS[5].load(Ordering::Relaxed),
+        rbp: LAST_TIMER_REGISTERS[6].load(Ordering::Relaxed),
+        r8: LAST_TIMER_REGISTERS[7].load(Ordering::Relaxed),
+        r9: LAST_TIMER_REGISTERS[8].load(Ordering::Relaxed),
+        r10: LAST_TIMER_REGISTERS[9].load(Ordering::Relaxed),
+        r11: LAST_TIMER_REGISTERS[10].load(Ordering::Relaxed),
+        r12: LAST_TIMER_REGISTERS[11].load(Ordering::Relaxed),
+        r13: LAST_TIMER_REGISTERS[12].load(Ordering::Relaxed),
+        r14: LAST_TIMER_REGISTERS[13].load(Ordering::Relaxed),
+        r15: LAST_TIMER_REGISTERS[14].load(Ordering::Relaxed),
+    }
 }
 
 #[derive(Debug)]

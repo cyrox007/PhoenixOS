@@ -410,6 +410,23 @@ impl<const CAPACITY: usize> ProcessTable<CAPACITY> {
         Ok(record)
     }
 
+    pub fn remove_created(&mut self, id: ProcessId) -> Result<ProcessRecord, ProcessError> {
+        let index = self.find(id).ok_or(ProcessError::ProcessNotFound)?;
+        let record = self.entries[index].ok_or(ProcessError::ProcessNotFound)?;
+
+        if record.state != ProcessState::Created {
+            return Err(ProcessError::InvalidTransition {
+                from: record.state,
+                to: ProcessState::Created,
+            });
+        }
+
+        self.entries[index] = None;
+        self.len -= 1;
+
+        Ok(record)
+    }
+
     fn find(&self, id: ProcessId) -> Option<usize> {
         self.entries
             .iter()
@@ -560,6 +577,27 @@ mod tests {
         table.create().unwrap();
 
         assert_eq!(table.create(), Err(ProcessError::CapacityExceeded));
+    }
+
+    #[test]
+    fn only_created_process_can_be_rolled_back() {
+        let mut table = ProcessTable::<1>::new();
+        let process = table.create().unwrap();
+
+        assert_eq!(table.remove_created(process.id).unwrap(), process);
+        assert!(table.is_empty());
+
+        let process = table.create().unwrap();
+        table
+            .transition(process.id, ProcessState::Runnable)
+            .unwrap();
+        assert_eq!(
+            table.remove_created(process.id),
+            Err(ProcessError::InvalidTransition {
+                from: ProcessState::Runnable,
+                to: ProcessState::Created,
+            })
+        );
     }
 
     #[test]

@@ -7,6 +7,7 @@ members = [
     "crates/virtual-memory",
     "crates/scheduler",
     "crates/process-model",
+    "crates/process-manager",
     "crates/syscall-abi",
     "crates/capability-model",
     "crates/ipc-model",

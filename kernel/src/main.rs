@@ -1412,18 +1412,23 @@ fn user_mode_syscall_self_test(
 ) {
     use phoenix_capability::{Capability, ObjectId, ObjectKind, Rights};
     use phoenix_process::{
-        MemoryPermissions, ProcessCapabilitySet, ProcessId, ProcessState, ProcessTable, RegionKind,
-        VirtualRegion,
+        MemoryPermissions, ProcessCapabilitySet, ProcessId, ProcessState, RegionKind, VirtualRegion,
     };
+    use phoenix_process_manager::{ProcessManager, ProcessScheduleDecision};
 
     let free_before = frames.free_frames();
-    let mut process_table = ProcessTable::<1>::new();
-    let process = process_table
-        .create()
-        .expect("не удалось создать запись пользовательского процесса");
-    process_table
-        .transition(process.id, ProcessState::Runnable)
-        .expect("не удалось сделать пользовательский процесс готовым");
+    let mut process_manager = ProcessManager::<1>::new();
+    let process = process_manager
+        .create_runnable(1)
+        .expect("не удалось создать готовый пользовательский процесс");
+    if process_manager.on_tick()
+        != (ProcessScheduleDecision::Switch {
+            from: None,
+            to: process.id,
+        })
+    {
+        panic!("планировщик не выбрал пользовательский процесс");
+    }
     let mut space = unsafe {
         process_space::ProcessAddressSpace::<{ process_space::PROCESS_REGION_CAPACITY }>::new(
             process.address_space,
@@ -1684,14 +1689,19 @@ fn user_mode_syscall_self_test(
     if exit_status != arch::x86_64::syscall::USER_SELF_TEST_SUCCESS {
         panic!("пользовательский процесс вернул неожиданный статус");
     }
-    process_table
+    process_manager
         .exit(process.id, exit_status)
-        .expect("не удалось завершить запись пользовательского процесса");
-    let exited = process_table
+        .expect("не удалось завершить и снять пользовательский процесс с планирования");
+    let exited = process_manager
         .record(process.id)
         .expect("завершённый пользовательский процесс исчез из таблицы");
-    if exited.state != ProcessState::Exited || exited.exit_status != Some(exit_status) {
-        panic!("таблица процессов не сохранила статус завершения");
+    if exited.state != ProcessState::Exited
+        || exited.exit_status != Some(exit_status)
+        || process_manager.current().is_some()
+        || process_manager.scheduled_len() != 0
+        || process_manager.on_tick() != ProcessScheduleDecision::Idle
+    {
+        panic!("завершённый процесс остался доступен планировщику");
     }
 
     space
@@ -1703,6 +1713,13 @@ fn user_mode_syscall_self_test(
     space
         .destroy(frames)
         .expect("не удалось уничтожить адресное пространство пользовательской самопроверки");
+
+    let reaped = process_manager
+        .reap(process.id)
+        .expect("не удалось очистить завершённый пользовательский процесс");
+    if reaped.exit_status != Some(exit_status) || process_manager.len() != 0 {
+        panic!("очистка процесса потеряла статус завершения");
+    }
 
     if frames.free_frames() != free_before {
         panic!("пользовательская самопроверка не вернула всю физическую память");

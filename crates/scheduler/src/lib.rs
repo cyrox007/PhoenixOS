@@ -62,6 +62,10 @@ impl<const CAPACITY: usize> RoundRobinScheduler<CAPACITY> {
         self.slots[index].map(|slot| slot.id)
     }
 
+    pub fn contains(&self, id: TaskId) -> bool {
+        self.find_index(id).is_some()
+    }
+
     pub fn add(&mut self, id: TaskId, quantum_ticks: u32) -> Result<(), SchedulerError> {
         if quantum_ticks == 0 {
             return Err(SchedulerError::InvalidQuantum);
@@ -285,6 +289,8 @@ mod tests {
         );
 
         scheduler.add(TaskId(1), 1).unwrap();
+        assert!(scheduler.contains(TaskId(1)));
+        assert!(!scheduler.contains(TaskId(2)));
 
         assert_eq!(
             scheduler.add(TaskId(1), 1),

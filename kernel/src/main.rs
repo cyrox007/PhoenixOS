@@ -26,6 +26,7 @@ const SYSTEM_MEMORY_RANGE_CAPACITY: usize = 256;
 const VM_TEST_ADDRESS: u64 = 0x0000_6000_0000_0000;
 const VM_TEST_VALUE: u64 = 0x5048_4f45_4e49_584f;
 const HEAP_TEST_VALUE: u64 = 0x4845_4150_5f4f_4b21;
+const APIC_TIMER_TEST_TICKS: u64 = 3;
 
 pub static BOOTLOADER_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
@@ -91,6 +92,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     heap_self_test();
     serial::line(&mut out, "INFO", format_args!("kernel heap self-test: OK"));
 
+    init_apic_timer(&mut out);
+
     render_boot_banner(boot_info, &mut out);
 
     serial::line(&mut out, "INFO", format_args!("bootstrap: OK"));
@@ -113,6 +116,26 @@ fn log_memory_summary(out: &mut serial::Com1, memory: MemorySummary) {
             memory.usable_region_count,
             memory.total_bytes / (1024 * 1024),
             memory.usable_bytes / (1024 * 1024)
+        ),
+    );
+}
+
+fn init_apic_timer(out: &mut serial::Com1) {
+    let result = arch::x86_64::apic::init_periodic_timer();
+    if let Err(error) = result {
+        panic!("не удалось инициализировать локальный APIC: {error:?}");
+    }
+
+    serial::line(out, "INFO", format_args!("local APIC: x2APIC enabled"));
+
+    arch::x86_64::apic::wait_for_ticks(APIC_TIMER_TEST_TICKS);
+
+    serial::line(
+        out,
+        "INFO",
+        format_args!(
+            "apic timer self-test: OK ticks={}",
+            arch::x86_64::apic::ticks()
         ),
     );
 }

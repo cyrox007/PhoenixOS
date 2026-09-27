@@ -190,7 +190,9 @@ impl<'a> Iterator for LoadSegments<'a> {
                     return Some(Err(error));
                 }
             };
-            let header = match self.image.get(header_offset..header_offset + ELF64_PROGRAM_HEADER_SIZE)
+            let header = match self
+                .image
+                .get(header_offset..header_offset + ELF64_PROGRAM_HEADER_SIZE)
             {
                 Some(header) => header,
                 None => {
@@ -221,11 +223,7 @@ impl<'a> Iterator for LoadSegments<'a> {
     }
 }
 
-fn validate_program_header_table(
-    bytes: &[u8],
-    offset: u64,
-    count: u16,
-) -> Result<(), ElfError> {
+fn validate_program_header_table(bytes: &[u8], offset: u64, count: u16) -> Result<(), ElfError> {
     let table_size = u64::from(count)
         .checked_mul(ELF64_PROGRAM_HEADER_SIZE as u64)
         .ok_or(ElfError::ProgramHeaderTableOutOfBounds)?;
@@ -273,9 +271,7 @@ fn parse_load_segment<'a>(image: &'a [u8], header: &[u8]) -> Result<LoadSegment<
 
     let start = usize::try_from(file_offset).map_err(|_| ElfError::InvalidLoadSegment)?;
     let end = usize::try_from(file_end).map_err(|_| ElfError::InvalidLoadSegment)?;
-    let file_bytes = image
-        .get(start..end)
-        .ok_or(ElfError::InvalidLoadSegment)?;
+    let file_bytes = image.get(start..end).ok_or(ElfError::InvalidLoadSegment)?;
 
     Ok(LoadSegment {
         virtual_address,
@@ -351,8 +347,9 @@ mod tests {
         let ph = ELF64_HEADER_SIZE;
         image[ph..ph + 4].copy_from_slice(&PT_LOAD.to_le_bytes());
         image[ph + 4..ph + 8].copy_from_slice(&5_u32.to_le_bytes());
-        image[ph + 8..ph + 16]
-            .copy_from_slice(&((ELF64_HEADER_SIZE + ELF64_PROGRAM_HEADER_SIZE) as u64).to_le_bytes());
+        image[ph + 8..ph + 16].copy_from_slice(
+            &((ELF64_HEADER_SIZE + ELF64_PROGRAM_HEADER_SIZE) as u64).to_le_bytes(),
+        );
         image[ph + 16..ph + 24].copy_from_slice(&0x401000_u64.to_le_bytes());
         image[ph + 32..ph + 40].copy_from_slice(&16_u64.to_le_bytes());
         image[ph + 40..ph + 48].copy_from_slice(&32_u64.to_le_bytes());

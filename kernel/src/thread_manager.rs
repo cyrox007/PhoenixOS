@@ -232,6 +232,7 @@ impl<const CAPACITY: usize> ThreadManager<CAPACITY> {
                 let index = self
                     .find_thread(id)
                     .ok_or(ThreadManagerError::MissingThread)?;
+                self.start_if_ready(index)?;
                 self.threads[index]
                     .thread
                     .take_interrupt_frame()
@@ -428,6 +429,23 @@ impl<const CAPACITY: usize> ThreadManager<CAPACITY> {
             _exit_state: None,
             preemptive: true,
         })
+    }
+
+    fn start_if_ready(&mut self, index: usize) -> Result<(), ThreadManagerError> {
+        let state = self.threads[index].thread.state();
+
+        if state == ThreadState::Running {
+            return Ok(());
+        }
+
+        if state != ThreadState::Ready {
+            return Err(ThreadManagerError::InvalidState);
+        }
+
+        self.threads[index]
+            .thread
+            .start()
+            .map_err(ThreadManagerError::Thread)
     }
 
     fn block_thread(

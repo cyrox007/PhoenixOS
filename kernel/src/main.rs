@@ -58,6 +58,15 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     }
     serial::line(&mut out, "INFO", format_args!("syscall msr self-test: OK"));
 
+    if !arch::x86_64::syscall::user_return_selectors_valid(syscall_msrs) {
+        panic!("пользовательские сегменты SYSRET не согласованы с IA32_STAR");
+    }
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("syscall user selectors self-test: OK"),
+    );
+
     if !arch::x86_64::syscall::entry_self_test() {
         panic!("аппаратный вход SYSCALL повредил запрос или результат");
     }

@@ -100,6 +100,7 @@ unsafe extern "C" {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitError {
     Unsupported,
+    InvalidSelectors,
     VerificationFailed,
 }
 
@@ -126,7 +127,8 @@ pub fn init() -> Result<SyscallMsrState, InitError> {
     }
 
     let kernel_code_selector = u64::from(super::gdt::kernel_code_selector_raw());
-    let star = kernel_code_selector << 32;
+    let user_selector_base = user_return_selector_base().ok_or(InitError::InvalidSelectors)?;
+    let star = (u64::from(user_selector_base) << 48) | (kernel_code_selector << 32);
     let lstar = phoenix_syscall_entry as *const () as u64;
     let fmask = RFLAGS_TRAP | RFLAGS_INTERRUPT | RFLAGS_DIRECTION;
     let efer = unsafe { read_msr(IA32_EFER) } | EFER_SCE;
@@ -154,6 +156,33 @@ pub fn init() -> Result<SyscallMsrState, InitError> {
     }
 
     Ok(state)
+}
+
+pub fn user_return_selectors_valid(state: SyscallMsrState) -> bool {
+    let user_code = super::gdt::user_code_selector_raw();
+    let user_data = super::gdt::user_data_selector_raw();
+    let selector_base = (state.star >> 48) as u16;
+
+    if user_code & 0b11 != 0b11 || user_data & 0b11 != 0b11 {
+        return false;
+    }
+
+    let expected_data = selector_base.wrapping_add(8) | 0b11;
+    let expected_code = selector_base.wrapping_add(16) | 0b11;
+
+    user_data == expected_data && user_code == expected_code
+}
+
+fn user_return_selector_base() -> Option<u16> {
+    let user_code = super::gdt::user_code_selector_raw() & !0b11;
+    let user_data = super::gdt::user_data_selector_raw() & !0b11;
+    let base = user_code.checked_sub(16)?;
+
+    if base.checked_add(8)? != user_data {
+        return None;
+    }
+
+    Some(base)
 }
 
 pub fn entry_self_test() -> bool {

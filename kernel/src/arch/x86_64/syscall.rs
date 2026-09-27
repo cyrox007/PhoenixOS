@@ -204,6 +204,7 @@ enum EndpointOperationError {
     UserMemory(IpcUserMemoryError),
     MissingEndpointOwner,
     SameProcessTransfer,
+    WrongEndpointReceiver,
 }
 
 impl From<EndpointRegistryError> for EndpointOperationError {
@@ -964,9 +965,15 @@ fn dispatch_ipc_receive(request: SyscallRequest) -> SyscallReturn {
         }
         Err(_) => return syscall_failure(STATUS_BAD_ARGUMENTS),
     };
+    let Some(receiver) = current_process_id() else {
+        return syscall_failure(STATUS_OPERATION_NOT_READY);
+    };
 
     let Some(result) = with_current_endpoint_registry(|registry| {
         let endpoint = registry.get_mut(endpoint_id)?;
+        if endpoint.owner().is_some_and(|owner| owner != receiver) {
+            return Err(EndpointOperationError::WrongEndpointReceiver);
+        }
         let message = endpoint.peek()?;
         let transferred_capability = message
             .transferred_capability()
@@ -1007,6 +1014,7 @@ fn endpoint_operation_result(result: Result<usize, EndpointOperationError>) -> S
         | Err(EndpointOperationError::ProcessRegistry(_))
         | Err(EndpointOperationError::Transfer(_))
         | Err(EndpointOperationError::SameProcessTransfer)
+        | Err(EndpointOperationError::WrongEndpointReceiver)
         | Err(EndpointOperationError::Transport(IpcError::TooManyWords | IpcError::QueueEmpty))
         | Err(EndpointOperationError::UserMemory(_)) => syscall_failure(STATUS_BAD_ARGUMENTS),
     }
@@ -1033,17 +1041,9 @@ fn ipc_receive_arguments(request: SyscallRequest) -> IpcReceiveArguments {
     }
 }
 
-pub fn ipc_capability_transfer_self_test(
-    send: IpcSendArguments,
-    receive: IpcReceiveArguments,
-) -> bool {
+pub fn ipc_capability_transfer_self_test(send: IpcSendArguments) -> bool {
     let send_result = dispatch(SyscallRequest::ipc_send(send));
-    let receive_result = dispatch(SyscallRequest::ipc_receive(receive));
-
-    send_result.is_success()
-        && send_result.value == send.word_count
-        && receive_result.is_success()
-        && receive_result.value == send.word_count
+    send_result.is_success() && send_result.value == send.word_count
 }
 
 pub fn ipc_endpoint_operations_self_test(

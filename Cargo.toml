@@ -9,6 +9,7 @@ members = [
     "crates/process-model",
     "crates/syscall-abi",
     "crates/capability-model",
+    "crates/ipc-model",
 ]
 
 [package]

@@ -12,6 +12,24 @@ pub struct SyscallError {
     status: u64,
 }
 
+pub type MainFunction = extern "C" fn() -> u64;
+
+/// Runs a user program's main function and terminates the current process with
+/// the returned status.
+pub fn start(main: MainFunction) -> ! {
+    process_exit(run_main(main))
+}
+
+/// Terminates the current process. A conforming kernel never returns from this
+/// system call; trap if it rejects the request instead of continuing execution.
+pub fn process_exit(status: u64) -> ! {
+    let _ = invoke(build_process_exit_request(status));
+
+    unsafe {
+        asm!("ud2", options(noreturn));
+    }
+}
+
 impl SyscallError {
     pub const fn status(self) -> u64 {
         self.status
@@ -66,6 +84,14 @@ fn build_ipc_receive_request(
     })
 }
 
+fn build_process_exit_request(status: u64) -> SyscallRequest {
+    SyscallRequest::process_exit(status)
+}
+
+fn run_main(main: MainFunction) -> u64 {
+    main()
+}
+
 #[inline(always)]
 fn invoke(request: SyscallRequest) -> Result<u64, SyscallError> {
     let arguments = request.arguments;
@@ -98,7 +124,13 @@ fn invoke(request: SyscallRequest) -> Result<u64, SyscallError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phoenix_syscall_abi::{NO_TRANSFERRED_CAPABILITY, SYSCALL_IPC_RECEIVE, SYSCALL_IPC_SEND};
+    use phoenix_syscall_abi::{
+        NO_TRANSFERRED_CAPABILITY, SYSCALL_IPC_RECEIVE, SYSCALL_IPC_SEND, SYSCALL_PROCESS_EXIT,
+    };
+
+    extern "C" fn successful_main() -> u64 {
+        23
+    }
 
     #[test]
     fn send_wrapper_builds_stable_register_contract() {
@@ -140,5 +172,18 @@ mod tests {
         assert_eq!(request.arguments[3], metadata_address);
         assert_eq!(request.arguments[4], 0);
         assert_eq!(request.arguments[5], 0);
+    }
+
+    #[test]
+    fn process_exit_wrapper_builds_public_abi_request() {
+        let request = build_process_exit_request(23);
+
+        assert_eq!(request.number, SYSCALL_PROCESS_EXIT);
+        assert_eq!(request.arguments, [23, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn runtime_entry_returns_main_status() {
+        assert_eq!(run_main(successful_main), 23);
     }
 }

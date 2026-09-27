@@ -1,5 +1,5 @@
 use core::arch::{global_asm, x86_64::__cpuid};
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use phoenix_capability::{CapabilityError, CapabilityHandle, ObjectKind, Rights};
 use phoenix_ipc::{
@@ -9,8 +9,8 @@ use phoenix_ipc::{
 use phoenix_process::{ProcessCapabilitySet, ProcessId};
 use phoenix_syscall_abi::{
     IpcReceiveArguments, IpcReceiveMetadata, IpcSendArguments, NO_TRANSFERRED_CAPABILITY,
-    PackedCapabilityHandle, SYSCALL_IPC_RECEIVE, SYSCALL_IPC_SEND, SyscallRequest, SyscallReturn,
-    SyscallStatus,
+    PackedCapabilityHandle, SYSCALL_IPC_RECEIVE, SYSCALL_IPC_SEND, SYSCALL_PROCESS_EXIT,
+    SyscallRequest, SyscallReturn, SyscallStatus,
 };
 
 use crate::ipc_user_memory::{self, IpcUserMemoryError};
@@ -44,7 +44,6 @@ const SELF_TEST_ARGUMENTS: [u64; 6] = [
     0xfedc_ba98_7654_3210,
 ];
 const SELF_TEST_RESULT: u64 = 0x5359_5343_414c_4c21;
-const USER_SELF_TEST_EXIT_NUMBER: u64 = u64::MAX - 1;
 const USER_SELF_TEST_SUCCESS: u64 = 0x5553_4552_5f4f_4b21;
 const USER_SELF_TEST_FAILURE: u64 = 0x5553_4552_5f42_4144;
 const STATUS_UNKNOWN_CALL: u32 = 1;
@@ -141,7 +140,8 @@ impl Default for KernelProcessCapabilityRegistry {
     }
 }
 
-static USER_SELF_TEST_RESULT: AtomicU64 = AtomicU64::new(0);
+static USER_PROCESS_EXITED: AtomicBool = AtomicBool::new(false);
+static USER_PROCESS_EXIT_STATUS: AtomicU64 = AtomicU64::new(0);
 static CURRENT_PROCESS_ADDRESS_SPACE: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_PROCESS_CAPABILITIES: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_ENDPOINT_REGISTRY: AtomicUsize = AtomicUsize::new(0);
@@ -405,11 +405,11 @@ pub fn resolve_current_endpoint(
     Ok(EndpointId(capability.object.0))
 }
 
-#[unsafe(export_name = "phoenix_user_test_active")]
-static mut USER_TEST_ACTIVE: u64 = 0;
+#[unsafe(export_name = "phoenix_user_process_active")]
+static mut USER_PROCESS_ACTIVE: u64 = 0;
 
-#[unsafe(export_name = "phoenix_user_test_kernel_rsp")]
-static mut USER_TEST_KERNEL_RSP: u64 = 0;
+#[unsafe(export_name = "phoenix_user_process_kernel_rsp")]
+static mut USER_PROCESS_KERNEL_RSP: u64 = 0;
 
 global_asm!(
     r#"
@@ -451,10 +451,12 @@ phoenix_syscall_entry:
     lea rsi, [rsp + 64]
     call phoenix_syscall_dispatch
 
-    cmp qword ptr [rsp + 0], -2
+    cmp qword ptr [rsp + 0], 0x102
     jne 1f
-    cmp qword ptr [rip + phoenix_user_test_active], 1
-    je phoenix_user_test_return_from_syscall
+    cmp qword ptr [rsp + 72], 0
+    jne 1f
+    cmp qword ptr [rip + phoenix_user_process_active], 1
+    je phoenix_user_process_return_from_syscall
 1:
     mov rax, [rsp + 64]
     mov rdx, [rsp + 72]
@@ -463,7 +465,7 @@ phoenix_syscall_entry:
     pop r11
     pop rcx
 
-    cmp qword ptr [rip + phoenix_user_test_active], 1
+    cmp qword ptr [rip + phoenix_user_process_active], 1
     je 2f
 
     push r11
@@ -515,8 +517,8 @@ phoenix_user_test_enter:
     push r14
     push r15
 
-    mov [rip + phoenix_user_test_kernel_rsp], rsp
-    mov qword ptr [rip + phoenix_user_test_active], 1
+    mov [rip + phoenix_user_process_kernel_rsp], rsp
+    mov qword ptr [rip + phoenix_user_process_active], 1
 
     push rcx
     push rsi
@@ -526,9 +528,9 @@ phoenix_user_test_enter:
     iretq
     .size phoenix_user_test_enter, .-phoenix_user_test_enter
 
-phoenix_user_test_return_from_syscall:
-    mov qword ptr [rip + phoenix_user_test_active], 0
-    mov rsp, [rip + phoenix_user_test_kernel_rsp]
+phoenix_user_process_return_from_syscall:
+    mov qword ptr [rip + phoenix_user_process_active], 0
+    mov rsp, [rip + phoenix_user_process_kernel_rsp]
 
     pop r15
     pop r14
@@ -573,7 +575,7 @@ phoenix_user_test_image_start:
     mov rdi, 0x555345525f424144
 
 4:
-    mov rax, -2
+    mov rax, 0x102
     syscall
     ud2
 phoenix_user_test_image_end:
@@ -776,14 +778,21 @@ pub fn user_mode_test_image() -> &'static [u8] {
     unsafe { core::slice::from_raw_parts(start as *const u8, length) }
 }
 
-pub fn run_user_mode_self_test(instruction_pointer: u64, stack_pointer: u64) -> bool {
-    let Ok(context) =
-        UserReturnContext::new(instruction_pointer, stack_pointer, RFLAGS_RESERVED_ONE)
-    else {
-        return false;
-    };
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserProcessRunError {
+    InvalidContext(UserReturnError),
+    ReturnedWithoutExit,
+}
 
-    USER_SELF_TEST_RESULT.store(0, Ordering::Release);
+pub fn run_user_process(
+    instruction_pointer: u64,
+    stack_pointer: u64,
+) -> Result<u64, UserProcessRunError> {
+    let context = UserReturnContext::new(instruction_pointer, stack_pointer, RFLAGS_RESERVED_ONE)
+        .map_err(UserProcessRunError::InvalidContext)?;
+
+    USER_PROCESS_EXITED.store(false, Ordering::Release);
+    USER_PROCESS_EXIT_STATUS.store(0, Ordering::Release);
 
     unsafe {
         phoenix_user_test_enter(
@@ -795,7 +804,15 @@ pub fn run_user_mode_self_test(instruction_pointer: u64, stack_pointer: u64) -> 
         );
     }
 
-    USER_SELF_TEST_RESULT.load(Ordering::Acquire) == USER_SELF_TEST_SUCCESS
+    if !USER_PROCESS_EXITED.load(Ordering::Acquire) {
+        return Err(UserProcessRunError::ReturnedWithoutExit);
+    }
+
+    Ok(USER_PROCESS_EXIT_STATUS.load(Ordering::Acquire))
+}
+
+pub fn run_user_mode_self_test(instruction_pointer: u64, stack_pointer: u64) -> bool {
+    run_user_process(instruction_pointer, stack_pointer) == Ok(USER_SELF_TEST_SUCCESS)
 }
 
 pub fn return_context_self_test() -> bool {
@@ -842,19 +859,10 @@ extern "C" fn phoenix_syscall_dispatch(request: *const SyscallRequest, result: *
 }
 
 fn dispatch(request: SyscallRequest) -> SyscallReturn {
-    if request.number == USER_SELF_TEST_EXIT_NUMBER {
-        let result = request.arguments[0];
-        if result != USER_SELF_TEST_SUCCESS && result != USER_SELF_TEST_FAILURE {
-            return syscall_failure(STATUS_BAD_ARGUMENTS);
-        }
-
-        USER_SELF_TEST_RESULT.store(result, Ordering::Release);
-        return SyscallReturn::success(0);
-    }
-
     match request.number {
         SYSCALL_IPC_SEND => return dispatch_ipc_send(request),
         SYSCALL_IPC_RECEIVE => return dispatch_ipc_receive(request),
+        SYSCALL_PROCESS_EXIT => return dispatch_process_exit(request),
         SELF_TEST_NUMBER => {}
         _ => return syscall_failure(STATUS_UNKNOWN_CALL),
     }
@@ -864,6 +872,16 @@ fn dispatch(request: SyscallRequest) -> SyscallReturn {
     }
 
     SyscallReturn::success(SELF_TEST_RESULT)
+}
+
+fn dispatch_process_exit(request: SyscallRequest) -> SyscallReturn {
+    if request.arguments[1..].iter().any(|argument| *argument != 0) {
+        return syscall_failure(STATUS_BAD_ARGUMENTS);
+    }
+
+    USER_PROCESS_EXIT_STATUS.store(request.arguments[0], Ordering::Release);
+    USER_PROCESS_EXITED.store(true, Ordering::Release);
+    SyscallReturn::success(0)
 }
 
 fn dispatch_ipc_send(request: SyscallRequest) -> SyscallReturn {
@@ -1097,6 +1115,20 @@ pub fn ipc_dispatch_self_test() -> bool {
     send_result.status.raw() == u64::from(STATUS_OPERATION_NOT_READY)
         && receive_result.status.raw() == u64::from(STATUS_OPERATION_NOT_READY)
         && invalid_send_result.status.raw() == u64::from(STATUS_BAD_ARGUMENTS)
+}
+
+pub fn process_exit_dispatch_self_test() -> bool {
+    let status = 0xfedc_ba98_7654_3210;
+    let valid_result = dispatch(SyscallRequest::process_exit(status));
+    let invalid_result = dispatch(SyscallRequest::new(
+        SYSCALL_PROCESS_EXIT,
+        [status, 1, 0, 0, 0, 0],
+    ));
+
+    valid_result.is_success()
+        && USER_PROCESS_EXITED.load(Ordering::Acquire)
+        && USER_PROCESS_EXIT_STATUS.load(Ordering::Acquire) == status
+        && invalid_result.status.raw() == u64::from(STATUS_BAD_ARGUMENTS)
 }
 
 fn syscall_failure(code: u32) -> SyscallReturn {

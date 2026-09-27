@@ -133,9 +133,7 @@ impl<const CAPACITY: usize> Endpoint<CAPACITY> {
             return Err(IpcError::QueueEmpty);
         }
 
-        let message = self.queue[self.head]
-            .take()
-            .ok_or(IpcError::QueueEmpty)?;
+        let message = self.queue[self.head].take().ok_or(IpcError::QueueEmpty)?;
         self.head = (self.head + 1) % CAPACITY;
         self.len -= 1;
 
@@ -251,8 +249,7 @@ mod tests {
         phoenix_capability::Capability {
             object: phoenix_capability::ObjectId(object),
             kind: phoenix_capability::ObjectKind::Endpoint,
-            rights: phoenix_capability::Rights::READ
-                .union(phoenix_capability::Rights::TRANSFER),
+            rights: phoenix_capability::Rights::READ.union(phoenix_capability::Rights::TRANSFER),
         }
     }
 
@@ -296,13 +293,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            send_with_capability(
-                &mut endpoint,
-                &mut source,
-                &mut target,
-                &[1],
-                source_handle,
-            ),
+            send_with_capability(&mut endpoint, &mut source, &mut target, &[1], source_handle,),
             Err(IpcSendError::Transport(IpcError::QueueFull))
         );
         assert_eq!(source.get(source_handle).unwrap().object.0, 88);
@@ -318,16 +309,8 @@ mod tests {
         target.insert(transferable_capability(100)).unwrap();
 
         assert_eq!(
-            send_with_capability(
-                &mut endpoint,
-                &mut source,
-                &mut target,
-                &[1],
-                source_handle,
-            ),
-            Err(IpcSendError::Capability(
-                CapabilityError::CapacityExceeded
-            ))
+            send_with_capability(&mut endpoint, &mut source, &mut target, &[1], source_handle,),
+            Err(IpcSendError::Capability(CapabilityError::CapacityExceeded))
         );
         assert_eq!(source.get(source_handle).unwrap().object.0, 99);
         assert!(endpoint.is_empty());

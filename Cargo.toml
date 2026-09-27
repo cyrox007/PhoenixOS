@@ -7,6 +7,7 @@ members = [
     "crates/virtual-memory",
     "crates/scheduler",
     "crates/process-model",
+    "crates/syscall-abi",
 ]
 
 [package]

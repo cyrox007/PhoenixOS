@@ -101,11 +101,7 @@ impl<const CAPACITY: usize> ThreadManager<CAPACITY> {
         Ok(id)
     }
 
-    pub fn set_blocked(
-        &mut self,
-        id: ThreadId,
-        blocked: bool,
-    ) -> Result<(), ThreadManagerError> {
+    pub fn set_blocked(&mut self, id: ThreadId, blocked: bool) -> Result<(), ThreadManagerError> {
         let index = self
             .find_thread(id)
             .ok_or(ThreadManagerError::MissingThread)?;
@@ -232,9 +228,7 @@ impl<const CAPACITY: usize> ThreadManager<CAPACITY> {
     }
 
     fn find_thread(&self, id: ThreadId) -> Option<usize> {
-        self.threads
-            .iter()
-            .position(|slot| slot.thread.id() == id)
+        self.threads.iter().position(|slot| slot.thread.id() == id)
     }
 }
 

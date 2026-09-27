@@ -213,7 +213,6 @@ impl<const CAPACITY: usize> AddressSpace<CAPACITY> {
     }
 }
 
-
 pub struct ProcessCapabilitySet<const CAPACITY: usize> {
     owner: ProcessId,
     table: CapabilityTable<CAPACITY>,
@@ -239,10 +238,7 @@ impl<const CAPACITY: usize> ProcessCapabilitySet<CAPACITY> {
         self.table.is_empty()
     }
 
-    pub fn insert(
-        &mut self,
-        capability: Capability,
-    ) -> Result<CapabilityHandle, CapabilityError> {
+    pub fn insert(&mut self, capability: Capability) -> Result<CapabilityHandle, CapabilityError> {
         self.table.insert(capability)
     }
 
@@ -266,10 +262,7 @@ impl<const CAPACITY: usize> ProcessCapabilitySet<CAPACITY> {
         self.table.derive(handle, rights)
     }
 
-    pub fn revoke(
-        &mut self,
-        handle: CapabilityHandle,
-    ) -> Result<Capability, CapabilityError> {
+    pub fn revoke(&mut self, handle: CapabilityHandle) -> Result<Capability, CapabilityError> {
         self.table.revoke(handle)
     }
 

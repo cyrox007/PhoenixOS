@@ -1359,7 +1359,7 @@ fn user_mode_syscall_self_test(
     }
 
     let endpoint_id = phoenix_ipc::EndpointId(0x5359_5343_414c_4c49);
-    let mut endpoint_registry = arch::x86_64::syscall::KernelEndpointRegistry::new();
+    let mut endpoint_registry = Box::new(arch::x86_64::syscall::KernelEndpointRegistry::new());
     endpoint_registry
         .insert(phoenix_ipc::Endpoint::new(endpoint_id))
         .expect("не удалось зарегистрировать endpoint системного вызова");

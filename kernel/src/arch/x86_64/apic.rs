@@ -61,7 +61,7 @@ pub(super) fn handle_timer_interrupt() {
 }
 
 fn verify_capabilities() -> Result<(), InitError> {
-    let features = unsafe { __cpuid(1) };
+    let features = __cpuid(1);
 
     if features.edx & (1 << 9) == 0 {
         return Err(InitError::LocalApicUnavailable);

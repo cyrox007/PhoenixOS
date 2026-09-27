@@ -22,6 +22,7 @@ pub enum ThreadState {
 pub enum ThreadError {
     StackTooSmall,
     Stack(StackError),
+    InvalidInterruptFrame,
     InvalidState {
         current: ThreadState,
         operation: &'static str,
@@ -33,6 +34,7 @@ pub struct KernelThread {
     context: Context,
     stack: Box<[u8]>,
     state: ThreadState,
+    interrupt_frame: Option<u64>,
 }
 
 impl KernelThread {
@@ -55,6 +57,7 @@ impl KernelThread {
             context,
             stack,
             state: ThreadState::Ready,
+            interrupt_frame: None,
         })
     }
 
@@ -80,6 +83,7 @@ impl KernelThread {
             context,
             stack,
             state: ThreadState::Ready,
+            interrupt_frame: None,
         })
     }
 
@@ -101,6 +105,22 @@ impl KernelThread {
 
     pub fn context_mut(&mut self) -> &mut Context {
         &mut self.context
+    }
+
+    pub const fn interrupt_frame(&self) -> Option<u64> {
+        self.interrupt_frame
+    }
+
+    pub fn save_interrupt_frame(&mut self, frame: u64) -> Result<(), ThreadError> {
+        if frame == 0 || frame & 0x7 != 0 {
+            return Err(ThreadError::InvalidInterruptFrame);
+        }
+        self.interrupt_frame = Some(frame);
+        Ok(())
+    }
+
+    pub fn take_interrupt_frame(&mut self) -> Option<u64> {
+        self.interrupt_frame.take()
     }
 
     pub fn start(&mut self) -> Result<(), ThreadError> {

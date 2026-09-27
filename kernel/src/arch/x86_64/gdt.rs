@@ -10,10 +10,12 @@ use x86_64::structures::tss::TaskStateSegment;
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 
 const DOUBLE_FAULT_STACK_SIZE: usize = 4096 * 5;
+const USER_PRIVILEGE_STACK_SIZE: usize = 64 * 1024;
 
 lazy_static! {
     static ref TSS: TaskStateSegment = {
         let mut tss = TaskStateSegment::new();
+        tss.privilege_stack_table[0] = user_privilege_stack_end();
         tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = double_fault_stack_end();
         tss
     };
@@ -32,7 +34,13 @@ struct Selectors {
 #[repr(align(16))]
 struct DoubleFaultStack([u8; DOUBLE_FAULT_STACK_SIZE]);
 
+#[allow(dead_code)]
+#[repr(align(16))]
+struct UserPrivilegeStack([u8; USER_PRIVILEGE_STACK_SIZE]);
+
 static mut DOUBLE_FAULT_STACK: DoubleFaultStack = DoubleFaultStack([0; DOUBLE_FAULT_STACK_SIZE]);
+static mut USER_PRIVILEGE_STACK: UserPrivilegeStack =
+    UserPrivilegeStack([0; USER_PRIVILEGE_STACK_SIZE]);
 
 pub fn init() {
     GDT.0.load();
@@ -58,6 +66,13 @@ pub fn user_data_selector_raw() -> u16 {
     GDT.1.user_data_selector.0
 }
 
+pub fn user_privilege_stack_ready() -> bool {
+    let start = VirtAddr::from_ptr(ptr::addr_of!(USER_PRIVILEGE_STACK)).as_u64();
+    let end = TSS.privilege_stack_table[0].as_u64();
+
+    end.saturating_sub(start) == USER_PRIVILEGE_STACK_SIZE as u64 && end & 0xf == 0
+}
+
 fn build_gdt() -> (GlobalDescriptorTable, Selectors) {
     let mut gdt = GlobalDescriptorTable::new();
     let code_selector = gdt.append(Descriptor::kernel_code_segment());
@@ -81,4 +96,10 @@ fn build_gdt() -> (GlobalDescriptorTable, Selectors) {
 fn double_fault_stack_end() -> VirtAddr {
     let start = VirtAddr::from_ptr(ptr::addr_of!(DOUBLE_FAULT_STACK));
     start + DOUBLE_FAULT_STACK_SIZE as u64
+}
+
+
+fn user_privilege_stack_end() -> VirtAddr {
+    let start = VirtAddr::from_ptr(ptr::addr_of!(USER_PRIVILEGE_STACK));
+    start + USER_PRIVILEGE_STACK_SIZE as u64
 }

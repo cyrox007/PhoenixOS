@@ -71,7 +71,8 @@ impl<const CAPACITY: usize> ProcessAddressSpace<CAPACITY> {
         A: FrameAllocator<Size4KiB> + FrameDeallocator<Size4KiB>,
     {
         if !region.permissions.user_accessible()
-            || region.end_exclusive() > USER_SPACE_END_EXCLUSIVE
+            || region.start >= USER_SPACE_END_EXCLUSIVE
+            || region.length > USER_SPACE_END_EXCLUSIVE - region.start
         {
             return Err(ProcessAddressSpaceError::NotUserRegion);
         }

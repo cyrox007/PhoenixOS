@@ -62,6 +62,37 @@ impl KernelThread {
         })
     }
 
+    pub fn new_preemptive(
+        id: ThreadId,
+        stack_size: usize,
+        entry: ThreadEntry,
+        argument: usize,
+    ) -> Result<Self, ThreadError> {
+        if stack_size < MINIMUM_STACK_SIZE {
+            return Err(ThreadError::StackTooSmall);
+        }
+
+        let mut stack = vec![0; stack_size].into_boxed_slice();
+        let mut registers = apic::TimerGeneralRegisters::EMPTY;
+        registers.r12 = entry as usize as u64;
+        registers.r13 = argument as u64;
+
+        let interrupt_frame = exceptions::prepare_kernel_timer_trampoline_frame(
+            &mut stack,
+            context::thread_trampoline_address(),
+            registers,
+        )
+        .ok_or(ThreadError::InvalidInterruptFrame)?;
+
+        Ok(Self {
+            id,
+            context: Context::empty(),
+            stack,
+            state: ThreadState::Ready,
+            interrupt_frame: Some(interrupt_frame),
+        })
+    }
+
     pub fn new_preemptive_returning(
         id: ThreadId,
         stack_size: usize,

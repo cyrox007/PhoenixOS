@@ -4,7 +4,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use phoenix_scheduler::{RoundRobinScheduler, ScheduleDecision, SchedulerError, TaskId};
 
-use crate::arch::x86_64::context::{self, Context, ReturningThreadEntry};
+use crate::arch::x86_64::context::{self, Context, ReturningThreadEntry, ThreadEntry};
 use crate::thread::{KernelThread, ThreadError, ThreadId, ThreadState};
 
 const DEFAULT_STACK_SIZE: usize = 64 * 1024;
@@ -167,7 +167,8 @@ struct ExitState {
 
 struct ThreadSlot {
     thread: Box<KernelThread>,
-    _exit_state: Box<ExitState>,
+    _exit_state: Option<Box<ExitState>>,
+    preemptive: bool,
 }
 
 pub struct ThreadManager<const CAPACITY: usize> {
@@ -231,6 +232,7 @@ impl<const CAPACITY: usize> ThreadManager<CAPACITY> {
                 let index = self
                     .find_thread(id)
                     .ok_or(ThreadManagerError::MissingThread)?;
+                self.start_if_ready(index)?;
                 self.threads[index]
                     .thread
                     .take_interrupt_frame()
@@ -282,6 +284,46 @@ impl<const CAPACITY: usize> ThreadManager<CAPACITY> {
         Ok(id)
     }
 
+    pub fn spawn_preemptive(
+        &mut self,
+        entry: ThreadEntry,
+        argument: usize,
+        quantum_ticks: u32,
+    ) -> Result<ThreadId, ThreadManagerError> {
+        self.spawn_preemptive_with_stack(entry, argument, quantum_ticks, DEFAULT_STACK_SIZE)
+    }
+
+    pub fn spawn_preemptive_with_stack(
+        &mut self,
+        entry: ThreadEntry,
+        argument: usize,
+        quantum_ticks: u32,
+        stack_size: usize,
+    ) -> Result<ThreadId, ThreadManagerError> {
+        let id = ThreadId(self.next_id);
+        let task_id = TaskId(id.0);
+        let next_id = self
+            .next_id
+            .checked_add(1)
+            .ok_or(ThreadManagerError::IdExhausted)?;
+
+        self.scheduler
+            .add(task_id, quantum_ticks)
+            .map_err(ThreadManagerError::Scheduler)?;
+
+        let slot = match self.build_preemptive_slot(id, entry, argument, stack_size) {
+            Ok(slot) => slot,
+            Err(error) => {
+                let _ = self.scheduler.remove(task_id);
+                return Err(error);
+            }
+        };
+
+        self.threads.push(slot);
+        self.next_id = next_id;
+        Ok(id)
+    }
+
     pub fn set_blocked(&mut self, id: ThreadId, blocked: bool) -> Result<(), ThreadManagerError> {
         let index = self
             .find_thread(id)
@@ -307,6 +349,10 @@ impl<const CAPACITY: usize> ThreadManager<CAPACITY> {
         let index = self
             .find_thread(id)
             .ok_or(ThreadManagerError::MissingThread)?;
+
+        if self.threads[index].preemptive {
+            return Err(ThreadManagerError::InvalidState);
+        }
 
         self.threads[index]
             .thread
@@ -361,8 +407,45 @@ impl<const CAPACITY: usize> ThreadManager<CAPACITY> {
 
         Ok(ThreadSlot {
             thread,
-            _exit_state: exit_state,
+            _exit_state: Some(exit_state),
+            preemptive: false,
         })
+    }
+
+    fn build_preemptive_slot(
+        &mut self,
+        id: ThreadId,
+        entry: ThreadEntry,
+        argument: usize,
+        stack_size: usize,
+    ) -> Result<ThreadSlot, ThreadManagerError> {
+        let thread = Box::new(
+            KernelThread::new_preemptive(id, stack_size, entry, argument)
+                .map_err(ThreadManagerError::Thread)?,
+        );
+
+        Ok(ThreadSlot {
+            thread,
+            _exit_state: None,
+            preemptive: true,
+        })
+    }
+
+    fn start_if_ready(&mut self, index: usize) -> Result<(), ThreadManagerError> {
+        let state = self.threads[index].thread.state();
+
+        if state == ThreadState::Running {
+            return Ok(());
+        }
+
+        if state != ThreadState::Ready {
+            return Err(ThreadManagerError::InvalidState);
+        }
+
+        self.threads[index]
+            .thread
+            .start()
+            .map_err(ThreadManagerError::Thread)
     }
 
     fn block_thread(

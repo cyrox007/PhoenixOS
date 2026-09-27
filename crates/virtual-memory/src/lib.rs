@@ -232,8 +232,8 @@ impl InactivePageTable {
             .allocate_frame()
             .ok_or(InactivePageTableError::NoPhysicalFrame)?;
 
-        let frame_ptr = (self.physical_memory_offset + frame.start_address().as_u64())
-            .as_mut_ptr::<u8>();
+        let frame_ptr =
+            (self.physical_memory_offset + frame.start_address().as_u64()).as_mut_ptr::<u8>();
         unsafe {
             core::ptr::write_bytes(frame_ptr, 0, PAGE_SIZE as usize);
         }
@@ -242,10 +242,7 @@ impl InactivePageTable {
         let mapping_flags =
             (flags & allowed) | PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
 
-        let result = unsafe {
-            self.mapper()
-                .map_to(page, frame, mapping_flags, allocator)
-        };
+        let result = unsafe { self.mapper().map_to(page, frame, mapping_flags, allocator) };
 
         match result {
             Ok(flush) => {
@@ -298,10 +295,7 @@ impl InactivePageTable {
 
     /// Освобождает все пользовательские листовые страницы и принадлежащие
     /// процессу таблицы P1/P2/P3. Верхняя половина ядра не затрагивается.
-    pub fn destroy_user_half<A>(
-        &mut self,
-        allocator: &mut A,
-    ) -> Result<u64, InactivePageTableError>
+    pub fn destroy_user_half<A>(&mut self, allocator: &mut A) -> Result<u64, InactivePageTableError>
     where
         A: FrameDeallocator<Size4KiB>,
     {
@@ -389,8 +383,7 @@ impl InactivePageTable {
     }
 
     unsafe fn table_ptr(&self, frame: PhysFrame<Size4KiB>) -> *mut PageTable {
-        (self.physical_memory_offset + frame.start_address().as_u64())
-            .as_mut_ptr::<PageTable>()
+        (self.physical_memory_offset + frame.start_address().as_u64()).as_mut_ptr::<PageTable>()
     }
 
     /// Удаляет только разделяемые ссылки верхнего уровня на таблицы ядра.

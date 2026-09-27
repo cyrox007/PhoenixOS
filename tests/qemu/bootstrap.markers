@@ -23,3 +23,4 @@ syscall user selectors self-test: OK
 syscall entry self-test: OK
 syscall entry stack self-test: OK
 syscall return context self-test: OK
+process capability self-test: OK

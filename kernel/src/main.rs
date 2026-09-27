@@ -7,6 +7,7 @@ extern crate alloc;
 
 mod arch;
 mod heap;
+mod process_space;
 mod qemu;
 mod serial;
 mod thread;
@@ -92,6 +93,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         &mut out,
         "INFO",
         format_args!("process user mapping self-test: OK"),
+    );
+
+    process_region_mapping_self_test(physical_memory_offset, &mut frames);
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("process region mapping self-test: OK"),
     );
 
     let heap_stats =
@@ -404,6 +412,64 @@ fn inactive_page_table_self_test(
 
     if frames.free_frames() != free_before {
         panic!("корень адресного пространства не вернул физическую страницу");
+    }
+}
+
+fn process_region_mapping_self_test(
+    physical_memory_offset: VirtAddr,
+    frames: &mut SystemFrameAllocator<SYSTEM_MEMORY_RANGE_CAPACITY>,
+) {
+    use phoenix_process::{AddressSpaceId, MemoryPermissions, RegionKind, VirtualRegion};
+
+    let free_before = frames.free_frames();
+    let mut space = unsafe {
+        process_space::ProcessAddressSpace::<4>::new(
+            AddressSpaceId(42),
+            physical_memory_offset,
+            frames,
+        )
+    }
+    .expect("не удалось создать адресное пространство процесса");
+
+    let region = VirtualRegion::new(
+        PROCESS_VM_TEST_ADDRESS,
+        2 * phoenix_process::PAGE_SIZE,
+        MemoryPermissions::USER_READ_WRITE,
+        RegionKind::Program,
+    )
+    .expect("не удалось описать тестовый пользовательский регион");
+
+    space
+        .map_region(region, frames)
+        .expect("не удалось отобразить пользовательский регион процесса");
+
+    if space.id() != AddressSpaceId(42) || space.region_count() != 1 {
+        panic!("модель адресного пространства процесса рассинхронизирована");
+    }
+
+    for offset in [0, phoenix_process::PAGE_SIZE] {
+        if space
+            .translate_addr(VirtAddr::new(PROCESS_VM_TEST_ADDRESS + offset))
+            .is_none()
+        {
+            panic!("страница зарегистрированного региона не отображена");
+        }
+    }
+
+    let unmapped = space
+        .unmap_region(region.start, region.length, frames)
+        .expect("не удалось снять пользовательский регион процесса");
+
+    if unmapped != region || space.region_count() != 0 {
+        panic!("реестр региона не синхронизирован после снятия отображения");
+    }
+
+    space
+        .destroy(frames)
+        .expect("не удалось уничтожить адресное пространство процесса");
+
+    if frames.free_frames() != free_before {
+        panic!("адресное пространство процесса не вернуло всю физическую память");
     }
 }
 

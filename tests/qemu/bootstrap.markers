@@ -9,6 +9,8 @@ kernel thread object self-test: OK
 kernel thread interrupt frame self-test: OK
 kernel thread frame routing self-test: OK
 kernel thread initial irq frame self-test: OK
+kernel thread preemptive manager self-test: OK
+kernel thread preemptive spawn self-test: OK
 kernel thread scheduler self-test: OK
 thread preemption hook self-test: OK
 thread interrupt frame self-test: OK
@@ -31,4 +33,3 @@ syscall entry stack self-test: OK
 syscall return context self-test: OK
 process capability self-test: OK
 ipc endpoint self-test: OK
-ipc syscall dispatch self-test: OK

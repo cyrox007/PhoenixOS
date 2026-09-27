@@ -31,6 +31,8 @@ const VM_TEST_VALUE: u64 = 0x5048_4f45_4e49_584f;
 const PROCESS_VM_TEST_ADDRESS: u64 = 0x0000_0000_4000_0000;
 const PROCESS_VM_TEST_VALUE: u64 = 0x5052_4f43_5f56_4d21;
 const PROCESS_CR3_TEST_VALUE: u64 = 0x4352_335f_5357_4954;
+const USER_MODE_CODE_ADDRESS: u64 = 0x0000_0000_5000_0000;
+const USER_MODE_STACK_ADDRESS: u64 = 0x0000_0000_5000_2000;
 const HEAP_TEST_VALUE: u64 = 0x4845_4150_5f4f_4b21;
 const APIC_TIMER_TEST_TICKS: u64 = 3;
 const THREAD_CONTEXT_TEST_STACK_SIZE: usize = 64 * 1024;
@@ -160,6 +162,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         &mut out,
         "INFO",
         format_args!("process cr3 switch self-test: OK"),
+    );
+
+    user_mode_sysret_self_test(physical_memory_offset, &mut frames);
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("user mode sysret self-test: OK"),
     );
 
     let heap_stats =
@@ -678,6 +687,106 @@ fn process_cr3_switch_self_test(
     if frames.free_frames() != free_before {
         panic!("CR3 self-test не вернул всю физическую память");
     }
+}
+
+fn user_mode_sysret_self_test(
+    physical_memory_offset: VirtAddr,
+    frames: &mut SystemFrameAllocator<SYSTEM_MEMORY_RANGE_CAPACITY>,
+) {
+    use phoenix_process::{AddressSpaceId, MemoryPermissions, RegionKind, VirtualRegion};
+
+    let free_before = frames.free_frames();
+    let mut space = unsafe {
+        process_space::ProcessAddressSpace::<4>::new(
+            AddressSpaceId(44),
+            physical_memory_offset,
+            frames,
+        )
+    }
+    .expect("не удалось создать адресное пространство пользовательской самопроверки");
+
+    let code_region = VirtualRegion::new(
+        USER_MODE_CODE_ADDRESS,
+        phoenix_process::PAGE_SIZE,
+        MemoryPermissions::USER_READ_EXECUTE,
+        RegionKind::Program,
+    )
+    .expect("не удалось описать пользовательский код");
+    let stack_region = VirtualRegion::new(
+        USER_MODE_STACK_ADDRESS,
+        phoenix_process::PAGE_SIZE,
+        MemoryPermissions::USER_READ_WRITE,
+        RegionKind::Stack,
+    )
+    .expect("не удалось описать пользовательский стек");
+
+    space
+        .map_region(code_region, frames)
+        .expect("не удалось отобразить пользовательский код");
+    space
+        .map_region(stack_region, frames)
+        .expect("не удалось отобразить пользовательский стек");
+
+    let mut image = Vec::new();
+    append_mov_imm64(&mut image, [0x48, 0xb8], arch::x86_64::syscall::SELF_TEST_NUMBER);
+    append_mov_imm64(&mut image, [0x48, 0xbf], 0x11);
+    append_mov_imm64(&mut image, [0x48, 0xbe], 0x2233);
+    append_mov_imm64(&mut image, [0x48, 0xba], 0x4455_6677);
+    append_mov_imm64(&mut image, [0x49, 0xba], 0x8899_aabb_ccdd_eeff);
+    append_mov_imm64(&mut image, [0x49, 0xb8], 0x1234_5678_9abc_def0);
+    append_mov_imm64(&mut image, [0x49, 0xb9], 0xfedc_ba98_7654_3210);
+    image.extend_from_slice(&[0x0f, 0x05]);
+    append_mov_imm64(&mut image, [0x48, 0xbb], arch::x86_64::syscall::SELF_TEST_RESULT);
+    image.extend_from_slice(&[0x48, 0x39, 0xd8, 0x74, 0x02, 0x0f, 0x0b]);
+    image.extend_from_slice(&[0x48, 0x85, 0xd2, 0x74, 0x02, 0x0f, 0x0b]);
+    append_mov_imm64(
+        &mut image,
+        [0x48, 0xb8],
+        arch::x86_64::syscall::USER_TEST_EXIT_NUMBER,
+    );
+    image.extend_from_slice(&[0x0f, 0x05, 0x0f, 0x0b]);
+
+    space
+        .write_user_bytes(VirtAddr::new(USER_MODE_CODE_ADDRESS), &image)
+        .expect("не удалось загрузить пользовательскую самопроверку");
+
+    let context = arch::x86_64::syscall::UserReturnContext::new(
+        USER_MODE_CODE_ADDRESS,
+        USER_MODE_STACK_ADDRESS + phoenix_process::PAGE_SIZE - 16,
+        1 << 1,
+    )
+    .expect("контекст пользовательской самопроверки недопустим");
+
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let guard = unsafe { space.activate() };
+        unsafe {
+            arch::x86_64::syscall::enter_user_test(context);
+        }
+        drop(guard);
+    });
+
+    if space.is_active() {
+        panic!("системный CR3 не восстановлен после пользовательской самопроверки");
+    }
+
+    space
+        .unmap_region(code_region.start, code_region.length, frames)
+        .expect("не удалось снять пользовательский код");
+    space
+        .unmap_region(stack_region.start, stack_region.length, frames)
+        .expect("не удалось снять пользовательский стек");
+    space
+        .destroy(frames)
+        .expect("не удалось уничтожить пользовательскую самопроверку");
+
+    if frames.free_frames() != free_before {
+        panic!("пользовательская самопроверка не вернула всю физическую память");
+    }
+}
+
+fn append_mov_imm64(image: &mut Vec<u8>, opcode: [u8; 2], value: u64) {
+    image.extend_from_slice(&opcode);
+    image.extend_from_slice(&value.to_le_bytes());
 }
 
 fn virtual_memory_self_test(

@@ -221,6 +221,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         "INFO",
         format_args!("kernel thread object self-test: OK"),
     );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("kernel thread interrupt frame self-test: OK"),
+    );
 
     kernel_thread_scheduler_self_test();
     serial::line(
@@ -367,6 +372,25 @@ fn thread_context_self_test() {
         || worker.stack_size() != THREAD_CONTEXT_TEST_STACK_SIZE
     {
         panic!("объект тестового потока создан с неверными свойствами");
+    }
+
+    if worker.interrupt_frame().is_some()
+        || worker.save_interrupt_frame(0) != Err(thread::ThreadError::InvalidInterruptFrame)
+        || worker.save_interrupt_frame(0x1003) != Err(thread::ThreadError::InvalidInterruptFrame)
+    {
+        panic!("поток принял некорректный сохранённый IRQ-кадр");
+    }
+
+    const TEST_INTERRUPT_FRAME: u64 = 0x2000;
+    worker
+        .save_interrupt_frame(TEST_INTERRUPT_FRAME)
+        .expect("не удалось сохранить IRQ-кадр в объекте потока");
+
+    if worker.interrupt_frame() != Some(TEST_INTERRUPT_FRAME)
+        || worker.take_interrupt_frame() != Some(TEST_INTERRUPT_FRAME)
+        || worker.interrupt_frame().is_some()
+    {
+        panic!("объект потока повредил сохранённый IRQ-кадр");
     }
 
     state.worker = worker.context_mut();

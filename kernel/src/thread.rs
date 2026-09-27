@@ -1,7 +1,9 @@
 use alloc::boxed::Box;
 use alloc::vec;
 
-use crate::arch::x86_64::context::{Context, StackError, ThreadEntry};
+use crate::arch::x86_64::context::{
+    Context, ReturningThreadEntry, StackError, ThreadEntry, ThreadExit,
+};
 
 const MINIMUM_STACK_SIZE: usize = 4096;
 
@@ -47,6 +49,31 @@ impl KernelThread {
         let mut stack = vec![0; stack_size].into_boxed_slice();
         let context =
             Context::for_stack(&mut stack, entry, argument).map_err(ThreadError::Stack)?;
+
+        Ok(Self {
+            id,
+            context,
+            stack,
+            state: ThreadState::Ready,
+        })
+    }
+
+    pub fn new_returning(
+        id: ThreadId,
+        stack_size: usize,
+        entry: ReturningThreadEntry,
+        argument: usize,
+        exit: ThreadExit,
+        exit_argument: usize,
+    ) -> Result<Self, ThreadError> {
+        if stack_size < MINIMUM_STACK_SIZE {
+            return Err(ThreadError::StackTooSmall);
+        }
+
+        let mut stack = vec![0; stack_size].into_boxed_slice();
+        let context =
+            Context::for_returning_stack(&mut stack, entry, argument, exit, exit_argument)
+                .map_err(ThreadError::Stack)?;
 
         Ok(Self {
             id,

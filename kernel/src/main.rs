@@ -10,6 +10,7 @@ mod heap;
 mod qemu;
 mod serial;
 mod thread;
+mod thread_manager;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -107,6 +108,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!("kernel thread object self-test: OK"),
     );
 
+    kernel_thread_scheduler_self_test();
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("kernel thread scheduler self-test: OK"),
+    );
+
     init_apic_timer(&mut out, &mut page_table, &mut frames);
 
     render_boot_banner(boot_info, &mut out);
@@ -195,6 +203,71 @@ extern "C" fn thread_context_test_entry(argument: usize) -> ! {
     loop {
         core::hint::spin_loop();
     }
+}
+
+fn kernel_thread_scheduler_self_test() {
+    let mut first = 0_u64;
+    let mut second = 0_u64;
+    let mut manager = thread_manager::ThreadManager::<4>::new();
+
+    let first_id = manager
+        .spawn(
+            scheduled_thread_test_entry,
+            &mut first as *mut u64 as usize,
+            1,
+        )
+        .expect("не удалось создать первый планируемый поток");
+
+    let second_id = manager
+        .spawn(
+            scheduled_thread_test_entry,
+            &mut second as *mut u64 as usize,
+            1,
+        )
+        .expect("не удалось создать второй планируемый поток");
+
+    manager
+        .set_blocked(second_id, true)
+        .expect("не удалось заблокировать второй поток");
+
+    if manager.state(second_id) != Some(thread::ThreadState::Blocked) {
+        panic!("заблокированный поток имеет неверное состояние");
+    }
+
+    let first_result = manager
+        .dispatch_tick()
+        .expect("ошибка диспетчеризации первого потока");
+
+    if first_result != thread_manager::DispatchResult::Completed(first_id) || first != 1 {
+        panic!("первый планируемый поток завершился некорректно");
+    }
+
+    manager
+        .set_blocked(second_id, false)
+        .expect("не удалось пробудить второй поток");
+
+    let second_result = manager
+        .dispatch_tick()
+        .expect("ошибка диспетчеризации второго потока");
+
+    if second_result != thread_manager::DispatchResult::Completed(second_id) || second != 1 {
+        panic!("второй планируемый поток завершился некорректно");
+    }
+
+    if manager.live_count() != 0 {
+        panic!("завершённые потоки остались в менеджере");
+    }
+
+    if manager.dispatch_tick().expect("ошибка проверки простоя")
+        != thread_manager::DispatchResult::Idle
+    {
+        panic!("пустой менеджер потоков не перешёл в простой");
+    }
+}
+
+extern "C" fn scheduled_thread_test_entry(argument: usize) {
+    let value = unsafe { &mut *(argument as *mut u64) };
+    *value += 1;
 }
 
 fn init_apic_timer(

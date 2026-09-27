@@ -34,15 +34,28 @@ phoenix_thread_trampoline:
     call r12
     ud2
     .size phoenix_thread_trampoline, .-phoenix_thread_trampoline
+
+    .global phoenix_returning_thread_trampoline
+    .type phoenix_returning_thread_trampoline,@function
+phoenix_returning_thread_trampoline:
+    mov rdi, r13
+    call r12
+    mov rdi, r15
+    call r14
+    ud2
+    .size phoenix_returning_thread_trampoline, .-phoenix_returning_thread_trampoline
 "#
 );
 
 unsafe extern "C" {
     fn phoenix_context_switch(old_rsp: *mut u64, new_rsp: u64);
     fn phoenix_thread_trampoline();
+    fn phoenix_returning_thread_trampoline();
 }
 
 pub type ThreadEntry = extern "C" fn(usize) -> !;
+pub type ReturningThreadEntry = extern "C" fn(usize);
+pub type ThreadExit = extern "C" fn(usize) -> !;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StackError {
@@ -65,6 +78,41 @@ impl Context {
         entry: ThreadEntry,
         argument: usize,
     ) -> Result<Self, StackError> {
+        Self::prepare_stack(
+            stack,
+            entry as usize,
+            argument,
+            0,
+            0,
+            phoenix_thread_trampoline as usize,
+        )
+    }
+
+    pub fn for_returning_stack(
+        stack: &mut [u8],
+        entry: ReturningThreadEntry,
+        argument: usize,
+        exit: ThreadExit,
+        exit_argument: usize,
+    ) -> Result<Self, StackError> {
+        Self::prepare_stack(
+            stack,
+            entry as usize,
+            argument,
+            exit as usize,
+            exit_argument,
+            phoenix_returning_thread_trampoline as usize,
+        )
+    }
+
+    fn prepare_stack(
+        stack: &mut [u8],
+        entry: usize,
+        argument: usize,
+        exit: usize,
+        exit_argument: usize,
+        trampoline: usize,
+    ) -> Result<Self, StackError> {
         let base = stack.as_mut_ptr() as usize;
         let top = base
             .checked_add(stack.len())
@@ -79,15 +127,13 @@ impl Context {
         let frame = rsp as *mut u64;
 
         unsafe {
-            frame.add(0).write(0);
-            frame.add(1).write(0);
+            frame.add(0).write(exit_argument as u64);
+            frame.add(1).write(exit as u64);
             frame.add(2).write(argument as u64);
-            frame.add(3).write(entry as usize as u64);
+            frame.add(3).write(entry as u64);
             frame.add(4).write(0);
             frame.add(5).write(0);
-            frame
-                .add(6)
-                .write(phoenix_thread_trampoline as usize as u64);
+            frame.add(6).write(trampoline as u64);
         }
 
         Ok(Self { rsp: rsp as u64 })

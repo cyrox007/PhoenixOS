@@ -58,6 +58,10 @@ pub fn kernel_code_selector_raw() -> u16 {
     GDT.1.code_selector.0
 }
 
+pub fn kernel_data_selector_raw() -> u16 {
+    GDT.1.data_selector.0
+}
+
 pub fn user_code_selector_raw() -> u16 {
     GDT.1.user_code_selector.0
 }

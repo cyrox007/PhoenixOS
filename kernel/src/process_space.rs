@@ -42,8 +42,7 @@ impl<const CAPACITY: usize> ProcessAddressSpace<CAPACITY> {
     where
         A: FrameAllocator<Size4KiB>,
     {
-        let mut page_table =
-            unsafe { InactivePageTable::new(physical_memory_offset, allocator)? };
+        let mut page_table = unsafe { InactivePageTable::new(physical_memory_offset, allocator)? };
         unsafe {
             page_table.inherit_kernel_half(physical_memory_offset);
         }

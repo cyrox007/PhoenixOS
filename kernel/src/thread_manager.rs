@@ -33,7 +33,10 @@ static LAST_TIMER_REGISTERS: [AtomicU64; 15] = [
     AtomicU64::new(0),
 ];
 
-pub fn timer_tick_hook(tick: u64, context: crate::arch::x86_64::apic::TimerInterruptContext) {
+pub fn timer_tick_hook(
+    tick: u64,
+    context: crate::arch::x86_64::apic::TimerInterruptContext,
+) -> Option<u64> {
     LAST_TIMER_RIP.store(context.instruction_pointer, Ordering::Relaxed);
     LAST_TIMER_RSP.store(context.stack_pointer, Ordering::Relaxed);
     LAST_TIMER_RFLAGS.store(context.cpu_flags, Ordering::Relaxed);
@@ -41,6 +44,7 @@ pub fn timer_tick_hook(tick: u64, context: crate::arch::x86_64::apic::TimerInter
     LAST_TIMER_STACK_FRAME.store(context.stack_frame_address, Ordering::Relaxed);
     store_timer_registers(context.general_registers);
     LAST_TIMER_TICK.store(tick, Ordering::Release);
+    None
 }
 
 pub fn last_timer_tick() -> u64 {

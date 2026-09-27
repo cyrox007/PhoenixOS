@@ -243,6 +243,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!("kernel thread frame routing self-test: OK"),
     );
 
+    preemptive_thread_start_frame_self_test();
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("kernel thread initial irq frame self-test: OK"),
+    );
+
     init_apic_timer(&mut out, &mut page_table, &mut frames);
 
     render_boot_banner(boot_info, &mut out);
@@ -440,6 +447,47 @@ fn kernel_thread_interrupt_frame_self_test() {
     }
     if thread.interrupt_frame().is_some() {
         panic!("изъятый IRQ-кадр остался привязан к потоку");
+    }
+}
+
+fn preemptive_thread_start_frame_self_test() {
+    const ARGUMENT: usize = 0x1234;
+    const EXIT_ARGUMENT: usize = 0x5678;
+
+    let thread = thread::KernelThread::new_preemptive_returning(
+        thread::ThreadId(0x20),
+        THREAD_CONTEXT_TEST_STACK_SIZE,
+        scheduled_thread_test_entry,
+        ARGUMENT,
+        preemptive_start_test_exit,
+        EXIT_ARGUMENT,
+    )
+    .expect("не удалось создать preemptive kernel thread");
+
+    let frame = thread
+        .interrupt_frame()
+        .expect("preemptive kernel thread не получил стартовый IRQ-кадр");
+    if !thread.interrupt_frame_is_on_stack() {
+        panic!("стартовый IRQ-кадр находится вне стека потока");
+    }
+
+    let registers = arch::x86_64::exceptions::prepared_kernel_timer_frame_registers(frame);
+    let (instruction_pointer, _, _) =
+        arch::x86_64::exceptions::prepared_kernel_timer_frame_words(frame);
+
+    if instruction_pointer != arch::x86_64::context::returning_thread_trampoline_address()
+        || registers.r12 != scheduled_thread_test_entry as usize as u64
+        || registers.r13 != ARGUMENT as u64
+        || registers.r14 != preemptive_start_test_exit as usize as u64
+        || registers.r15 != EXIT_ARGUMENT as u64
+    {
+        panic!("стартовый IRQ-кадр не содержит trampoline-контекст потока");
+    }
+}
+
+extern "C" fn preemptive_start_test_exit(_argument: usize) -> ! {
+    loop {
+        core::hint::spin_loop();
     }
 }
 

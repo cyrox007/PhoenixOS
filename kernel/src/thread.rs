@@ -4,6 +4,7 @@ use alloc::vec;
 use crate::arch::x86_64::context::{
     Context, ReturningThreadEntry, StackError, ThreadEntry, ThreadExit,
 };
+use crate::arch::x86_64::{apic, context, exceptions};
 
 const MINIMUM_STACK_SIZE: usize = 4096;
 
@@ -61,6 +62,41 @@ impl KernelThread {
         })
     }
 
+    pub fn new_preemptive_returning(
+        id: ThreadId,
+        stack_size: usize,
+        entry: ReturningThreadEntry,
+        argument: usize,
+        exit: ThreadExit,
+        exit_argument: usize,
+    ) -> Result<Self, ThreadError> {
+        if stack_size < MINIMUM_STACK_SIZE {
+            return Err(ThreadError::StackTooSmall);
+        }
+
+        let mut stack = vec![0; stack_size].into_boxed_slice();
+        let mut registers = apic::TimerGeneralRegisters::EMPTY;
+        registers.r12 = entry as usize as u64;
+        registers.r13 = argument as u64;
+        registers.r14 = exit as usize as u64;
+        registers.r15 = exit_argument as u64;
+
+        let interrupt_frame = exceptions::prepare_kernel_timer_trampoline_frame(
+            &mut stack,
+            context::returning_thread_trampoline_address(),
+            registers,
+        )
+        .ok_or(ThreadError::InvalidInterruptFrame)?;
+
+        Ok(Self {
+            id,
+            context: Context::empty(),
+            stack,
+            state: ThreadState::Ready,
+            interrupt_frame: Some(interrupt_frame),
+        })
+    }
+
     pub fn new_returning(
         id: ThreadId,
         stack_size: usize,
@@ -109,6 +145,17 @@ impl KernelThread {
 
     pub const fn interrupt_frame(&self) -> Option<u64> {
         self.interrupt_frame
+    }
+
+    pub fn interrupt_frame_is_on_stack(&self) -> bool {
+        let Some(frame) = self.interrupt_frame else {
+            return false;
+        };
+        let start = self.stack.as_ptr() as u64;
+        let Some(end) = start.checked_add(self.stack.len() as u64) else {
+            return false;
+        };
+        frame >= start && frame < end
     }
 
     pub fn save_interrupt_frame(&mut self, frame: u64) -> Result<(), ThreadError> {

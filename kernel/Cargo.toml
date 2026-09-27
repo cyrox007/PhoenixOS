@@ -12,6 +12,7 @@ phoenix-framebuffer = { path = "../crates/phoenix-framebuffer" }
 phoenix-memory = { path = "../crates/boot-memory" }
 phoenix-process = { path = "../crates/process-model" }
 phoenix-scheduler = { path = "../crates/scheduler" }
+phoenix-syscall-abi = { path = "../crates/syscall-abi" }
 phoenix-vm = { path = "../crates/virtual-memory" }
 uart_16550 = "0.8.0"
 x86_64 = "0.15.2"

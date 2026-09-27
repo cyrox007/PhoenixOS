@@ -6,6 +6,7 @@
 extern crate alloc;
 
 mod arch;
+mod elf_user_loader;
 mod heap;
 mod ipc_user_memory;
 mod process_space;
@@ -198,6 +199,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         &mut out,
         "INFO",
         format_args!("process region mapping self-test: OK"),
+    );
+
+    elf_process_loader_self_test(physical_memory_offset, &mut frames);
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("elf process load self-test: OK"),
     );
 
     process_cr3_switch_self_test(physical_memory_offset, &mut frames);
@@ -1205,6 +1213,93 @@ fn process_region_mapping_self_test(
 
     if frames.free_frames() != free_before {
         panic!("адресное пространство процесса не вернуло всю физическую память");
+    }
+}
+
+fn elf_process_loader_self_test(
+    physical_memory_offset: VirtAddr,
+    frames: &mut SystemFrameAllocator<SYSTEM_MEMORY_RANGE_CAPACITY>,
+) {
+    use phoenix_process::AddressSpaceId;
+
+    const IMAGE_SIZE: usize = 4096;
+    const LOAD_ADDRESS: u64 = 0x0000_0000_4200_0000;
+    const ENTRY_OFFSET: u64 = 0x80;
+    const FILE_SIZE: u64 = 0x100;
+    const MEMORY_SIZE: u64 = 0x1000;
+
+    let free_before = frames.free_frames();
+    let mut space = unsafe {
+        process_space::ProcessAddressSpace::<4>::new(
+            AddressSpaceId(46),
+            physical_memory_offset,
+            frames,
+        )
+    }
+    .expect("не удалось создать адресное пространство ELF self-test");
+
+    let mut image = [0_u8; IMAGE_SIZE];
+    image[0..4].copy_from_slice(b"\x7fELF");
+    image[4] = 2;
+    image[5] = 1;
+    image[6] = 1;
+    image[16..18].copy_from_slice(&2_u16.to_le_bytes());
+    image[18..20].copy_from_slice(&62_u16.to_le_bytes());
+    image[20..24].copy_from_slice(&1_u32.to_le_bytes());
+    image[24..32].copy_from_slice(&(LOAD_ADDRESS + ENTRY_OFFSET).to_le_bytes());
+    image[32..40].copy_from_slice(&64_u64.to_le_bytes());
+    image[52..54].copy_from_slice(&64_u16.to_le_bytes());
+    image[54..56].copy_from_slice(&56_u16.to_le_bytes());
+    image[56..58].copy_from_slice(&1_u16.to_le_bytes());
+
+    let ph = 64_usize;
+    image[ph..ph + 4].copy_from_slice(&1_u32.to_le_bytes());
+    image[ph + 4..ph + 8].copy_from_slice(&5_u32.to_le_bytes());
+    image[ph + 8..ph + 16].copy_from_slice(&0_u64.to_le_bytes());
+    image[ph + 16..ph + 24].copy_from_slice(&LOAD_ADDRESS.to_le_bytes());
+    image[ph + 32..ph + 40].copy_from_slice(&FILE_SIZE.to_le_bytes());
+    image[ph + 40..ph + 48].copy_from_slice(&MEMORY_SIZE.to_le_bytes());
+    image[ph + 48..ph + 56].copy_from_slice(&0x1000_u64.to_le_bytes());
+    image[ENTRY_OFFSET as usize] = 0xc3;
+
+    let loaded = elf_user_loader::load_elf(&image, &mut space, frames)
+        .expect("не удалось загрузить тестовый ELF64 в адресное пространство");
+    if loaded.entry_point != LOAD_ADDRESS + ENTRY_OFFSET
+        || loaded.segment_count != 1
+        || space.region_count() != 1
+    {
+        panic!("ELF-загрузчик вернул неверный план пользовательского образа");
+    }
+
+    let mut magic = [0_u8; 4];
+    space
+        .read_user_bytes(VirtAddr::new(LOAD_ADDRESS), &mut magic)
+        .expect("не удалось прочитать загруженный ELF-заголовок");
+    if magic != *b"\x7fELF" {
+        panic!("ELF-загрузчик повредил файловую часть PT_LOAD");
+    }
+
+    let mut entry_byte = [0_u8; 1];
+    space
+        .read_user_bytes(VirtAddr::new(loaded.entry_point), &mut entry_byte)
+        .expect("не удалось прочитать точку входа ELF");
+    if entry_byte != [0xc3] {
+        panic!("точка входа ELF не совпадает с загруженными данными");
+    }
+
+    let mut bss = [0xff_u8; 32];
+    space
+        .read_user_bytes(VirtAddr::new(LOAD_ADDRESS + FILE_SIZE), &mut bss)
+        .expect("не удалось прочитать нулевую часть PT_LOAD");
+    if bss.iter().any(|byte| *byte != 0) {
+        panic!("ELF-загрузчик не обнулил диапазон memsz - filesz");
+    }
+
+    space
+        .destroy(frames)
+        .expect("не удалось уничтожить адресное пространство ELF self-test");
+    if frames.free_frames() != free_before {
+        panic!("ELF self-test не вернул физические страницы распределителю");
     }
 }
 

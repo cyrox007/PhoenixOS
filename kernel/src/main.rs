@@ -362,8 +362,7 @@ fn inactive_page_table_self_test(
         panic!("корень процесса неверно унаследовал отображения ядра");
     }
 
-    let process_page =
-        Page::<Size4KiB>::containing_address(VirtAddr::new(PROCESS_VM_TEST_ADDRESS));
+    let process_page = Page::<Size4KiB>::containing_address(VirtAddr::new(PROCESS_VM_TEST_ADDRESS));
     let process_frame = root
         .map_owned_user_4k(process_page, PageTableFlags::WRITABLE, frames)
         .expect("не удалось создать пользовательское отображение процесса");

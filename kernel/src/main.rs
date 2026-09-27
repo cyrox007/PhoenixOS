@@ -332,7 +332,7 @@ fn inactive_page_table_self_test(
 ) {
     let free_before = frames.free_frames();
 
-    let root = unsafe { InactivePageTable::new(physical_memory_offset, frames) }
+    let mut root = unsafe { InactivePageTable::new(physical_memory_offset, frames) }
         .expect("не удалось выделить корень таблиц страниц процесса");
 
     if root.is_active() {
@@ -345,6 +345,20 @@ fn inactive_page_table_self_test(
 
     if frames.free_frames() + 1 != free_before {
         panic!("создание корня адресного пространства заняло неверное число страниц");
+    }
+
+    unsafe {
+        root.inherit_kernel_half(physical_memory_offset);
+    }
+
+    if !root.user_half_is_empty() || !root.kernel_half_matches_active(physical_memory_offset) {
+        panic!("корень процесса неверно унаследовал отображения ядра");
+    }
+
+    // Разделяемые ядерные записи не принадлежат процессу, поэтому очищаем их
+    // перед возвратом самой страницы P4 распределителю.
+    unsafe {
+        root.clear_kernel_half();
     }
 
     root.release_empty(frames)

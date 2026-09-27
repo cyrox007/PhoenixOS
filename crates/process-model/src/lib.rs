@@ -374,7 +374,10 @@ impl<const CAPACITY: usize> ProcessTable<CAPACITY> {
         let index = self.find(id).ok_or(ProcessError::ProcessNotFound)?;
         let current = self.entries[index].ok_or(ProcessError::ProcessNotFound)?;
 
-        if !matches!(current.state, ProcessState::Runnable | ProcessState::Blocked) {
+        if !matches!(
+            current.state,
+            ProcessState::Runnable | ProcessState::Blocked
+        ) {
             return Err(ProcessError::InvalidTransition {
                 from: current.state,
                 to: ProcessState::Exited,

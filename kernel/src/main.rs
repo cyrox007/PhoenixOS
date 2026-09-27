@@ -1412,8 +1412,8 @@ fn user_mode_syscall_self_test(
 ) {
     use phoenix_capability::{Capability, ObjectId, ObjectKind, Rights};
     use phoenix_process::{
-        MemoryPermissions, ProcessCapabilitySet, ProcessId, ProcessState, ProcessTable,
-        RegionKind, VirtualRegion,
+        MemoryPermissions, ProcessCapabilitySet, ProcessId, ProcessState, ProcessTable, RegionKind,
+        VirtualRegion,
     };
 
     let free_before = frames.free_frames();
@@ -1671,10 +1671,8 @@ fn user_mode_syscall_self_test(
         }
         .expect("контекст пользовательского системного вызова уже установлен");
         let guard = unsafe { space.activate() };
-        let result = arch::x86_64::syscall::run_user_process(
-            USER_MODE_TEST_CODE_ADDRESS,
-            stack_pointer,
-        );
+        let result =
+            arch::x86_64::syscall::run_user_process(USER_MODE_TEST_CODE_ADDRESS, stack_pointer);
         drop(guard);
         drop(context_guard);
         result

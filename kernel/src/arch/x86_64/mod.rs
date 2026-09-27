@@ -8,3 +8,7 @@ pub fn init() {
     gdt::init();
     exceptions::init();
 }
+
+pub fn user_privilege_stack_ready() -> bool {
+    gdt::user_privilege_stack_ready()
+}

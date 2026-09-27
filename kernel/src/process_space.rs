@@ -159,6 +159,15 @@ impl<const CAPACITY: usize> ProcessAddressSpace<CAPACITY> {
         Ok(())
     }
 
+    pub fn read_user_bytes(
+        &mut self,
+        address: VirtAddr,
+        bytes: &mut [u8],
+    ) -> Result<(), ProcessAddressSpaceError> {
+        self.page_table.read_user_bytes(address, bytes)?;
+        Ok(())
+    }
+
     pub fn is_active(&self) -> bool {
         self.page_table.is_active()
     }

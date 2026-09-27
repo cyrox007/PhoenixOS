@@ -51,6 +51,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     arch::x86_64::init();
     serial::line(&mut out, "INFO", format_args!("interrupt tables: OK"));
 
+    let syscall_msrs =
+        arch::x86_64::syscall::init().expect("процессор не поддерживает x86-64 SYSCALL/SYSRET");
+    if syscall_msrs.lstar == 0 || syscall_msrs.efer & 1 == 0 {
+        panic!("MSR системных вызовов не прошли проверку после записи");
+    }
+    serial::line(&mut out, "INFO", format_args!("syscall msr self-test: OK"));
+
     arch::x86_64::exceptions::smoke_test_breakpoint();
     serial::line(&mut out, "INFO", format_args!("breakpoint self-test: OK"));
 

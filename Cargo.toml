@@ -11,6 +11,7 @@ members = [
     "crates/capability-model",
     "crates/ipc-model",
     "crates/elf-loader",
+    "crates/user-runtime",
 ]
 
 [package]

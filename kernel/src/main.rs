@@ -234,6 +234,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!("kernel thread scheduler self-test: OK"),
     );
 
+    kernel_thread_preemption_scheduler_self_test();
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("kernel thread preemption scheduler self-test: OK"),
+    );
+
     init_apic_timer(&mut out, &mut page_table, &mut frames);
 
     render_boot_banner(boot_info, &mut out);
@@ -482,6 +489,53 @@ fn kernel_thread_scheduler_self_test() {
         != thread_manager::DispatchResult::Idle
     {
         panic!("пустой менеджер потоков не перешёл в простой");
+    }
+}
+
+fn kernel_thread_preemption_scheduler_self_test() {
+    const FIRST_INITIAL_FRAME: u64 = 0x4000;
+    const SECOND_INITIAL_FRAME: u64 = 0x5000;
+    const DISPATCHER_FRAME: u64 = 0x6000;
+    const FIRST_INTERRUPTED_FRAME: u64 = 0x4100;
+    const SECOND_INTERRUPTED_FRAME: u64 = 0x5100;
+
+    let mut manager = thread_manager::ThreadManager::<2>::new();
+    let first_id = manager
+        .spawn(scheduled_thread_test_entry, 0, 1)
+        .expect("не удалось создать первый поток проверки вытеснения");
+    let second_id = manager
+        .spawn(scheduled_thread_test_entry, 0, 1)
+        .expect("не удалось создать второй поток проверки вытеснения");
+
+    manager
+        .set_interrupt_frame(first_id, FIRST_INITIAL_FRAME)
+        .expect("не удалось задать первый начальный IRQ-кадр");
+    manager
+        .set_interrupt_frame(second_id, SECOND_INITIAL_FRAME)
+        .expect("не удалось задать второй начальный IRQ-кадр");
+
+    if manager
+        .schedule_interrupt_frame(DISPATCHER_FRAME)
+        .expect("не удалось выбрать первый IRQ-кадр")
+        != FIRST_INITIAL_FRAME
+    {
+        panic!("планировщик не выбрал начальный кадр первого потока");
+    }
+
+    if manager
+        .schedule_interrupt_frame(FIRST_INTERRUPTED_FRAME)
+        .expect("не удалось переключиться на второй IRQ-кадр")
+        != SECOND_INITIAL_FRAME
+    {
+        panic!("планировщик не сохранил первый кадр и не выбрал второй");
+    }
+
+    if manager
+        .schedule_interrupt_frame(SECOND_INTERRUPTED_FRAME)
+        .expect("не удалось вернуться к первому IRQ-кадру")
+        != FIRST_INTERRUPTED_FRAME
+    {
+        panic!("планировщик не восстановил обновлённый кадр первого потока");
     }
 }
 

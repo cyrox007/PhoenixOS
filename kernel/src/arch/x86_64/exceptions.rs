@@ -26,8 +26,8 @@ fn build_idt() -> InterruptDescriptorTable {
     idt.page_fault.set_handler_fn(page_fault_handler);
     idt.general_protection_fault
         .set_handler_fn(general_protection_fault_handler);
-    idt[usize::from(apic::TIMER_VECTOR)].set_handler_fn(apic_timer_handler);
-    idt[usize::from(apic::SPURIOUS_VECTOR)].set_handler_fn(apic_spurious_handler);
+    idt[apic::TIMER_VECTOR].set_handler_fn(apic_timer_handler);
+    idt[apic::SPURIOUS_VECTOR].set_handler_fn(apic_spurious_handler);
 
     unsafe {
         idt.double_fault

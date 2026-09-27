@@ -46,6 +46,7 @@ jobs:
           cargo test -p phoenix-capability
           cargo test -p phoenix-ipc
           cargo test -p phoenix-elf-loader
+          cargo test -p phoenix-user-runtime
 
       - name: Собрать UEFI-образ
         run: |

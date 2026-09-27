@@ -93,7 +93,7 @@ pub struct TimerInterruptContext {
     pub stack_frame_address: u64,
 }
 
-pub type TimerHook = fn(u64, TimerInterruptContext);
+pub type TimerHook = fn(u64, TimerInterruptContext) -> Option<u64>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimerHookError {
@@ -172,11 +172,11 @@ pub fn remove_timer_hook() {
     TIMER_HOOK.store(0, Ordering::Release);
 }
 
-pub(super) fn handle_timer_interrupt(context: TimerInterruptContext) {
+pub(super) fn handle_timer_interrupt(context: TimerInterruptContext) -> u64 {
     let tick = TIMER_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
 
     end_of_interrupt();
-    notify_timer_hook(tick, context);
+    notify_timer_hook(tick, context).unwrap_or(context.stack_frame_address)
 }
 
 fn end_of_interrupt() {
@@ -191,14 +191,14 @@ fn end_of_interrupt() {
     }
 }
 
-fn notify_timer_hook(tick: u64, context: TimerInterruptContext) {
+fn notify_timer_hook(tick: u64, context: TimerInterruptContext) -> Option<u64> {
     let raw = TIMER_HOOK.load(Ordering::Acquire);
     if raw == 0 {
-        return;
+        return None;
     }
 
     let hook: TimerHook = unsafe { core::mem::transmute(raw) };
-    hook(tick, context);
+    hook(tick, context)
 }
 
 fn init_xapic<const MAX_RANGES: usize>(

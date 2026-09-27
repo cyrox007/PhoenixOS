@@ -10,6 +10,7 @@ use x86_64::{PhysAddr, VirtAddr};
 
 pub const PAGE_SIZE: u64 = 4096;
 pub const KERNEL_P4_START_INDEX: usize = 256;
+pub const USER_SPACE_END_EXCLUSIVE: u64 = 0x0000_8000_0000_0000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageSpan {
@@ -120,6 +121,10 @@ impl ActivePageTable {
 pub enum InactivePageTableError {
     NoPhysicalFrame,
     NotEmpty,
+    NotUserAddress,
+    MappingFailed,
+    CorruptHierarchy,
+    UnsupportedHugePage,
 }
 
 /// Отдельный неактивный корень таблиц страниц.
@@ -131,6 +136,7 @@ pub enum InactivePageTableError {
 pub struct InactivePageTable {
     root_frame: PhysFrame<Size4KiB>,
     root_table: *mut PageTable,
+    physical_memory_offset: VirtAddr,
 }
 
 impl InactivePageTable {
@@ -161,6 +167,7 @@ impl InactivePageTable {
         Ok(Self {
             root_frame,
             root_table,
+            physical_memory_offset,
         })
     }
 
@@ -199,6 +206,163 @@ impl InactivePageTable {
     pub fn user_half_is_empty(&self) -> bool {
         let table = unsafe { &*self.root_table };
         (0..KERNEL_P4_START_INDEX).all(|index| table[index].is_unused())
+    }
+
+    /// Выделяет обнулённую физическую страницу и отображает её в нижней
+    /// пользовательской половине адресного пространства.
+    ///
+    /// Все пользовательские листовые страницы, созданные этим методом,
+    /// принадлежат данному адресному пространству и освобождаются
+    /// `destroy_user_half`.
+    pub fn map_owned_user_4k<A>(
+        &mut self,
+        page: Page<Size4KiB>,
+        flags: PageTableFlags,
+        allocator: &mut A,
+    ) -> Result<PhysFrame<Size4KiB>, InactivePageTableError>
+    where
+        A: FrameAllocator<Size4KiB> + FrameDeallocator<Size4KiB>,
+    {
+        if page.start_address().as_u64() >= USER_SPACE_END_EXCLUSIVE {
+            return Err(InactivePageTableError::NotUserAddress);
+        }
+
+        let frame = allocator
+            .allocate_frame()
+            .ok_or(InactivePageTableError::NoPhysicalFrame)?;
+
+        let frame_ptr = (self.physical_memory_offset + frame.start_address().as_u64())
+            .as_mut_ptr::<u8>();
+        unsafe {
+            core::ptr::write_bytes(frame_ptr, 0, PAGE_SIZE as usize);
+        }
+
+        let allowed = PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
+        let mapping_flags =
+            (flags & allowed) | PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+
+        let result = unsafe {
+            self.mapper()
+                .map_to(page, frame, mapping_flags, allocator)
+        };
+
+        match result {
+            Ok(flush) => {
+                flush.ignore();
+                Ok(frame)
+            }
+            Err(_) => {
+                unsafe {
+                    allocator.deallocate_frame(frame);
+                }
+                Err(InactivePageTableError::MappingFailed)
+            }
+        }
+    }
+
+    pub fn translate_user_addr(&mut self, address: VirtAddr) -> Option<PhysAddr> {
+        if address.as_u64() >= USER_SPACE_END_EXCLUSIVE {
+            return None;
+        }
+
+        self.mapper().translate_addr(address)
+    }
+
+    /// Освобождает все пользовательские листовые страницы и принадлежащие
+    /// процессу таблицы P1/P2/P3. Верхняя половина ядра не затрагивается.
+    pub fn destroy_user_half<A>(
+        &mut self,
+        allocator: &mut A,
+    ) -> Result<u64, InactivePageTableError>
+    where
+        A: FrameDeallocator<Size4KiB>,
+    {
+        let mut released = 0_u64;
+        let p4 = unsafe { &mut *self.root_table };
+
+        for p4_index in 0..KERNEL_P4_START_INDEX {
+            if p4[p4_index].is_unused() {
+                continue;
+            }
+
+            let p3_frame = p4[p4_index]
+                .frame()
+                .map_err(|_| InactivePageTableError::CorruptHierarchy)?;
+            let p3 = unsafe { &mut *self.table_ptr(p3_frame) };
+
+            for p3_index in 0..512 {
+                if p3[p3_index].is_unused() {
+                    continue;
+                }
+                if p3[p3_index].flags().contains(PageTableFlags::HUGE_PAGE) {
+                    return Err(InactivePageTableError::UnsupportedHugePage);
+                }
+
+                let p2_frame = p3[p3_index]
+                    .frame()
+                    .map_err(|_| InactivePageTableError::CorruptHierarchy)?;
+                let p2 = unsafe { &mut *self.table_ptr(p2_frame) };
+
+                for p2_index in 0..512 {
+                    if p2[p2_index].is_unused() {
+                        continue;
+                    }
+                    if p2[p2_index].flags().contains(PageTableFlags::HUGE_PAGE) {
+                        return Err(InactivePageTableError::UnsupportedHugePage);
+                    }
+
+                    let p1_frame = p2[p2_index]
+                        .frame()
+                        .map_err(|_| InactivePageTableError::CorruptHierarchy)?;
+                    let p1 = unsafe { &mut *self.table_ptr(p1_frame) };
+
+                    for p1_index in 0..512 {
+                        if p1[p1_index].is_unused() {
+                            continue;
+                        }
+
+                        let data_frame = p1[p1_index]
+                            .frame()
+                            .map_err(|_| InactivePageTableError::CorruptHierarchy)?;
+                        p1[p1_index].set_unused();
+                        unsafe {
+                            allocator.deallocate_frame(data_frame);
+                        }
+                        released += 1;
+                    }
+
+                    p2[p2_index].set_unused();
+                    unsafe {
+                        allocator.deallocate_frame(p1_frame);
+                    }
+                    released += 1;
+                }
+
+                p3[p3_index].set_unused();
+                unsafe {
+                    allocator.deallocate_frame(p2_frame);
+                }
+                released += 1;
+            }
+
+            p4[p4_index].set_unused();
+            unsafe {
+                allocator.deallocate_frame(p3_frame);
+            }
+            released += 1;
+        }
+
+        Ok(released)
+    }
+
+    unsafe fn mapper(&mut self) -> OffsetPageTable<'_> {
+        let root = unsafe { &mut *self.root_table };
+        unsafe { OffsetPageTable::new(root, self.physical_memory_offset) }
+    }
+
+    unsafe fn table_ptr(&self, frame: PhysFrame<Size4KiB>) -> *mut PageTable {
+        (self.physical_memory_offset + frame.start_address().as_u64())
+            .as_mut_ptr::<PageTable>()
     }
 
     /// Удаляет только разделяемые ссылки верхнего уровня на таблицы ядра.

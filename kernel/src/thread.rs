@@ -71,14 +71,9 @@ impl KernelThread {
         }
 
         let mut stack = vec![0; stack_size].into_boxed_slice();
-        let context = Context::for_returning_stack(
-            &mut stack,
-            entry,
-            argument,
-            exit,
-            exit_argument,
-        )
-        .map_err(ThreadError::Stack)?;
+        let context =
+            Context::for_returning_stack(&mut stack, entry, argument, exit, exit_argument)
+                .map_err(ThreadError::Stack)?;
 
         Ok(Self {
             id,

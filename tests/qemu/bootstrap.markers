@@ -11,3 +11,4 @@ thread preemption hook self-test: OK
 process page table root self-test: OK
 process user mapping self-test: OK
 process region mapping self-test: OK
+process cr3 switch self-test: OK

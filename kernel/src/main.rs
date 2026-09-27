@@ -105,6 +105,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!("syscall return context self-test: OK"),
     );
 
+    process_capability_self_test();
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("process capability self-test: OK"),
+    );
+
     arch::x86_64::exceptions::smoke_test_breakpoint();
     serial::line(&mut out, "INFO", format_args!("breakpoint self-test: OK"));
 
@@ -213,6 +220,62 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     serial::line(&mut out, "INFO", format_args!("bootstrap: OK"));
     qemu::exit(ExitCode::Success);
+}
+
+fn process_capability_self_test() {
+    use phoenix_capability::{Capability, CapabilityError, ObjectId, ObjectKind, Rights};
+    use phoenix_process::{ProcessCapabilitySet, ProcessId};
+
+    let mut source = ProcessCapabilitySet::<4>::new(ProcessId(100));
+    let mut target = ProcessCapabilitySet::<4>::new(ProcessId(200));
+    let rights = Rights::READ
+        .union(Rights::TRANSFER)
+        .union(Rights::DUPLICATE);
+
+    let original = source
+        .insert(Capability {
+            object: ObjectId(0x4341_5041_4249_4c49),
+            kind: ObjectKind::Endpoint,
+            rights,
+        })
+        .expect("не удалось выдать исходную возможность процессу");
+
+    let read_only = source
+        .derive(original, Rights::READ)
+        .expect("не удалось создать возможность с уменьшенными правами");
+
+    if source.require(read_only, Rights::READ).is_err()
+        || source.require(read_only, Rights::WRITE) != Err(CapabilityError::MissingRight)
+    {
+        panic!("производная возможность получила неверные права");
+    }
+
+    source
+        .revoke(read_only)
+        .expect("не удалось отозвать производную возможность");
+
+    if source.get(read_only) != Err(CapabilityError::InvalidHandle) {
+        panic!("отозванный дескриптор остался действительным");
+    }
+
+    let received = source
+        .transfer_to(&mut target, original)
+        .expect("не удалось передать возможность другому процессу");
+
+    if source.get(original) != Err(CapabilityError::InvalidHandle) {
+        panic!("исходный дескриптор остался действительным после передачи");
+    }
+
+    let capability = target
+        .require(received, Rights::READ)
+        .expect("получатель не получил переданную возможность");
+
+    if target.owner() != ProcessId(200)
+        || capability.object != ObjectId(0x4341_5041_4249_4c49)
+        || capability.kind != ObjectKind::Endpoint
+    {
+        panic!("переданная возможность повреждена");
+    }
 }
 
 fn log_boot_start(out: &mut serial::Com1) {

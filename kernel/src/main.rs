@@ -85,6 +85,15 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!("syscall entry stack self-test: OK"),
     );
 
+    if !arch::x86_64::syscall::return_context_self_test() {
+        panic!("контекст возврата SYSRET не прошёл проверку");
+    }
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("syscall return context self-test: OK"),
+    );
+
     arch::x86_64::exceptions::smoke_test_breakpoint();
     serial::line(&mut out, "INFO", format_args!("breakpoint self-test: OK"));
 

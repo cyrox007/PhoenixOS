@@ -20,7 +20,8 @@ const RFLAGS_FORBIDDEN_USER_RETURN: u64 =
     RFLAGS_IOPL | RFLAGS_NESTED_TASK | RFLAGS_RESUME | RFLAGS_VIRTUAL_8086;
 const SYSCALL_CPUID_BIT: u32 = 1 << 11;
 
-const SELF_TEST_NUMBER: u64 = u64::MAX;
+pub const SELF_TEST_NUMBER: u64 = u64::MAX;
+pub const USER_TEST_EXIT_NUMBER: u64 = u64::MAX - 1;
 const SELF_TEST_ARGUMENTS: [u64; 6] = [
     0x11,
     0x2233,
@@ -29,7 +30,7 @@ const SELF_TEST_ARGUMENTS: [u64; 6] = [
     0x1234_5678_9abc_def0,
     0xfedc_ba98_7654_3210,
 ];
-const SELF_TEST_RESULT: u64 = 0x5359_5343_414c_4c21;
+pub const SELF_TEST_RESULT: u64 = 0x5359_5343_414c_4c21;
 const STATUS_UNKNOWN_CALL: u32 = 1;
 const STATUS_BAD_ARGUMENTS: u32 = 2;
 const ENTRY_STACK_SIZE: u64 = 64 * 1024;
@@ -48,6 +49,15 @@ phoenix_syscall_saved_rsp:
     .quad 0
     .global phoenix_syscall_observed_rsp
 phoenix_syscall_observed_rsp:
+    .quad 0
+    .global phoenix_user_test_active
+phoenix_user_test_active:
+    .quad 0
+    .global phoenix_user_test_exit
+phoenix_user_test_exit:
+    .quad 0
+    .global phoenix_user_test_kernel_rsp
+phoenix_user_test_kernel_rsp:
     .quad 0
     .popsection
 
@@ -80,11 +90,59 @@ phoenix_syscall_entry:
     add rsp, 80
     pop r11
     pop rcx
+
+    cmp qword ptr [rip + phoenix_user_test_active], 0
+    je 1f
+    cmp qword ptr [rip + phoenix_user_test_exit], 0
+    jne 2f
+
+    mov rsp, [rip + phoenix_syscall_saved_rsp]
+    sysretq
+
+1:
     push r11
     popfq
     mov rsp, [rip + phoenix_syscall_saved_rsp]
     jmp rcx
+
+2:
+    mov qword ptr [rip + phoenix_user_test_active], 0
+    mov qword ptr [rip + phoenix_user_test_exit], 0
+    mov rsp, [rip + phoenix_user_test_kernel_rsp]
+    pop rbp
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
     .size phoenix_syscall_entry, .-phoenix_syscall_entry
+
+    .global phoenix_enter_user_test
+    .type phoenix_enter_user_test,@function
+phoenix_enter_user_test:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    push rbp
+    mov [rip + phoenix_user_test_kernel_rsp], rsp
+    mov qword ptr [rip + phoenix_user_test_active], 1
+    mov qword ptr [rip + phoenix_user_test_exit], 0
+
+    mov r8, [rdi + 0]
+    mov r9, [rdi + 8]
+    mov r10, [rdi + 16]
+    movzx eax, dx
+    push rax
+    push r9
+    push r10
+    movzx eax, si
+    push rax
+    push r8
+    iretq
+    .size phoenix_enter_user_test, .-phoenix_enter_user_test
 
     .global phoenix_syscall_kernel_test_invoke
     .type phoenix_syscall_kernel_test_invoke,@function
@@ -122,8 +180,14 @@ unsafe extern "C" {
     static phoenix_syscall_entry_stack_end: u8;
     static phoenix_syscall_saved_rsp: u64;
     static phoenix_syscall_observed_rsp: u64;
+    static mut phoenix_user_test_exit: u64;
 
     fn phoenix_syscall_entry();
+    fn phoenix_enter_user_test(
+        context: *const UserReturnContext,
+        user_code_selector: u16,
+        user_data_selector: u16,
+    );
     fn phoenix_syscall_kernel_test_invoke(
         request: *const SyscallRequest,
         result: *mut SyscallReturn,
@@ -296,6 +360,16 @@ pub fn entry_stack_self_test() -> bool {
     observed_rsp >= stack_start && observed_rsp <= stack_end && observed_rsp & 0xf == 0
 }
 
+pub unsafe fn enter_user_test(context: UserReturnContext) {
+    unsafe {
+        phoenix_enter_user_test(
+            &context,
+            super::gdt::user_code_selector_raw(),
+            super::gdt::user_data_selector_raw(),
+        );
+    }
+}
+
 pub fn return_context_self_test() -> bool {
     let flags = RFLAGS_RESERVED_ONE | RFLAGS_INTERRUPT;
     let Ok(context) = UserReturnContext::new(0x4000_0000, 0x4000_2000, flags) else {
@@ -340,6 +414,13 @@ extern "C" fn phoenix_syscall_dispatch(request: *const SyscallRequest, result: *
 }
 
 fn dispatch(request: SyscallRequest) -> SyscallReturn {
+    if request.number == USER_TEST_EXIT_NUMBER {
+        unsafe {
+            core::ptr::write_volatile(core::ptr::addr_of_mut!(phoenix_user_test_exit), 1);
+        }
+        return SyscallReturn::success(0);
+    }
+
     if request.number != SELF_TEST_NUMBER {
         return syscall_failure(STATUS_UNKNOWN_CALL);
     }

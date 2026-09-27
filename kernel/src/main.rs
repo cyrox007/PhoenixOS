@@ -1422,14 +1422,10 @@ fn user_mode_syscall_self_test(
     let stack_pointer = USER_MODE_TEST_STACK_ADDRESS + phoenix_process::PAGE_SIZE - 16;
 
     let passed = x86_64::instructions::interrupts::without_interrupts(|| {
-        let context_guard =
-            unsafe {
-                arch::x86_64::syscall::install_current_process_context(
-                    &mut space,
-                    &mut capabilities,
-                )
-            }
-            .expect("контекст пользовательского системного вызова уже установлен");
+        let context_guard = unsafe {
+            arch::x86_64::syscall::install_current_process_context(&mut space, &mut capabilities)
+        }
+        .expect("контекст пользовательского системного вызова уже установлен");
         let guard = unsafe { space.activate() };
         let result = arch::x86_64::syscall::run_user_mode_self_test(
             USER_MODE_TEST_CODE_ADDRESS,

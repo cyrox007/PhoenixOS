@@ -1,13 +1,13 @@
 use core::arch::{global_asm, x86_64::__cpuid};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+use phoenix_capability::{CapabilityError, CapabilityHandle, ObjectKind, Rights};
+use phoenix_ipc::EndpointId;
+use phoenix_process::ProcessCapabilitySet;
 use phoenix_syscall_abi::{
     IpcReceiveArguments, IpcSendArguments, NO_TRANSFERRED_CAPABILITY, PackedCapabilityHandle,
     SYSCALL_IPC_RECEIVE, SYSCALL_IPC_SEND, SyscallRequest, SyscallReturn, SyscallStatus,
 };
-use phoenix_capability::{CapabilityError, CapabilityHandle, ObjectKind, Rights};
-use phoenix_ipc::EndpointId;
-use phoenix_process::ProcessCapabilitySet;
 
 use crate::ipc_user_memory::{self, IpcUserMemoryError};
 use crate::process_space::{PROCESS_REGION_CAPACITY, ProcessAddressSpace};
@@ -157,9 +157,8 @@ pub fn resolve_current_endpoint(
         return Err(EndpointCapabilityError::ContextNotInstalled);
     }
 
-    let capabilities = unsafe {
-        &*(capabilities as *const ProcessCapabilitySet<PROCESS_CAPABILITY_CAPACITY>)
-    };
+    let capabilities =
+        unsafe { &*(capabilities as *const ProcessCapabilitySet<PROCESS_CAPABILITY_CAPACITY>) };
     let capability = capabilities
         .require(
             CapabilityHandle {

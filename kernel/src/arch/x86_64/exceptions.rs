@@ -15,6 +15,29 @@ struct TimerInterruptStackFrame {
     general_registers: apic::TimerGeneralRegisters,
 }
 
+#[repr(C)]
+struct PreparedKernelTimerFrame {
+    general_registers: apic::TimerGeneralRegisters,
+    instruction_pointer: u64,
+    code_segment: u64,
+    cpu_flags: u64,
+}
+
+impl PreparedKernelTimerFrame {
+    fn new(instruction_pointer: u64) -> Self {
+        Self {
+            general_registers: apic::TimerGeneralRegisters::EMPTY,
+            instruction_pointer,
+            code_segment: u64::from(gdt::kernel_code_selector_raw()),
+            cpu_flags: (1 << 1) | (1 << 9),
+        }
+    }
+
+    fn stack_frame_address(&self) -> u64 {
+        self as *const Self as u64
+    }
+}
+
 impl TimerInterruptStackFrame {
     fn hardware_frame_address(&self) -> u64 {
         self as *const Self as u64 + size_of::<Self>() as u64
@@ -107,6 +130,28 @@ pub fn init() {
 
 pub fn smoke_test_breakpoint() {
     interrupts::int3();
+}
+
+pub fn prepared_kernel_timer_frame_self_test() -> bool {
+    const TEST_INSTRUCTION_POINTER: u64 = 0xffff_8000_1234_5678;
+
+    let frame = PreparedKernelTimerFrame::new(TEST_INSTRUCTION_POINTER);
+    let base = frame.stack_frame_address();
+    let registers = &frame.general_registers as *const apic::TimerGeneralRegisters as u64;
+    let instruction_pointer = &frame.instruction_pointer as *const u64 as u64;
+    let code_segment = &frame.code_segment as *const u64 as u64;
+    let cpu_flags = &frame.cpu_flags as *const u64 as u64;
+
+    size_of::<PreparedKernelTimerFrame>()
+        == size_of::<apic::TimerGeneralRegisters>() + 3 * size_of::<u64>()
+        && registers == base
+        && instruction_pointer == base + size_of::<apic::TimerGeneralRegisters>() as u64
+        && code_segment == instruction_pointer + size_of::<u64>() as u64
+        && cpu_flags == code_segment + size_of::<u64>() as u64
+        && frame.instruction_pointer == TEST_INSTRUCTION_POINTER
+        && frame.code_segment & 0b11 == 0
+        && frame.cpu_flags & (1 << 1) != 0
+        && frame.cpu_flags & (1 << 9) != 0
 }
 
 fn build_idt() -> InterruptDescriptorTable {

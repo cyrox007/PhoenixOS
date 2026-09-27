@@ -53,6 +53,15 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     arch::x86_64::init();
     serial::line(&mut out, "INFO", format_args!("interrupt tables: OK"));
 
+    if !arch::x86_64::exceptions::prepared_kernel_timer_frame_self_test() {
+        panic!("заранее подготовленный кадр таймера не совпадает с ассемблерным входом");
+    }
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("thread prepared interrupt frame self-test: OK"),
+    );
+
     if !arch::x86_64::user_privilege_stack_ready() {
         panic!("TSS не содержит корректный стек смены привилегий");
     }

@@ -1358,8 +1358,11 @@ fn user_mode_syscall_self_test(
             .expect("не удалось подготовить IPC send-буфер системного вызова");
     }
 
-    let receive_words = [0x0123_4567_89ab_cdef_u64, 0xfedc_ba98_7654_3210_u64];
     let endpoint_id = phoenix_ipc::EndpointId(0x5359_5343_414c_4c49);
+    let mut endpoint_registry = arch::x86_64::syscall::KernelEndpointRegistry::new();
+    endpoint_registry
+        .insert(phoenix_ipc::Endpoint::new(endpoint_id))
+        .expect("не удалось зарегистрировать endpoint системного вызова");
     let mut capabilities = ProcessCapabilitySet::<
         { arch::x86_64::syscall::PROCESS_CAPABILITY_CAPACITY },
     >::new(ProcessId(44));
@@ -1387,10 +1390,14 @@ fn user_mode_syscall_self_test(
     );
 
     let context_guard = unsafe {
-        arch::x86_64::syscall::install_current_process_context(&mut space, &mut capabilities)
+        arch::x86_64::syscall::install_current_process_context(
+            &mut space,
+            &mut capabilities,
+            &mut endpoint_registry,
+        )
     }
     .expect("контекст текущего процесса уже установлен");
-    let context_ok = arch::x86_64::syscall::ipc_user_memory_context_self_test(
+    let context_ok = arch::x86_64::syscall::ipc_endpoint_operations_self_test(
         phoenix_syscall_abi::IpcSendArguments {
             endpoint: packed_endpoint,
             words_address: ipc_words_address,
@@ -1415,11 +1422,10 @@ fn user_mode_syscall_self_test(
         phoenix_syscall_abi::IpcReceiveArguments {
             endpoint: packed_endpoint,
             words_address: ipc_words_address,
-            word_capacity: receive_words.len() as u64,
+            word_capacity: send_words.len() as u64,
             metadata_address: USER_MODE_TEST_STACK_ADDRESS + 0x100,
             flags: 0,
         },
-        &receive_words,
         endpoint_id,
     );
     drop(context_guard);
@@ -1432,8 +1438,23 @@ fn user_mode_syscall_self_test(
         u64::from_le_bytes(copied_back[..8].try_into().unwrap()),
         u64::from_le_bytes(copied_back[8..].try_into().unwrap()),
     ];
-    if !context_ok || copied_receive_words != receive_words {
-        panic!("IPC-память не связана с контекстом текущего системного вызова");
+    let mut copied_metadata = [0_u8; 24];
+    space
+        .read_user_bytes(
+            VirtAddr::new(USER_MODE_TEST_STACK_ADDRESS + 0x100),
+            &mut copied_metadata,
+        )
+        .expect("не удалось прочитать IPC-метаданные из пользовательской памяти");
+    let metadata_sender = u64::from_le_bytes(copied_metadata[..8].try_into().unwrap());
+    let metadata_word_count = u64::from_le_bytes(copied_metadata[8..16].try_into().unwrap());
+    let metadata_capability = u64::from_le_bytes(copied_metadata[16..].try_into().unwrap());
+    if !context_ok
+        || copied_receive_words != send_words
+        || metadata_sender != capabilities.owner().0
+        || metadata_word_count != send_words.len() as u64
+        || metadata_capability != phoenix_syscall_abi::NO_TRANSFERRED_CAPABILITY
+    {
+        panic!("IPC syscall не сохранил payload или метаданные сообщения");
     }
     serial::emergency(format_args!(
         "[INFO] ipc syscall memory context self-test: OK\n"
@@ -1441,12 +1462,19 @@ fn user_mode_syscall_self_test(
     serial::emergency(format_args!(
         "[INFO] ipc capability endpoint self-test: OK\n"
     ));
+    serial::emergency(format_args!(
+        "[INFO] ipc endpoint syscall operations self-test: OK\n"
+    ));
 
     let stack_pointer = USER_MODE_TEST_STACK_ADDRESS + phoenix_process::PAGE_SIZE - 16;
 
     let passed = x86_64::instructions::interrupts::without_interrupts(|| {
         let context_guard = unsafe {
-            arch::x86_64::syscall::install_current_process_context(&mut space, &mut capabilities)
+            arch::x86_64::syscall::install_current_process_context(
+                &mut space,
+                &mut capabilities,
+                &mut endpoint_registry,
+            )
         }
         .expect("контекст пользовательского системного вызова уже установлен");
         let guard = unsafe { space.activate() };

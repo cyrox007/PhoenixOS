@@ -1,4 +1,4 @@
-use phoenix_syscall_abi::{IpcReceiveArguments, IpcSendArguments};
+use phoenix_syscall_abi::{IpcReceiveArguments, IpcReceiveMetadata, IpcSendArguments};
 use phoenix_vm::{UserBuffer, UserBufferError};
 use x86_64::VirtAddr;
 
@@ -102,6 +102,42 @@ pub fn copy_receive_words<const CAPACITY: usize>(
 
     for (index, word) in words.iter().enumerate() {
         let address = word_address(buffer.start(), index)?;
+        space.write_user_bytes(VirtAddr::new(address), &word.to_le_bytes())?;
+    }
+
+    Ok(())
+}
+
+pub fn copy_receive_message<const CAPACITY: usize>(
+    space: &mut ProcessAddressSpace<CAPACITY>,
+    arguments: IpcReceiveArguments,
+    words: &[u64],
+    metadata: IpcReceiveMetadata,
+) -> Result<(), IpcUserMemoryError> {
+    if words.len() > IPC_INLINE_WORD_CAPACITY {
+        return Err(IpcUserMemoryError::TooManyWords);
+    }
+    if words.len() as u64 > arguments.word_capacity {
+        return Err(IpcUserMemoryError::ReceiveCapacityTooSmall);
+    }
+
+    let word_buffer = UserBuffer::for_array(
+        arguments.words_address,
+        arguments.word_capacity,
+        WORD_SIZE,
+        WORD_SIZE,
+    )?;
+    let metadata_buffer =
+        UserBuffer::for_array(arguments.metadata_address, 3, WORD_SIZE, WORD_SIZE)?;
+    preflight_words(space, word_buffer.start(), words.len())?;
+    preflight_words(space, metadata_buffer.start(), 3)?;
+
+    for (index, word) in words.iter().enumerate() {
+        let address = word_address(word_buffer.start(), index)?;
+        space.write_user_bytes(VirtAddr::new(address), &word.to_le_bytes())?;
+    }
+    for (index, word) in metadata.words().iter().enumerate() {
+        let address = word_address(metadata_buffer.start(), index)?;
         space.write_user_bytes(VirtAddr::new(address), &word.to_le_bytes())?;
     }
 

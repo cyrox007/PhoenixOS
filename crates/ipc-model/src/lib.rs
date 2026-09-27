@@ -147,6 +147,14 @@ impl<const CAPACITY: usize> Endpoint<CAPACITY> {
         Ok(message)
     }
 
+    pub fn peek(&self) -> Result<Message, IpcError> {
+        if self.is_empty() {
+            return Err(IpcError::QueueEmpty);
+        }
+
+        self.queue[self.head].ok_or(IpcError::QueueEmpty)
+    }
+
     fn push(&mut self, message: Message) {
         self.queue[self.tail] = Some(message);
         self.tail = (self.tail + 1) % CAPACITY;
@@ -269,9 +277,13 @@ mod tests {
         endpoint.send(first).unwrap();
         endpoint.send(second).unwrap();
 
+        assert_eq!(endpoint.peek().unwrap(), first);
+        assert_eq!(endpoint.peek().unwrap(), first);
+        assert_eq!(endpoint.len(), 2);
         assert_eq!(endpoint.receive().unwrap(), first);
         assert_eq!(endpoint.receive().unwrap(), second);
         assert_eq!(endpoint.receive(), Err(IpcError::QueueEmpty));
+        assert_eq!(endpoint.peek(), Err(IpcError::QueueEmpty));
     }
 
     #[test]

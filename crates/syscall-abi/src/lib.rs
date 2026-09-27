@@ -79,6 +79,39 @@ impl IpcReceiveArguments {
     }
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IpcReceiveMetadata {
+    pub sender_process_id: u64,
+    pub word_count: u64,
+    pub transferred_capability: u64,
+}
+
+impl IpcReceiveMetadata {
+    pub const fn new(
+        sender_process_id: u64,
+        word_count: u64,
+        transferred_capability: Option<PackedCapabilityHandle>,
+    ) -> Self {
+        Self {
+            sender_process_id,
+            word_count,
+            transferred_capability: match transferred_capability {
+                Some(handle) => handle.raw(),
+                None => NO_TRANSFERRED_CAPABILITY,
+            },
+        }
+    }
+
+    pub const fn words(self) -> [u64; 3] {
+        [
+            self.sender_process_id,
+            self.word_count,
+            self.transferred_capability,
+        ]
+    }
+}
+
 /// x86-64 register contract for entering a PhoenixOS system call.
 ///
 /// Hardware mapping:
@@ -236,6 +269,25 @@ mod tests {
         assert_eq!(
             request.arguments,
             [0x0000_0004_0000_0009, 0x5000, 6, 0x6000, 1, 0]
+        );
+    }
+
+    #[test]
+    fn ipc_receive_metadata_has_stable_c_layout_words() {
+        let metadata = IpcReceiveMetadata::new(
+            0x1122_3344_5566_7788,
+            2,
+            Some(PackedCapabilityHandle::new(3, 7)),
+        );
+
+        assert_eq!(core::mem::size_of::<IpcReceiveMetadata>(), 24);
+        assert_eq!(
+            metadata.words(),
+            [0x1122_3344_5566_7788, 2, 0x0000_0007_0000_0003]
+        );
+        assert_eq!(
+            IpcReceiveMetadata::new(1, 0, None).transferred_capability,
+            NO_TRANSFERRED_CAPABILITY
         );
     }
 

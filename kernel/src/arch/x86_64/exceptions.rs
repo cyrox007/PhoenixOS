@@ -132,10 +132,7 @@ pub fn smoke_test_breakpoint() {
     interrupts::int3();
 }
 
-pub fn prepare_kernel_timer_frame(
-    stack: &mut [u8],
-    instruction_pointer: u64,
-) -> Option<u64> {
+pub fn prepare_kernel_timer_frame(stack: &mut [u8], instruction_pointer: u64) -> Option<u64> {
     let frame_size = size_of::<PreparedKernelTimerFrame>();
     let base = stack.as_mut_ptr() as usize;
     let end = base.checked_add(stack.len())?;

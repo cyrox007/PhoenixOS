@@ -412,11 +412,9 @@ pub fn user_mode_test_image() -> &'static [u8] {
 }
 
 pub fn run_user_mode_self_test(instruction_pointer: u64, stack_pointer: u64) -> bool {
-    let Ok(context) = UserReturnContext::new(
-        instruction_pointer,
-        stack_pointer,
-        RFLAGS_RESERVED_ONE,
-    ) else {
+    let Ok(context) =
+        UserReturnContext::new(instruction_pointer, stack_pointer, RFLAGS_RESERVED_ONE)
+    else {
         return false;
     };
 

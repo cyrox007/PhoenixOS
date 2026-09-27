@@ -1,0 +1,9 @@
+[package]
+name = "phoenix-ipc"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[dependencies]
+phoenix-capability = { path = "../capability-model" }
+phoenix-process = { path = "../process-model" }

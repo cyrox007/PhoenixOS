@@ -92,7 +92,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     heap_self_test();
     serial::line(&mut out, "INFO", format_args!("kernel heap self-test: OK"));
 
-    init_apic_timer(&mut out);
+    init_apic_timer(&mut out, &mut page_table, &mut frames);
 
     render_boot_banner(boot_info, &mut out);
 
@@ -120,13 +120,21 @@ fn log_memory_summary(out: &mut serial::Com1, memory: MemorySummary) {
     );
 }
 
-fn init_apic_timer(out: &mut serial::Com1) {
-    let result = arch::x86_64::apic::init_periodic_timer();
-    if let Err(error) = result {
-        panic!("не удалось инициализировать локальный APIC: {error:?}");
-    }
+fn init_apic_timer(
+    out: &mut serial::Com1,
+    page_table: &mut ActivePageTable,
+    frames: &mut SystemFrameAllocator<SYSTEM_MEMORY_RANGE_CAPACITY>,
+) {
+    let mode = match arch::x86_64::apic::init_periodic_timer(page_table, frames) {
+        Ok(mode) => mode,
+        Err(error) => panic!("не удалось инициализировать локальный APIC: {error:?}"),
+    };
 
-    serial::line(out, "INFO", format_args!("local APIC: x2APIC enabled"));
+    serial::line(
+        out,
+        "INFO",
+        format_args!("local APIC: mode={}", mode.name()),
+    );
 
     arch::x86_64::apic::wait_for_ticks(APIC_TIMER_TEST_TICKS);
 

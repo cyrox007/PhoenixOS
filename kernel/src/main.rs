@@ -1412,14 +1412,21 @@ fn user_mode_syscall_self_test(
 ) {
     use phoenix_capability::{Capability, ObjectId, ObjectKind, Rights};
     use phoenix_process::{
-        AddressSpaceId, MemoryPermissions, ProcessCapabilitySet, ProcessId, RegionKind,
-        VirtualRegion,
+        MemoryPermissions, ProcessCapabilitySet, ProcessId, ProcessState, ProcessTable,
+        RegionKind, VirtualRegion,
     };
 
     let free_before = frames.free_frames();
+    let mut process_table = ProcessTable::<1>::new();
+    let process = process_table
+        .create()
+        .expect("не удалось создать запись пользовательского процесса");
+    process_table
+        .transition(process.id, ProcessState::Runnable)
+        .expect("не удалось сделать пользовательский процесс готовым");
     let mut space = unsafe {
         process_space::ProcessAddressSpace::<{ process_space::PROCESS_REGION_CAPACITY }>::new(
-            AddressSpaceId(44),
+            process.address_space,
             physical_memory_offset,
             frames,
         )
@@ -1477,7 +1484,7 @@ fn user_mode_syscall_self_test(
         .expect("не удалось зарегистрировать endpoint системного вызова");
     let mut capabilities = ProcessCapabilitySet::<
         { arch::x86_64::syscall::PROCESS_CAPABILITY_CAPACITY },
-    >::new(ProcessId(44));
+    >::new(process.id);
     let mut receiver_capabilities = ProcessCapabilitySet::<
         { arch::x86_64::syscall::PROCESS_CAPABILITY_CAPACITY },
     >::new(ProcessId(45));
@@ -1653,7 +1660,7 @@ fn user_mode_syscall_self_test(
 
     let stack_pointer = USER_MODE_TEST_STACK_ADDRESS + phoenix_process::PAGE_SIZE - 16;
 
-    let passed = x86_64::instructions::interrupts::without_interrupts(|| {
+    let exit_status = x86_64::instructions::interrupts::without_interrupts(|| {
         let context_guard = unsafe {
             arch::x86_64::syscall::install_current_process_context(
                 &mut space,
@@ -1664,7 +1671,7 @@ fn user_mode_syscall_self_test(
         }
         .expect("контекст пользовательского системного вызова уже установлен");
         let guard = unsafe { space.activate() };
-        let result = arch::x86_64::syscall::run_user_mode_self_test(
+        let result = arch::x86_64::syscall::run_user_process(
             USER_MODE_TEST_CODE_ADDRESS,
             stack_pointer,
         );
@@ -1673,8 +1680,20 @@ fn user_mode_syscall_self_test(
         result
     });
 
-    if !passed {
+    let Ok(exit_status) = exit_status else {
         panic!("пользовательский цикл CPL3/SYSCALL/SYSRET завершился ошибкой");
+    };
+    if exit_status != arch::x86_64::syscall::USER_SELF_TEST_SUCCESS {
+        panic!("пользовательский процесс вернул неожиданный статус");
+    }
+    process_table
+        .exit(process.id, exit_status)
+        .expect("не удалось завершить запись пользовательского процесса");
+    let exited = process_table
+        .record(process.id)
+        .expect("завершённый пользовательский процесс исчез из таблицы");
+    if exited.state != ProcessState::Exited || exited.exit_status != Some(exit_status) {
+        panic!("таблица процессов не сохранила статус завершения");
     }
 
     space

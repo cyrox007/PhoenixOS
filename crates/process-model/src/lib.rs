@@ -280,6 +280,7 @@ pub struct ProcessRecord {
     pub id: ProcessId,
     pub address_space: AddressSpaceId,
     pub state: ProcessState,
+    pub exit_status: Option<u64>,
 }
 
 pub struct ProcessTable<const CAPACITY: usize> {
@@ -329,6 +330,7 @@ impl<const CAPACITY: usize> ProcessTable<CAPACITY> {
             id: process_id,
             address_space: address_space_id,
             state: ProcessState::Created,
+            exit_status: None,
         };
 
         self.entries[index] = Some(record);
@@ -345,6 +347,10 @@ impl<const CAPACITY: usize> ProcessTable<CAPACITY> {
         })
     }
 
+    pub fn record(&self, id: ProcessId) -> Option<ProcessRecord> {
+        self.find(id).and_then(|index| self.entries[index])
+    }
+
     pub fn transition(&mut self, id: ProcessId, target: ProcessState) -> Result<(), ProcessError> {
         let index = self.find(id).ok_or(ProcessError::ProcessNotFound)?;
         let current = self.entries[index].ok_or(ProcessError::ProcessNotFound)?;
@@ -358,6 +364,26 @@ impl<const CAPACITY: usize> ProcessTable<CAPACITY> {
 
         self.entries[index] = Some(ProcessRecord {
             state: target,
+            ..current
+        });
+
+        Ok(())
+    }
+
+    pub fn exit(&mut self, id: ProcessId, status: u64) -> Result<(), ProcessError> {
+        let index = self.find(id).ok_or(ProcessError::ProcessNotFound)?;
+        let current = self.entries[index].ok_or(ProcessError::ProcessNotFound)?;
+
+        if !matches!(current.state, ProcessState::Runnable | ProcessState::Blocked) {
+            return Err(ProcessError::InvalidTransition {
+                from: current.state,
+                to: ProcessState::Exited,
+            });
+        }
+
+        self.entries[index] = Some(ProcessRecord {
+            state: ProcessState::Exited,
+            exit_status: Some(status),
             ..current
         });
 
@@ -400,8 +426,6 @@ fn valid_transition(from: ProcessState, to: ProcessState) -> bool {
         (ProcessState::Created, ProcessState::Runnable)
             | (ProcessState::Runnable, ProcessState::Blocked)
             | (ProcessState::Blocked, ProcessState::Runnable)
-            | (ProcessState::Runnable, ProcessState::Exited)
-            | (ProcessState::Blocked, ProcessState::Exited)
     )
 }
 
@@ -497,10 +521,12 @@ mod tests {
         table
             .transition(process.id, ProcessState::Runnable)
             .unwrap();
-        table.transition(process.id, ProcessState::Exited).unwrap();
+        table.exit(process.id, u64::MAX).unwrap();
 
         assert_eq!(table.state(process.id), Some(ProcessState::Exited));
-        assert_eq!(table.remove_exited(process.id).unwrap().id, process.id);
+        let exited = table.remove_exited(process.id).unwrap();
+        assert_eq!(exited.id, process.id);
+        assert_eq!(exited.exit_status, Some(u64::MAX));
         assert!(table.is_empty());
     }
 
@@ -514,6 +540,13 @@ mod tests {
             Err(ProcessError::InvalidTransition {
                 from: ProcessState::Created,
                 to: ProcessState::Blocked,
+            })
+        );
+        assert_eq!(
+            table.exit(process.id, 1),
+            Err(ProcessError::InvalidTransition {
+                from: ProcessState::Created,
+                to: ProcessState::Exited,
             })
         );
     }

@@ -452,6 +452,12 @@ fn init_apic_timer(
         "INFO",
         format_args!("thread stack interrupt frame self-test: OK"),
     );
+
+    serial::line(
+        out,
+        "INFO",
+        format_args!("thread resumable interrupt frame self-test: OK"),
+    );
 }
 
 fn inactive_page_table_self_test(

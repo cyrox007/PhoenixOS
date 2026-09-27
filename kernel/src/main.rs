@@ -88,6 +88,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         "INFO",
         format_args!("process page table root self-test: OK"),
     );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("process user mapping self-test: OK"),
+    );
 
     let heap_stats =
         heap::init(&mut page_table, &mut frames).expect("не удалось инициализировать кучу ядра");

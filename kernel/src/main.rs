@@ -409,6 +409,12 @@ fn init_apic_timer(
         panic!("снимок регистров таймера имеет неожиданный размер");
     }
 
+    if observed_context.stack_frame_address == 0
+        || observed_context.stack_frame_address >= observed_context.stack_pointer
+    {
+        panic!("таймерный IRQ не передал стековый кадр прерывания");
+    }
+
     serial::line(
         out,
         "INFO",
@@ -439,6 +445,12 @@ fn init_apic_timer(
         out,
         "INFO",
         format_args!("thread general register frame self-test: OK"),
+    );
+
+    serial::line(
+        out,
+        "INFO",
+        format_args!("thread stack interrupt frame self-test: OK"),
     );
 }
 

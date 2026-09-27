@@ -321,7 +321,8 @@ impl InactivePageTable {
         }
 
         let start_raw = start.as_u64();
-        let length = u64::try_from(bytes.len()).map_err(|_| InactivePageTableError::NotUserAddress)?;
+        let length =
+            u64::try_from(bytes.len()).map_err(|_| InactivePageTableError::NotUserAddress)?;
         let end = start_raw
             .checked_add(length)
             .ok_or(InactivePageTableError::NotUserAddress)?;
@@ -342,8 +343,7 @@ impl InactivePageTable {
                 .map_err(|_| InactivePageTableError::NotUserAddress)?;
             let remaining = bytes.len() - copied;
             let chunk = core::cmp::min(page_remaining, remaining);
-            let target =
-                (self.physical_memory_offset + physical.as_u64()).as_mut_ptr::<u8>();
+            let target = (self.physical_memory_offset + physical.as_u64()).as_mut_ptr::<u8>();
 
             unsafe {
                 core::ptr::copy_nonoverlapping(bytes[copied..].as_ptr(), target, chunk);

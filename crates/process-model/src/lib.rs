@@ -430,7 +430,9 @@ mod tests {
             .transition(process.id, ProcessState::Runnable)
             .unwrap();
         table.transition(process.id, ProcessState::Blocked).unwrap();
-        table.transition(process.id, ProcessState::Runnable).unwrap();
+        table
+            .transition(process.id, ProcessState::Runnable)
+            .unwrap();
         table.transition(process.id, ProcessState::Exited).unwrap();
 
         assert_eq!(table.state(process.id), Some(ProcessState::Exited));

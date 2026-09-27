@@ -44,6 +44,7 @@ jobs:
           cargo test -p phoenix-process
           cargo test -p phoenix-syscall-abi
           cargo test -p phoenix-capability
+          cargo test -p phoenix-ipc
 
       - name: Собрать UEFI-образ
         run: |

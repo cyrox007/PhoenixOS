@@ -11,6 +11,7 @@ use x86_64::{PhysAddr, VirtAddr};
 
 pub const TIMER_VECTOR: u8 = 0xe0;
 pub const SPURIOUS_VECTOR: u8 = 0xff;
+pub const TIMER_REGISTER_CAPTURE_MARKER: u64 = 0x5449_4d52;
 
 const IA32_APIC_BASE: u32 = 0x1b;
 const IA32_X2APIC_EOI: u32 = 0x80b;
@@ -42,11 +43,53 @@ static APIC_MODE: AtomicU8 = AtomicU8::new(MODE_UNINITIALIZED);
 static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
 static TIMER_HOOK: AtomicUsize = AtomicUsize::new(0);
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimerGeneralRegisters {
+    pub rax: u64,
+    pub rbx: u64,
+    pub rcx: u64,
+    pub rdx: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub rbp: u64,
+    pub r8: u64,
+    pub r9: u64,
+    pub r10: u64,
+    pub r11: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+}
+
+impl TimerGeneralRegisters {
+    pub const EMPTY: Self = Self {
+        rax: 0,
+        rbx: 0,
+        rcx: 0,
+        rdx: 0,
+        rsi: 0,
+        rdi: 0,
+        rbp: 0,
+        r8: 0,
+        r9: 0,
+        r10: 0,
+        r11: 0,
+        r12: 0,
+        r13: 0,
+        r14: 0,
+        r15: 0,
+    };
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimerInterruptContext {
     pub instruction_pointer: u64,
     pub stack_pointer: u64,
     pub cpu_flags: u64,
+    pub general_registers: TimerGeneralRegisters,
+    pub register_capture_marker: u64,
 }
 
 pub type TimerHook = fn(u64, TimerInterruptContext);

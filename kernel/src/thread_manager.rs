@@ -52,7 +52,8 @@ pub fn timer_tick_hook(
     if target != 0 {
         match PREEMPTION_TEST_PHASE.load(Ordering::Acquire) {
             0 => {
-                PREEMPTION_TEST_ORIGINAL_FRAME.store(context.stack_frame_address, Ordering::Release);
+                PREEMPTION_TEST_ORIGINAL_FRAME
+                    .store(context.stack_frame_address, Ordering::Release);
                 PREEMPTION_TEST_PHASE.store(1, Ordering::Release);
                 return Some(target);
             }

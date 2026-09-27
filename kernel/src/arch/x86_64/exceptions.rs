@@ -2,7 +2,7 @@ use lazy_static::lazy_static;
 use x86_64::instructions::interrupts;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
-use super::gdt;
+use super::{apic, gdt};
 use crate::qemu::{self, ExitCode};
 use crate::serial;
 
@@ -26,6 +26,8 @@ fn build_idt() -> InterruptDescriptorTable {
     idt.page_fault.set_handler_fn(page_fault_handler);
     idt.general_protection_fault
         .set_handler_fn(general_protection_fault_handler);
+    idt[usize::from(apic::TIMER_VECTOR)].set_handler_fn(apic_timer_handler);
+    idt[usize::from(apic::SPURIOUS_VECTOR)].set_handler_fn(apic_spurious_handler);
 
     unsafe {
         idt.double_fault
@@ -69,6 +71,12 @@ extern "x86-interrupt" fn double_fault_handler(
 ) -> ! {
     fatal_exception("double fault", &stack_frame, Some(error_code));
 }
+
+extern "x86-interrupt" fn apic_timer_handler(_stack_frame: InterruptStackFrame) {
+    apic::handle_timer_interrupt();
+}
+
+extern "x86-interrupt" fn apic_spurious_handler(_stack_frame: InterruptStackFrame) {}
 
 fn fatal_exception(name: &str, stack_frame: &InterruptStackFrame, error_code: Option<u64>) -> ! {
     match error_code {

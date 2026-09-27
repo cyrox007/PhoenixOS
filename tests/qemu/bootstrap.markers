@@ -39,3 +39,4 @@ process capability self-test: OK
 ipc endpoint self-test: OK
 ipc syscall dispatch self-test: OK
 ipc syscall memory context self-test: OK
+ipc capability endpoint self-test: OK

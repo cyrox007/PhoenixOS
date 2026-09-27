@@ -1276,7 +1276,11 @@ fn user_mode_syscall_self_test(
     physical_memory_offset: VirtAddr,
     frames: &mut SystemFrameAllocator<SYSTEM_MEMORY_RANGE_CAPACITY>,
 ) {
-    use phoenix_process::{AddressSpaceId, MemoryPermissions, RegionKind, VirtualRegion};
+    use phoenix_capability::{Capability, ObjectId, ObjectKind, Rights};
+    use phoenix_process::{
+        AddressSpaceId, MemoryPermissions, ProcessCapabilitySet, ProcessId, RegionKind,
+        VirtualRegion,
+    };
 
     let free_before = frames.free_frames();
     let mut space = unsafe {
@@ -1332,32 +1336,68 @@ fn user_mode_syscall_self_test(
     }
 
     let receive_words = [0x0123_4567_89ab_cdef_u64, 0xfedc_ba98_7654_3210_u64];
-    let context_guard =
-        unsafe { arch::x86_64::syscall::install_current_process_context(&mut space) }
-            .expect("контекст текущего процесса уже установлен");
+    let endpoint_id = phoenix_ipc::EndpointId(0x5359_5343_414c_4c49);
+    let mut capabilities = ProcessCapabilitySet::<
+        { arch::x86_64::syscall::PROCESS_CAPABILITY_CAPACITY },
+    >::new(ProcessId(44));
+    let endpoint_handle = capabilities
+        .insert(Capability {
+            object: ObjectId(endpoint_id.0),
+            kind: ObjectKind::Endpoint,
+            rights: Rights::READ.union(Rights::WRITE),
+        })
+        .expect("не удалось выдать endpoint-возможность пользовательскому процессу");
+    let read_only_handle = capabilities
+        .insert(Capability {
+            object: ObjectId(endpoint_id.0),
+            kind: ObjectKind::Endpoint,
+            rights: Rights::READ,
+        })
+        .expect("не удалось выдать read-only endpoint-возможность");
+    let packed_endpoint = phoenix_syscall_abi::PackedCapabilityHandle::new(
+        endpoint_handle.slot,
+        endpoint_handle.generation,
+    );
+    let packed_read_only = phoenix_syscall_abi::PackedCapabilityHandle::new(
+        read_only_handle.slot,
+        read_only_handle.generation,
+    );
+
+    let context_guard = unsafe {
+        arch::x86_64::syscall::install_current_process_context(&mut space, &mut capabilities)
+    }
+    .expect("контекст текущего процесса уже установлен");
     let context_ok = arch::x86_64::syscall::ipc_user_memory_context_self_test(
         phoenix_syscall_abi::IpcSendArguments {
-            endpoint: phoenix_syscall_abi::PackedCapabilityHandle::new(1, 1),
+            endpoint: packed_endpoint,
             words_address: ipc_words_address,
             word_count: send_words.len() as u64,
             transferred_capability: None,
             flags: 0,
         },
         phoenix_syscall_abi::IpcSendArguments {
-            endpoint: phoenix_syscall_abi::PackedCapabilityHandle::new(1, 1),
+            endpoint: packed_endpoint,
             words_address: USER_MODE_TEST_STACK_ADDRESS + phoenix_process::PAGE_SIZE,
             word_count: 1,
             transferred_capability: None,
             flags: 0,
         },
+        phoenix_syscall_abi::IpcSendArguments {
+            endpoint: packed_read_only,
+            words_address: ipc_words_address,
+            word_count: send_words.len() as u64,
+            transferred_capability: None,
+            flags: 0,
+        },
         phoenix_syscall_abi::IpcReceiveArguments {
-            endpoint: phoenix_syscall_abi::PackedCapabilityHandle::new(1, 1),
+            endpoint: packed_endpoint,
             words_address: ipc_words_address,
             word_capacity: receive_words.len() as u64,
             metadata_address: USER_MODE_TEST_STACK_ADDRESS + 0x100,
             flags: 0,
         },
         &receive_words,
+        endpoint_id,
     );
     drop(context_guard);
 
@@ -1375,13 +1415,21 @@ fn user_mode_syscall_self_test(
     serial::emergency(format_args!(
         "[INFO] ipc syscall memory context self-test: OK\n"
     ));
+    serial::emergency(format_args!(
+        "[INFO] ipc capability endpoint self-test: OK\n"
+    ));
 
     let stack_pointer = USER_MODE_TEST_STACK_ADDRESS + phoenix_process::PAGE_SIZE - 16;
 
     let passed = x86_64::instructions::interrupts::without_interrupts(|| {
         let context_guard =
-            unsafe { arch::x86_64::syscall::install_current_process_context(&mut space) }
-                .expect("контекст пользовательского системного вызова уже установлен");
+            unsafe {
+                arch::x86_64::syscall::install_current_process_context(
+                    &mut space,
+                    &mut capabilities,
+                )
+            }
+            .expect("контекст пользовательского системного вызова уже установлен");
         let guard = unsafe { space.activate() };
         let result = arch::x86_64::syscall::run_user_mode_self_test(
             USER_MODE_TEST_CODE_ADDRESS,

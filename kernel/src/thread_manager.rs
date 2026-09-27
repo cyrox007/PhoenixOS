@@ -149,6 +149,7 @@ pub enum ThreadManagerError {
     Scheduler(SchedulerError),
     Thread(ThreadError),
     MissingThread,
+    MissingInterruptFrame,
     InvalidState,
     IdExhausted,
 }
@@ -193,6 +194,50 @@ impl<const CAPACITY: usize> ThreadManager<CAPACITY> {
     pub fn state(&self, id: ThreadId) -> Option<ThreadState> {
         self.find_thread(id)
             .map(|index| self.threads[index].thread.state())
+    }
+
+    pub fn interrupt_frame(&self, id: ThreadId) -> Option<u64> {
+        let index = self.find_thread(id)?;
+        self.threads[index].thread.interrupt_frame()
+    }
+
+    pub fn save_interrupt_frame(
+        &mut self,
+        id: ThreadId,
+        frame: u64,
+    ) -> Result<(), ThreadManagerError> {
+        let index = self
+            .find_thread(id)
+            .ok_or(ThreadManagerError::MissingThread)?;
+        self.threads[index]
+            .thread
+            .save_interrupt_frame(frame)
+            .map_err(ThreadManagerError::Thread)
+    }
+
+    pub fn schedule_interrupt_frame(
+        &mut self,
+        current_frame: u64,
+    ) -> Result<Option<u64>, ThreadManagerError> {
+        if let Some(current) = self.scheduler.current() {
+            let id = ThreadId(current.0);
+            self.save_interrupt_frame(id, current_frame)?;
+        }
+
+        match self.scheduler.on_tick() {
+            ScheduleDecision::Idle | ScheduleDecision::Continue(_) => Ok(None),
+            ScheduleDecision::Switch { to, .. } => {
+                let id = ThreadId(to.0);
+                let index = self
+                    .find_thread(id)
+                    .ok_or(ThreadManagerError::MissingThread)?;
+                self.threads[index]
+                    .thread
+                    .take_interrupt_frame()
+                    .map(Some)
+                    .ok_or(ThreadManagerError::MissingInterruptFrame)
+            }
+        }
     }
 
     pub fn spawn(

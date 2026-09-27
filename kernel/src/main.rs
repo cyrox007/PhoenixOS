@@ -236,6 +236,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!("kernel thread scheduler self-test: OK"),
     );
 
+    kernel_thread_frame_routing_self_test();
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("kernel thread frame routing self-test: OK"),
+    );
+
     init_apic_timer(&mut out, &mut page_table, &mut frames);
 
     render_boot_banner(boot_info, &mut out);
@@ -433,6 +440,65 @@ fn kernel_thread_interrupt_frame_self_test() {
     }
     if thread.interrupt_frame().is_some() {
         panic!("изъятый IRQ-кадр остался привязан к потоку");
+    }
+}
+
+fn kernel_thread_frame_routing_self_test() {
+    let mut first_value = 0_u64;
+    let mut second_value = 0_u64;
+    let mut manager = thread_manager::ThreadManager::<4>::new();
+
+    let first = manager
+        .spawn(
+            scheduled_thread_test_entry,
+            &mut first_value as *mut u64 as usize,
+            1,
+        )
+        .expect("не удалось создать первый поток проверки IRQ-маршрутизации");
+    let second = manager
+        .spawn(
+            scheduled_thread_test_entry,
+            &mut second_value as *mut u64 as usize,
+            1,
+        )
+        .expect("не удалось создать второй поток проверки IRQ-маршрутизации");
+
+    const FIRST_INITIAL: u64 = 0x1000;
+    const SECOND_INITIAL: u64 = 0x2000;
+    const FIRST_SAVED: u64 = 0x1100;
+    const SECOND_SAVED: u64 = 0x2200;
+
+    manager
+        .save_interrupt_frame(first, FIRST_INITIAL)
+        .expect("не удалось установить первый IRQ-кадр");
+    manager
+        .save_interrupt_frame(second, SECOND_INITIAL)
+        .expect("не удалось установить второй IRQ-кадр");
+
+    if manager
+        .schedule_interrupt_frame(0)
+        .expect("ошибка первого выбора IRQ-кадра")
+        != Some(FIRST_INITIAL)
+    {
+        panic!("планировщик не выбрал первый подготовленный IRQ-кадр");
+    }
+
+    if manager
+        .schedule_interrupt_frame(FIRST_SAVED)
+        .expect("ошибка переключения на второй IRQ-кадр")
+        != Some(SECOND_INITIAL)
+        || manager.interrupt_frame(first) != Some(FIRST_SAVED)
+    {
+        panic!("IRQ-кадр первого потока не сохранён перед переключением");
+    }
+
+    if manager
+        .schedule_interrupt_frame(SECOND_SAVED)
+        .expect("ошибка возврата к первому IRQ-кадру")
+        != Some(FIRST_SAVED)
+        || manager.interrupt_frame(second) != Some(SECOND_SAVED)
+    {
+        panic!("round-robin не выполнил ротацию IRQ-кадров 1-2-1");
     }
 }
 

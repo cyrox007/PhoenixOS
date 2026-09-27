@@ -5,6 +5,7 @@ members = [
     "crates/phoenix-framebuffer",
     "crates/boot-memory",
     "crates/virtual-memory",
+    "crates/scheduler",
 ]
 
 [package]

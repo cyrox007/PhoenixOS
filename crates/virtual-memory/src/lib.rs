@@ -1,6 +1,6 @@
 #![no_std]
 
-use x86_64::registers::control::Cr3;
+use x86_64::registers::control::{Cr3, Cr3Flags};
 use x86_64::structures::paging::mapper::{MapToError, UnmapError};
 use x86_64::structures::paging::{
     FrameAllocator, FrameDeallocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags,
@@ -9,8 +9,9 @@ use x86_64::structures::paging::{
 use x86_64::{PhysAddr, VirtAddr};
 
 pub const PAGE_SIZE: u64 = 4096;
-pub const KERNEL_P4_START_INDEX: usize = 256;
-pub const USER_SPACE_END_EXCLUSIVE: u64 = 0x0000_8000_0000_0000;
+/// На раннем этапе процессу выделяется первый P4-слот: 0..512 ГиБ.
+pub const USER_P4_ENTRY_COUNT: usize = 1;
+pub const USER_SPACE_END_EXCLUSIVE: u64 = 0x0000_0080_0000_0000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageSpan {
@@ -140,6 +141,26 @@ pub struct InactivePageTable {
     physical_memory_offset: VirtAddr,
 }
 
+pub struct AddressSpaceActivation<'a> {
+    previous_root: PhysFrame<Size4KiB>,
+    previous_flags: Cr3Flags,
+    active_root: &'a InactivePageTable,
+}
+
+impl AddressSpaceActivation<'_> {
+    pub fn active_root_frame(&self) -> PhysFrame<Size4KiB> {
+        self.active_root.root_frame
+    }
+}
+
+impl Drop for AddressSpaceActivation<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            Cr3::write(self.previous_root, self.previous_flags);
+        }
+    }
+}
+
 impl InactivePageTable {
     /// Выделяет и обнуляет отдельную таблицу P4.
     ///
@@ -176,37 +197,60 @@ impl InactivePageTable {
         self.root_frame
     }
 
-    /// Копирует верхнюю каноническую половину активной P4 в корень процесса.
+    /// Временно активирует этот корень таблиц страниц.
     ///
-    /// Дочерние таблицы разделяются с ядром и остаются собственностью
-    /// системного адресного пространства.
+    /// Возвращаемый guard автоматически восстанавливает предыдущий CR3.
     ///
     /// # Безопасность
     ///
-    /// Активная P4 должна содержать постоянные ядерные отображения только
-    /// в верхней канонической половине.
-    pub unsafe fn inherit_kernel_half(&mut self, physical_memory_offset: VirtAddr) {
+    /// Код, текущий стек и все данные, к которым выполняется доступ до
+    /// уничтожения guard, обязаны быть отображены в новом адресном пространстве.
+    pub unsafe fn activate(&self) -> AddressSpaceActivation<'_> {
+        let (previous_root, previous_flags) = Cr3::read();
+        unsafe {
+            Cr3::write(self.root_frame, previous_flags);
+        }
+
+        AddressSpaceActivation {
+            previous_root,
+            previous_flags,
+            active_root: self,
+        }
+    }
+
+    /// Копирует системные P4-записи из активного корня, кроме пользовательского
+    /// окна P4[0].
+    ///
+    /// На текущем загрузочном макете ядро, стек, physical-memory map и служебные
+    /// отображения находятся за пределами первых 512 ГиБ. Дочерние таблицы
+    /// разделяются с ядром и остаются собственностью системного пространства.
+    ///
+    /// # Безопасность
+    ///
+    /// Вызывающая сторона должна гарантировать, что P4[0] не содержит системных
+    /// отображений, необходимых во время работы под процессным CR3.
+    pub unsafe fn inherit_kernel_mappings(&mut self, physical_memory_offset: VirtAddr) {
         let active = unsafe { active_level_4_table(physical_memory_offset) };
         let target = unsafe { &mut *self.root_table };
 
-        for index in KERNEL_P4_START_INDEX..512 {
+        for index in USER_P4_ENTRY_COUNT..512 {
             target[index] = active[index].clone();
         }
     }
 
-    pub fn kernel_half_matches_active(&self, physical_memory_offset: VirtAddr) -> bool {
+    pub fn shared_kernel_mappings_match_active(&self, physical_memory_offset: VirtAddr) -> bool {
         let active = unsafe { active_level_4_table(physical_memory_offset) };
         let target = unsafe { &*self.root_table };
 
-        (KERNEL_P4_START_INDEX..512).all(|index| {
+        (USER_P4_ENTRY_COUNT..512).all(|index| {
             target[index].addr() == active[index].addr()
                 && target[index].flags() == active[index].flags()
         })
     }
 
-    pub fn user_half_is_empty(&self) -> bool {
+    pub fn user_space_is_empty(&self) -> bool {
         let table = unsafe { &*self.root_table };
-        (0..KERNEL_P4_START_INDEX).all(|index| table[index].is_unused())
+        (0..USER_P4_ENTRY_COUNT).all(|index| table[index].is_unused())
     }
 
     /// Выделяет обнулённую физическую страницу и отображает её в нижней
@@ -214,7 +258,7 @@ impl InactivePageTable {
     ///
     /// Все пользовательские листовые страницы, созданные этим методом,
     /// принадлежат данному адресному пространству и освобождаются
-    /// `destroy_user_half`.
+    /// `destroy_user_space`.
     pub fn map_owned_user_4k<A>(
         &mut self,
         page: Page<Size4KiB>,
@@ -292,16 +336,20 @@ impl InactivePageTable {
         Ok(())
     }
 
-    /// Освобождает все пользовательские листовые страницы и принадлежащие
-    /// процессу таблицы P1/P2/P3. Верхняя половина ядра не затрагивается.
-    pub fn destroy_user_half<A>(&mut self, allocator: &mut A) -> Result<u64, InactivePageTableError>
+    /// Освобождает пользовательские листовые страницы и принадлежащие процессу
+    /// таблицы P1/P2/P3 внутри выделенного пользовательского P4-окна.
+    /// Системные P4-записи за пределами окна не затрагиваются.
+    pub fn destroy_user_space<A>(
+        &mut self,
+        allocator: &mut A,
+    ) -> Result<u64, InactivePageTableError>
     where
         A: FrameDeallocator<Size4KiB>,
     {
         let mut released = 0_u64;
         let p4 = unsafe { &mut *self.root_table };
 
-        for p4_index in 0..KERNEL_P4_START_INDEX {
+        for p4_index in 0..USER_P4_ENTRY_COUNT {
             if p4[p4_index].is_unused() {
                 continue;
             }
@@ -385,13 +433,13 @@ impl InactivePageTable {
         (self.physical_memory_offset + frame.start_address().as_u64()).as_mut_ptr::<PageTable>()
     }
 
-    /// Удаляет только разделяемые ссылки верхнего уровня на таблицы ядра.
+    /// Удаляет только разделяемые системные ссылки верхнего уровня.
     ///
     /// Дочерние таблицы не освобождаются: ими владеет системное адресное
     /// пространство.
-    pub unsafe fn clear_kernel_half(&mut self) {
+    pub unsafe fn clear_shared_kernel_mappings(&mut self) {
         let table = unsafe { &mut *self.root_table };
-        for index in KERNEL_P4_START_INDEX..512 {
+        for index in USER_P4_ENTRY_COUNT..512 {
             table[index].set_unused();
         }
     }

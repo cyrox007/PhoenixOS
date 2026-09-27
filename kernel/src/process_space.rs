@@ -1,5 +1,7 @@
 use phoenix_process::{AddressSpace, AddressSpaceId, PAGE_SIZE, RegionError, VirtualRegion};
-use phoenix_vm::{InactivePageTable, InactivePageTableError, USER_SPACE_END_EXCLUSIVE};
+use phoenix_vm::{
+    AddressSpaceActivation, InactivePageTable, InactivePageTableError, USER_SPACE_END_EXCLUSIVE,
+};
 use x86_64::structures::paging::{
     FrameAllocator, FrameDeallocator, Page, PageTableFlags, Size4KiB,
 };
@@ -30,7 +32,7 @@ pub struct ProcessAddressSpace<const CAPACITY: usize> {
 }
 
 impl<const CAPACITY: usize> ProcessAddressSpace<CAPACITY> {
-    /// Создаёт отдельный корень процесса и наследует общую верхнюю половину ядра.
+    /// Создаёт отдельный корень процесса и наследует системные P4-отображения вне пользовательского окна.
     ///
     /// # Безопасность
     ///
@@ -46,7 +48,7 @@ impl<const CAPACITY: usize> ProcessAddressSpace<CAPACITY> {
     {
         let mut page_table = unsafe { InactivePageTable::new(physical_memory_offset, allocator)? };
         unsafe {
-            page_table.inherit_kernel_half(physical_memory_offset);
+            page_table.inherit_kernel_mappings(physical_memory_offset);
         }
 
         Ok(Self {
@@ -148,13 +150,25 @@ impl<const CAPACITY: usize> ProcessAddressSpace<CAPACITY> {
         self.page_table.translate_user_addr(address)
     }
 
+    pub fn is_active(&self) -> bool {
+        self.page_table.is_active()
+    }
+
+    /// # Безопасность
+    ///
+    /// Текущий код, стек и данные должны оставаться доступными через унаследованные
+    /// системные P4-отображения до уничтожения guard.
+    pub unsafe fn activate(&self) -> AddressSpaceActivation<'_> {
+        unsafe { self.page_table.activate() }
+    }
+
     pub fn destroy<A>(mut self, allocator: &mut A) -> Result<(), ProcessAddressSpaceError>
     where
         A: FrameDeallocator<Size4KiB>,
     {
-        self.page_table.destroy_user_half(allocator)?;
+        self.page_table.destroy_user_space(allocator)?;
         unsafe {
-            self.page_table.clear_kernel_half();
+            self.page_table.clear_shared_kernel_mappings();
         }
         self.page_table.release_empty(allocator)?;
         Ok(())

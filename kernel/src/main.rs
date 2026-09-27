@@ -30,6 +30,7 @@ const VM_TEST_ADDRESS: u64 = 0x0000_6000_0000_0000;
 const VM_TEST_VALUE: u64 = 0x5048_4f45_4e49_584f;
 const PROCESS_VM_TEST_ADDRESS: u64 = 0x0000_0000_4000_0000;
 const PROCESS_VM_TEST_VALUE: u64 = 0x5052_4f43_5f56_4d21;
+const PROCESS_CR3_TEST_VALUE: u64 = 0x4352_335f_5357_4954;
 const HEAP_TEST_VALUE: u64 = 0x4845_4150_5f4f_4b21;
 const APIC_TIMER_TEST_TICKS: u64 = 3;
 const THREAD_CONTEXT_TEST_STACK_SIZE: usize = 64 * 1024;
@@ -100,6 +101,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         &mut out,
         "INFO",
         format_args!("process region mapping self-test: OK"),
+    );
+
+    process_cr3_switch_self_test(physical_memory_offset, &mut frames);
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("process cr3 switch self-test: OK"),
     );
 
     let heap_stats =
@@ -380,10 +388,12 @@ fn inactive_page_table_self_test(
     }
 
     unsafe {
-        root.inherit_kernel_half(physical_memory_offset);
+        root.inherit_kernel_mappings(physical_memory_offset);
     }
 
-    if !root.user_half_is_empty() || !root.kernel_half_matches_active(physical_memory_offset) {
+    if !root.user_space_is_empty()
+        || !root.shared_kernel_mappings_match_active(physical_memory_offset)
+    {
         panic!("корень процесса неверно унаследовал отображения ядра");
     }
 
@@ -411,17 +421,17 @@ fn inactive_page_table_self_test(
     }
 
     let released = root
-        .destroy_user_half(frames)
+        .destroy_user_space(frames)
         .expect("не удалось уничтожить пользовательскую половину адресного пространства");
 
-    if released < 4 || !root.user_half_is_empty() {
+    if released < 4 || !root.user_space_is_empty() {
         panic!("пользовательские страницы процесса освобождены некорректно");
     }
 
     // Разделяемые ядерные записи не принадлежат процессу, поэтому очищаем их
     // перед возвратом самой страницы P4 распределителю.
     unsafe {
-        root.clear_kernel_half();
+        root.clear_shared_kernel_mappings();
     }
 
     root.release_empty(frames)
@@ -487,6 +497,93 @@ fn process_region_mapping_self_test(
 
     if frames.free_frames() != free_before {
         panic!("адресное пространство процесса не вернуло всю физическую память");
+    }
+}
+
+fn process_cr3_switch_self_test(
+    physical_memory_offset: VirtAddr,
+    frames: &mut SystemFrameAllocator<SYSTEM_MEMORY_RANGE_CAPACITY>,
+) {
+    use phoenix_process::{AddressSpaceId, MemoryPermissions, RegionKind, VirtualRegion};
+
+    let kernel_code = process_cr3_switch_self_test as *const () as usize as u64;
+    let kernel_stack: u64;
+    unsafe {
+        core::arch::asm!(
+            "mov {}, rsp",
+            out(reg) kernel_stack,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+
+    if physical_memory_offset.as_u64() < phoenix_vm::USER_SPACE_END_EXCLUSIVE
+        || kernel_code < phoenix_vm::USER_SPACE_END_EXCLUSIVE
+        || kernel_stack < phoenix_vm::USER_SPACE_END_EXCLUSIVE
+    {
+        panic!("ядро, стек или physical-memory map пересекаются с пользовательским P4-окном");
+    }
+
+    let free_before = frames.free_frames();
+    let mut space = unsafe {
+        process_space::ProcessAddressSpace::<2>::new(
+            AddressSpaceId(43),
+            physical_memory_offset,
+            frames,
+        )
+    }
+    .expect("не удалось создать адресное пространство для CR3 self-test");
+
+    let region = VirtualRegion::new(
+        PROCESS_VM_TEST_ADDRESS,
+        phoenix_process::PAGE_SIZE,
+        MemoryPermissions::USER_READ_WRITE,
+        RegionKind::Program,
+    )
+    .expect("не удалось описать регион CR3 self-test");
+
+    space
+        .map_region(region, frames)
+        .expect("не удалось отобразить регион CR3 self-test");
+
+    let physical = space
+        .translate_addr(VirtAddr::new(PROCESS_VM_TEST_ADDRESS))
+        .expect("регион CR3 self-test не транслируется до активации");
+
+    let observed = x86_64::instructions::interrupts::without_interrupts(|| {
+        let guard = unsafe { space.activate() };
+        let ptr = VirtAddr::new(PROCESS_VM_TEST_ADDRESS).as_mut_ptr::<u64>();
+
+        unsafe {
+            ptr.write_volatile(PROCESS_CR3_TEST_VALUE);
+        }
+        let value = unsafe { ptr.read_volatile() };
+
+        drop(guard);
+        value
+    });
+
+    if observed != PROCESS_CR3_TEST_VALUE {
+        panic!("пользовательская страница недоступна после CR3 switch");
+    }
+
+    if space.is_active() {
+        panic!("guard не восстановил системный CR3");
+    }
+
+    let physical_ptr = (physical_memory_offset + physical.as_u64()).as_ptr::<u64>();
+    if unsafe { physical_ptr.read_volatile() } != PROCESS_CR3_TEST_VALUE {
+        panic!("данные пользовательской страницы потеряны после возврата CR3");
+    }
+
+    space
+        .unmap_region(region.start, region.length, frames)
+        .expect("не удалось снять регион после CR3 self-test");
+    space
+        .destroy(frames)
+        .expect("не удалось уничтожить адресное пространство после CR3 self-test");
+
+    if frames.free_frames() != free_before {
+        panic!("CR3 self-test не вернул всю физическую память");
     }
 }
 

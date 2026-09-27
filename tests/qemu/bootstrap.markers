@@ -8,6 +8,7 @@ thread context self-test: OK
 kernel thread object self-test: OK
 kernel thread interrupt frame self-test: OK
 kernel thread frame routing self-test: OK
+kernel thread initial irq frame self-test: OK
 kernel thread scheduler self-test: OK
 thread preemption hook self-test: OK
 thread interrupt frame self-test: OK

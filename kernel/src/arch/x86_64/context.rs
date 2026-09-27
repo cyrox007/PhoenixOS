@@ -57,6 +57,10 @@ pub type ThreadEntry = extern "C" fn(usize) -> !;
 pub type ReturningThreadEntry = extern "C" fn(usize);
 pub type ThreadExit = extern "C" fn(usize) -> !;
 
+pub fn returning_thread_trampoline_address() -> u64 {
+    phoenix_returning_thread_trampoline as usize as u64
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StackError {
     TooSmall,

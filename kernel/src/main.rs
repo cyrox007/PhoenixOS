@@ -1359,6 +1359,7 @@ fn user_mode_syscall_self_test(
     }
 
     let endpoint_id = phoenix_ipc::EndpointId(0x5359_5343_414c_4c49);
+    let transfer_endpoint_id = phoenix_ipc::EndpointId(0x5452_414e_5346_4552);
     let mut endpoint_registry = arch::x86_64::syscall::KernelEndpointRegistry::new();
     endpoint_registry
         .insert(phoenix_ipc::Endpoint::new(endpoint_id))
@@ -1366,6 +1367,17 @@ fn user_mode_syscall_self_test(
     let mut capabilities = ProcessCapabilitySet::<
         { arch::x86_64::syscall::PROCESS_CAPABILITY_CAPACITY },
     >::new(ProcessId(44));
+    let mut receiver_capabilities = ProcessCapabilitySet::<
+        { arch::x86_64::syscall::PROCESS_CAPABILITY_CAPACITY },
+    >::new(ProcessId(45));
+    endpoint_registry
+        .insert(phoenix_ipc::Endpoint::new_owned(
+            transfer_endpoint_id,
+            receiver_capabilities.owner(),
+        ))
+        .expect("не удалось зарегистрировать endpoint получателя capability");
+    let mut process_capability_registry =
+        arch::x86_64::syscall::KernelProcessCapabilityRegistry::new();
     let endpoint_handle = capabilities
         .insert(Capability {
             object: ObjectId(endpoint_id.0),
@@ -1380,6 +1392,26 @@ fn user_mode_syscall_self_test(
             rights: Rights::READ,
         })
         .expect("не удалось выдать read-only endpoint-возможность");
+    let transfer_endpoint_handle = capabilities
+        .insert(Capability {
+            object: ObjectId(transfer_endpoint_id.0),
+            kind: ObjectKind::Endpoint,
+            rights: Rights::WRITE,
+        })
+        .expect("не удалось выдать возможность отправки в endpoint получателя");
+    let transferred_handle = capabilities
+        .insert(Capability {
+            object: ObjectId(0x4d45_4d4f_5259),
+            kind: ObjectKind::Memory,
+            rights: Rights::READ.union(Rights::TRANSFER),
+        })
+        .expect("не удалось создать передаваемую возможность");
+    process_capability_registry
+        .register(&mut capabilities)
+        .expect("не удалось зарегистрировать таблицу возможностей отправителя");
+    process_capability_registry
+        .register(&mut receiver_capabilities)
+        .expect("не удалось зарегистрировать таблицу возможностей получателя");
     let packed_endpoint = phoenix_syscall_abi::PackedCapabilityHandle::new(
         endpoint_handle.slot,
         endpoint_handle.generation,
@@ -1388,12 +1420,21 @@ fn user_mode_syscall_self_test(
         read_only_handle.slot,
         read_only_handle.generation,
     );
+    let packed_transfer_endpoint = phoenix_syscall_abi::PackedCapabilityHandle::new(
+        transfer_endpoint_handle.slot,
+        transfer_endpoint_handle.generation,
+    );
+    let packed_transferred = phoenix_syscall_abi::PackedCapabilityHandle::new(
+        transferred_handle.slot,
+        transferred_handle.generation,
+    );
 
     let context_guard = unsafe {
         arch::x86_64::syscall::install_current_process_context(
             &mut space,
             &mut capabilities,
             &mut endpoint_registry,
+            &mut process_capability_registry,
         )
     }
     .expect("контекст текущего процесса уже установлен");
@@ -1428,6 +1469,15 @@ fn user_mode_syscall_self_test(
         },
         endpoint_id,
     );
+    let capability_transfer_ok = arch::x86_64::syscall::ipc_capability_transfer_self_test(
+        phoenix_syscall_abi::IpcSendArguments {
+            endpoint: packed_transfer_endpoint,
+            words_address: ipc_words_address,
+            word_count: send_words.len() as u64,
+            transferred_capability: Some(packed_transferred),
+            flags: 0,
+        },
+    );
     drop(context_guard);
 
     let mut copied_back = [0_u8; 16];
@@ -1456,6 +1506,27 @@ fn user_mode_syscall_self_test(
     {
         panic!("IPC syscall не сохранил payload или метаданные сообщения");
     }
+    let transfer_message = endpoint_registry
+        .get(transfer_endpoint_id)
+        .expect("endpoint переноса capability исчез из реестра")
+        .peek()
+        .expect("ipc_send не поставил сообщение с capability в очередь");
+    let received_handle = transfer_message
+        .transferred_capability()
+        .expect("сообщение потеряло переданную capability");
+    let received_capability = receiver_capabilities
+        .get(received_handle)
+        .expect("получатель не получил переданную capability");
+    if !capability_transfer_ok
+        || capabilities.get(transferred_handle).is_ok()
+        || transfer_message.sender != capabilities.owner()
+        || transfer_message.words() != send_words
+        || received_capability.object != ObjectId(0x4d45_4d4f_5259)
+        || received_capability.kind != ObjectKind::Memory
+        || !received_capability.rights.contains(Rights::TRANSFER)
+    {
+        panic!("атомарная передача capability через ipc_send нарушена");
+    }
     serial::emergency(format_args!(
         "[INFO] ipc syscall memory context self-test: OK\n"
     ));
@@ -1464,6 +1535,9 @@ fn user_mode_syscall_self_test(
     ));
     serial::emergency(format_args!(
         "[INFO] ipc endpoint syscall operations self-test: OK\n"
+    ));
+    serial::emergency(format_args!(
+        "[INFO] ipc capability transfer self-test: OK\n"
     ));
 
     let stack_pointer = USER_MODE_TEST_STACK_ADDRESS + phoenix_process::PAGE_SIZE - 16;

@@ -2,7 +2,10 @@ use core::arch::{global_asm, x86_64::__cpuid};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use phoenix_capability::{CapabilityError, CapabilityHandle, ObjectKind, Rights};
-use phoenix_ipc::{EndpointId, EndpointRegistry, EndpointRegistryError, IpcError, Message};
+use phoenix_ipc::{
+    EndpointId, EndpointRegistry, EndpointRegistryError, IpcError, IpcSendError, Message,
+    send_with_capability,
+};
 use phoenix_process::{ProcessCapabilitySet, ProcessId};
 use phoenix_syscall_abi::{
     IpcReceiveArguments, IpcReceiveMetadata, IpcSendArguments, NO_TRANSFERRED_CAPABILITY,
@@ -52,19 +55,101 @@ const ENTRY_STACK_SIZE: u64 = 64 * 1024;
 pub const PROCESS_CAPABILITY_CAPACITY: usize = 64;
 pub const ENDPOINT_REGISTRY_CAPACITY: usize = 8;
 pub const ENDPOINT_QUEUE_CAPACITY: usize = 4;
+pub const PROCESS_CAPABILITY_REGISTRY_CAPACITY: usize = 8;
 
 pub type KernelEndpointRegistry =
     EndpointRegistry<ENDPOINT_REGISTRY_CAPACITY, ENDPOINT_QUEUE_CAPACITY>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessCapabilityRegistryError {
+    CapacityExceeded,
+    DuplicateProcess,
+    NotFound,
+}
+
+#[derive(Clone, Copy)]
+struct RegisteredProcessCapabilities {
+    owner: ProcessId,
+    capabilities: usize,
+}
+
+pub struct KernelProcessCapabilityRegistry {
+    entries: [Option<RegisteredProcessCapabilities>; PROCESS_CAPABILITY_REGISTRY_CAPACITY],
+    len: usize,
+}
+
+impl KernelProcessCapabilityRegistry {
+    pub const fn new() -> Self {
+        Self {
+            entries: [None; PROCESS_CAPABILITY_REGISTRY_CAPACITY],
+            len: 0,
+        }
+    }
+
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn register(
+        &mut self,
+        capabilities: &mut ProcessCapabilitySet<PROCESS_CAPABILITY_CAPACITY>,
+    ) -> Result<(), ProcessCapabilityRegistryError> {
+        let owner = capabilities.owner();
+        if self
+            .entries
+            .iter()
+            .flatten()
+            .any(|entry| entry.owner == owner)
+        {
+            return Err(ProcessCapabilityRegistryError::DuplicateProcess);
+        }
+
+        let Some(slot) = self.entries.iter_mut().find(|entry| entry.is_none()) else {
+            return Err(ProcessCapabilityRegistryError::CapacityExceeded);
+        };
+
+        *slot = Some(RegisteredProcessCapabilities {
+            owner,
+            capabilities: capabilities as *mut _ as usize,
+        });
+        self.len += 1;
+        Ok(())
+    }
+
+    fn get_mut(
+        &mut self,
+        owner: ProcessId,
+    ) -> Result<&mut ProcessCapabilitySet<PROCESS_CAPABILITY_CAPACITY>, ProcessCapabilityRegistryError>
+    {
+        let entry = self
+            .entries
+            .iter()
+            .flatten()
+            .find(|entry| entry.owner == owner)
+            .ok_or(ProcessCapabilityRegistryError::NotFound)?;
+        Ok(unsafe {
+            &mut *(entry.capabilities as *mut ProcessCapabilitySet<PROCESS_CAPABILITY_CAPACITY>)
+        })
+    }
+}
+
+impl Default for KernelProcessCapabilityRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 static USER_SELF_TEST_RESULT: AtomicU64 = AtomicU64::new(0);
 static CURRENT_PROCESS_ADDRESS_SPACE: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_PROCESS_CAPABILITIES: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_ENDPOINT_REGISTRY: AtomicUsize = AtomicUsize::new(0);
+static CURRENT_PROCESS_CAPABILITY_REGISTRY: AtomicUsize = AtomicUsize::new(0);
 
 pub struct CurrentProcessContextGuard {
     address_space: usize,
     capabilities: usize,
     endpoint_registry: usize,
+    process_capability_registry: usize,
 }
 
 impl Drop for CurrentProcessContextGuard {
@@ -83,6 +168,12 @@ impl Drop for CurrentProcessContextGuard {
         );
         let _ = CURRENT_ENDPOINT_REGISTRY.compare_exchange(
             self.endpoint_registry,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        let _ = CURRENT_PROCESS_CAPABILITY_REGISTRY.compare_exchange(
+            self.process_capability_registry,
             0,
             Ordering::AcqRel,
             Ordering::Acquire,
@@ -107,8 +198,12 @@ pub enum EndpointCapabilityError {
 enum EndpointOperationError {
     ContextNotInstalled,
     Registry(EndpointRegistryError),
+    ProcessRegistry(ProcessCapabilityRegistryError),
     Transport(IpcError),
+    Transfer(IpcSendError),
     UserMemory(IpcUserMemoryError),
+    MissingEndpointOwner,
+    SameProcessTransfer,
 }
 
 impl From<EndpointRegistryError> for EndpointOperationError {
@@ -123,6 +218,18 @@ impl From<IpcError> for EndpointOperationError {
     }
 }
 
+impl From<IpcSendError> for EndpointOperationError {
+    fn from(error: IpcSendError) -> Self {
+        Self::Transfer(error)
+    }
+}
+
+impl From<ProcessCapabilityRegistryError> for EndpointOperationError {
+    fn from(error: ProcessCapabilityRegistryError) -> Self {
+        Self::ProcessRegistry(error)
+    }
+}
+
 impl From<IpcUserMemoryError> for EndpointOperationError {
     fn from(error: IpcUserMemoryError) -> Self {
         Self::UserMemory(error)
@@ -134,23 +241,39 @@ impl From<IpcUserMemoryError> for EndpointOperationError {
 /// # Safety
 ///
 /// `space` and `capabilities` must remain alive and exclusively owned until the
-/// returned guard is dropped. `endpoint_registry` must remain alive and must
-/// not be accessed outside the dispatcher while the guard is active. The early
+/// returned guard is dropped. `endpoint_registry` and `process_capability_registry`
+/// must remain alive and must not be accessed outside the dispatcher while the guard
+/// is active. The early
 /// implementation is single-CPU and callers must keep interrupts disabled while
 /// user code can enter the system-call dispatcher.
 pub unsafe fn install_current_process_context(
     space: &mut ProcessAddressSpace<PROCESS_REGION_CAPACITY>,
     capabilities: &mut ProcessCapabilitySet<PROCESS_CAPABILITY_CAPACITY>,
     endpoint_registry: &mut KernelEndpointRegistry,
+    process_capability_registry: &mut KernelProcessCapabilityRegistry,
 ) -> Option<CurrentProcessContextGuard> {
     let address_space = space as *mut ProcessAddressSpace<PROCESS_REGION_CAPACITY> as usize;
     let capabilities =
         capabilities as *mut ProcessCapabilitySet<PROCESS_CAPABILITY_CAPACITY> as usize;
     let endpoint_registry = endpoint_registry as *mut KernelEndpointRegistry as usize;
+    let process_capability_registry =
+        process_capability_registry as *mut KernelProcessCapabilityRegistry as usize;
+    if CURRENT_PROCESS_CAPABILITY_REGISTRY
+        .compare_exchange(
+            0,
+            process_capability_registry,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_err()
+    {
+        return None;
+    }
     if CURRENT_ENDPOINT_REGISTRY
         .compare_exchange(0, endpoint_registry, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
+        CURRENT_PROCESS_CAPABILITY_REGISTRY.store(0, Ordering::Release);
         return None;
     }
     if CURRENT_PROCESS_CAPABILITIES
@@ -158,6 +281,7 @@ pub unsafe fn install_current_process_context(
         .is_err()
     {
         CURRENT_ENDPOINT_REGISTRY.store(0, Ordering::Release);
+        CURRENT_PROCESS_CAPABILITY_REGISTRY.store(0, Ordering::Release);
         return None;
     }
 
@@ -168,10 +292,12 @@ pub unsafe fn install_current_process_context(
             address_space,
             capabilities,
             endpoint_registry,
+            process_capability_registry,
         })
         .or_else(|| {
             CURRENT_PROCESS_CAPABILITIES.store(0, Ordering::Release);
             CURRENT_ENDPOINT_REGISTRY.store(0, Ordering::Release);
+            CURRENT_PROCESS_CAPABILITY_REGISTRY.store(0, Ordering::Release);
             None
         })
 }
@@ -198,6 +324,31 @@ fn with_current_endpoint_registry<T>(
     }
 
     let registry = unsafe { &mut *(registry as *mut KernelEndpointRegistry) };
+    Some(operation(registry))
+}
+
+fn with_current_process_capabilities<T>(
+    operation: impl FnOnce(&mut ProcessCapabilitySet<PROCESS_CAPABILITY_CAPACITY>) -> T,
+) -> Option<T> {
+    let capabilities = CURRENT_PROCESS_CAPABILITIES.load(Ordering::Acquire);
+    if capabilities == 0 {
+        return None;
+    }
+
+    let capabilities =
+        unsafe { &mut *(capabilities as *mut ProcessCapabilitySet<PROCESS_CAPABILITY_CAPACITY>) };
+    Some(operation(capabilities))
+}
+
+fn with_process_capability_registry<T>(
+    operation: impl FnOnce(&mut KernelProcessCapabilityRegistry) -> T,
+) -> Option<T> {
+    let registry = CURRENT_PROCESS_CAPABILITY_REGISTRY.load(Ordering::Acquire);
+    if registry == 0 {
+        return None;
+    }
+
+    let registry = unsafe { &mut *(registry as *mut KernelProcessCapabilityRegistry) };
     Some(operation(registry))
 }
 

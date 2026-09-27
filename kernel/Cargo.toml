@@ -8,6 +8,7 @@ publish = false
 bootloader_api = "=0.11.17"
 lazy_static = { version = "1.5.0", features = ["spin_no_std"] }
 linked_list_allocator = "=0.10.6"
+phoenix-capability = { path = "../crates/capability-model" }
 phoenix-framebuffer = { path = "../crates/phoenix-framebuffer" }
 phoenix-memory = { path = "../crates/boot-memory" }
 phoenix-process = { path = "../crates/process-model" }

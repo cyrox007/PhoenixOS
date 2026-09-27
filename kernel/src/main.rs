@@ -286,7 +286,21 @@ fn init_apic_timer(
         format_args!("local APIC: mode={}", mode.name()),
     );
 
-    arch::x86_64::apic::wait_for_ticks(APIC_TIMER_TEST_TICKS);
+    arch::x86_64::apic::install_timer_hook(thread_manager::timer_tick_hook)
+        .expect("не удалось установить обработчик планировочного тика");
+
+    let target_tick = arch::x86_64::apic::ticks()
+        .checked_add(APIC_TIMER_TEST_TICKS)
+        .expect("счётчик системных тиков переполнен");
+
+    arch::x86_64::apic::wait_for_ticks(target_tick);
+
+    let observed_tick = thread_manager::last_timer_tick();
+    arch::x86_64::apic::remove_timer_hook();
+
+    if observed_tick < target_tick {
+        panic!("планировочный слой не получил ожидаемые аппаратные тики");
+    }
 
     serial::line(
         out,
@@ -295,6 +309,12 @@ fn init_apic_timer(
             "apic timer self-test: OK ticks={}",
             arch::x86_64::apic::ticks()
         ),
+    );
+
+    serial::line(
+        out,
+        "INFO",
+        format_args!("thread preemption hook self-test: OK tick={observed_tick}"),
     );
 }
 

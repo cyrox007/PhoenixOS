@@ -1,5 +1,6 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use phoenix_scheduler::{RoundRobinScheduler, ScheduleDecision, SchedulerError, TaskId};
 
@@ -7,6 +8,16 @@ use crate::arch::x86_64::context::{self, Context, ReturningThreadEntry};
 use crate::thread::{KernelThread, ThreadError, ThreadId, ThreadState};
 
 const DEFAULT_STACK_SIZE: usize = 64 * 1024;
+
+static LAST_TIMER_TICK: AtomicU64 = AtomicU64::new(0);
+
+pub fn timer_tick_hook(tick: u64) {
+    LAST_TIMER_TICK.store(tick, Ordering::Release);
+}
+
+pub fn last_timer_tick() -> u64 {
+    LAST_TIMER_TICK.load(Ordering::Acquire)
+}
 
 #[derive(Debug)]
 pub enum ThreadManagerError {

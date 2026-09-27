@@ -1,5 +1,5 @@
 use core::arch::x86_64::__cpuid;
-use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
 use phoenix_memory::SystemFrameAllocator;
 use phoenix_vm::ActivePageTable;
@@ -40,6 +40,14 @@ const MODE_X2APIC: u8 = 2;
 
 static APIC_MODE: AtomicU8 = AtomicU8::new(MODE_UNINITIALIZED);
 static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
+static TIMER_HOOK: AtomicUsize = AtomicUsize::new(0);
+
+pub type TimerHook = fn(u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimerHookError {
+    AlreadyInstalled,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApicMode {
@@ -99,9 +107,28 @@ pub fn wait_for_ticks(minimum: u64) {
     }
 }
 
-pub(super) fn handle_timer_interrupt() {
-    TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
+pub fn install_timer_hook(hook: TimerHook) -> Result<(), TimerHookError> {
+    let raw = hook as usize;
+    let result = TIMER_HOOK.compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire);
 
+    match result {
+        Ok(_) => Ok(()),
+        Err(_) => Err(TimerHookError::AlreadyInstalled),
+    }
+}
+
+pub fn remove_timer_hook() {
+    TIMER_HOOK.store(0, Ordering::Release);
+}
+
+pub(super) fn handle_timer_interrupt() {
+    let tick = TIMER_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+
+    end_of_interrupt();
+    notify_timer_hook(tick);
+}
+
+fn end_of_interrupt() {
     match APIC_MODE.load(Ordering::Acquire) {
         MODE_XAPIC => unsafe {
             write_xapic(XAPIC_EOI, 0);
@@ -111,6 +138,16 @@ pub(super) fn handle_timer_interrupt() {
         },
         _ => {}
     }
+}
+
+fn notify_timer_hook(tick: u64) {
+    let raw = TIMER_HOOK.load(Ordering::Acquire);
+    if raw == 0 {
+        return;
+    }
+
+    let hook: TimerHook = unsafe { core::mem::transmute(raw) };
+    hook(tick);
 }
 
 fn init_xapic<const MAX_RANGES: usize>(

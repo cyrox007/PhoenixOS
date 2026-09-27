@@ -14,6 +14,7 @@ phoenix-framebuffer = { path = "../crates/phoenix-framebuffer" }
 phoenix-ipc = { path = "../crates/ipc-model" }
 phoenix-memory = { path = "../crates/boot-memory" }
 phoenix-process = { path = "../crates/process-model" }
+phoenix-process-manager = { path = "../crates/process-manager" }
 phoenix-scheduler = { path = "../crates/scheduler" }
 phoenix-syscall-abi = { path = "../crates/syscall-abi" }
 phoenix-vm = { path = "../crates/virtual-memory" }

@@ -9,6 +9,7 @@ use x86_64::structures::paging::{
 use x86_64::{PhysAddr, VirtAddr};
 
 pub const PAGE_SIZE: u64 = 4096;
+pub const KERNEL_P4_START_INDEX: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageSpan {
@@ -165,6 +166,39 @@ impl InactivePageTable {
 
     pub fn root_frame(&self) -> PhysFrame<Size4KiB> {
         self.root_frame
+    }
+
+    /// Копирует верхнюю каноническую половину активной P4 в корень процесса.
+    ///
+    /// Дочерние таблицы разделяются с ядром и остаются собственностью
+    /// системного адресного пространства.
+    ///
+    /// # Безопасность
+    ///
+    /// Активная P4 должна содержать постоянные ядерные отображения только
+    /// в верхней канонической половине.
+    pub unsafe fn inherit_kernel_half(&mut self, physical_memory_offset: VirtAddr) {
+        let active = unsafe { active_level_4_table(physical_memory_offset) };
+        let target = unsafe { &mut *self.root_table };
+
+        for index in KERNEL_P4_START_INDEX..512 {
+            target[index] = active[index].clone();
+        }
+    }
+
+    pub fn kernel_half_matches_active(&self, physical_memory_offset: VirtAddr) -> bool {
+        let active = unsafe { active_level_4_table(physical_memory_offset) };
+        let target = unsafe { &*self.root_table };
+
+        (KERNEL_P4_START_INDEX..512).all(|index| {
+            target[index].addr() == active[index].addr()
+                && target[index].flags() == active[index].flags()
+        })
+    }
+
+    pub fn user_half_is_empty(&self) -> bool {
+        let table = unsafe { &*self.root_table };
+        (0..KERNEL_P4_START_INDEX).all(|index| table[index].is_unused())
     }
 
     pub fn is_active(&self) -> bool {

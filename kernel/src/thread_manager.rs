@@ -149,6 +149,7 @@ pub enum ThreadManagerError {
     Scheduler(SchedulerError),
     Thread(ThreadError),
     MissingThread,
+    MissingInterruptFrame,
     InvalidState,
     IdExhausted,
 }
@@ -235,6 +236,44 @@ impl<const CAPACITY: usize> ThreadManager<CAPACITY> {
         self.next_id = next_id;
 
         Ok(id)
+    }
+
+    pub fn set_interrupt_frame(
+        &mut self,
+        id: ThreadId,
+        frame: u64,
+    ) -> Result<(), ThreadManagerError> {
+        let index = self
+            .find_thread(id)
+            .ok_or(ThreadManagerError::MissingThread)?;
+        self.threads[index]
+            .thread
+            .save_interrupt_frame(frame)
+            .map_err(ThreadManagerError::Thread)
+    }
+
+    pub fn schedule_interrupt_frame(
+        &mut self,
+        current_frame: u64,
+    ) -> Result<u64, ThreadManagerError> {
+        let current = self.scheduler.current();
+
+        if let Some(current_id) = current {
+            let index = self
+                .find_thread(ThreadId(current_id.0))
+                .ok_or(ThreadManagerError::MissingThread)?;
+            self.threads[index]
+                .thread
+                .save_interrupt_frame(current_frame)
+                .map_err(ThreadManagerError::Thread)?;
+        }
+
+        match self.scheduler.on_tick() {
+            ScheduleDecision::Idle => Ok(current_frame),
+            ScheduleDecision::Continue(id) if current == Some(id) => Ok(current_frame),
+            ScheduleDecision::Continue(id) => self.interrupt_frame_for(ThreadId(id.0)),
+            ScheduleDecision::Switch { to, .. } => self.interrupt_frame_for(ThreadId(to.0)),
+        }
     }
 
     pub fn set_blocked(&mut self, id: ThreadId, blocked: bool) -> Result<(), ThreadManagerError> {
@@ -361,6 +400,16 @@ impl<const CAPACITY: usize> ThreadManager<CAPACITY> {
         }
 
         result.map_err(ThreadManagerError::Scheduler)
+    }
+
+    fn interrupt_frame_for(&self, id: ThreadId) -> Result<u64, ThreadManagerError> {
+        let index = self
+            .find_thread(id)
+            .ok_or(ThreadManagerError::MissingThread)?;
+        self.threads[index]
+            .thread
+            .interrupt_frame()
+            .ok_or(ThreadManagerError::MissingInterruptFrame)
     }
 
     fn find_thread(&self, id: ThreadId) -> Option<usize> {

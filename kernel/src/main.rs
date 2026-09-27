@@ -222,6 +222,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!("user mode syscall self-test: OK"),
     );
 
+    elf_user_execution_self_test(physical_memory_offset, &mut frames);
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("elf user execution self-test: OK"),
+    );
+
     let heap_stats =
         heap::init(&mut page_table, &mut frames).expect("не удалось инициализировать кучу ядра");
 
@@ -1673,6 +1680,112 @@ fn user_mode_syscall_self_test(
 
     if frames.free_frames() != free_before {
         panic!("пользовательская самопроверка не вернула всю физическую память");
+    }
+}
+
+fn elf_user_execution_self_test(
+    physical_memory_offset: VirtAddr,
+    frames: &mut SystemFrameAllocator<SYSTEM_MEMORY_RANGE_CAPACITY>,
+) {
+    use phoenix_process::{
+        AddressSpaceId, MemoryPermissions, ProcessCapabilitySet, ProcessId, RegionKind,
+        VirtualRegion,
+    };
+
+    const LOAD_ADDRESS: u64 = 0x0000_0000_4300_0000;
+    const STACK_ADDRESS: u64 = LOAD_ADDRESS + phoenix_process::PAGE_SIZE;
+    const CODE_OFFSET: usize = 0x100;
+    const IMAGE_SIZE: usize = phoenix_process::PAGE_SIZE as usize;
+
+    let user_code = arch::x86_64::syscall::user_mode_test_image();
+    if user_code.is_empty() || CODE_OFFSET + user_code.len() > IMAGE_SIZE {
+        panic!("пользовательский код не помещается в тестовый ELF64");
+    }
+
+    let free_before = frames.free_frames();
+    let mut space = unsafe {
+        process_space::ProcessAddressSpace::<{ process_space::PROCESS_REGION_CAPACITY }>::new(
+            AddressSpaceId(47),
+            physical_memory_offset,
+            frames,
+        )
+    }
+    .expect("не удалось создать адресное пространство для запуска ELF");
+
+    let mut image = [0_u8; IMAGE_SIZE];
+    image[0..4].copy_from_slice(b"\x7fELF");
+    image[4] = 2;
+    image[5] = 1;
+    image[6] = 1;
+    image[16..18].copy_from_slice(&2_u16.to_le_bytes());
+    image[18..20].copy_from_slice(&62_u16.to_le_bytes());
+    image[20..24].copy_from_slice(&1_u32.to_le_bytes());
+    image[24..32].copy_from_slice(&(LOAD_ADDRESS + CODE_OFFSET as u64).to_le_bytes());
+    image[32..40].copy_from_slice(&64_u64.to_le_bytes());
+    image[52..54].copy_from_slice(&64_u16.to_le_bytes());
+    image[54..56].copy_from_slice(&56_u16.to_le_bytes());
+    image[56..58].copy_from_slice(&1_u16.to_le_bytes());
+
+    let file_size = (CODE_OFFSET + user_code.len()) as u64;
+    let ph = 64_usize;
+    image[ph..ph + 4].copy_from_slice(&1_u32.to_le_bytes());
+    image[ph + 4..ph + 8].copy_from_slice(&5_u32.to_le_bytes());
+    image[ph + 8..ph + 16].copy_from_slice(&0_u64.to_le_bytes());
+    image[ph + 16..ph + 24].copy_from_slice(&LOAD_ADDRESS.to_le_bytes());
+    image[ph + 32..ph + 40].copy_from_slice(&file_size.to_le_bytes());
+    image[ph + 40..ph + 48].copy_from_slice(&(IMAGE_SIZE as u64).to_le_bytes());
+    image[ph + 48..ph + 56].copy_from_slice(&0x1000_u64.to_le_bytes());
+    image[CODE_OFFSET..CODE_OFFSET + user_code.len()].copy_from_slice(user_code);
+
+    let loaded = elf_user_loader::load_elf(&image[..file_size as usize], &mut space, frames)
+        .expect("не удалось загрузить исполняемый ELF64");
+
+    let stack_region = VirtualRegion::new(
+        STACK_ADDRESS,
+        phoenix_process::PAGE_SIZE,
+        MemoryPermissions::USER_READ_WRITE,
+        RegionKind::Stack,
+    )
+    .expect("не удалось описать стек ELF-процесса");
+    space
+        .map_region(stack_region, frames)
+        .expect("не удалось отобразить стек ELF-процесса");
+
+    let mut capabilities = ProcessCapabilitySet::<
+        { arch::x86_64::syscall::PROCESS_CAPABILITY_CAPACITY },
+    >::new(ProcessId(47));
+    let mut endpoint_registry = arch::x86_64::syscall::KernelEndpointRegistry::new();
+    let mut process_capability_registry =
+        arch::x86_64::syscall::KernelProcessCapabilityRegistry::new();
+
+    let stack_pointer = STACK_ADDRESS + phoenix_process::PAGE_SIZE - 16;
+    let passed = x86_64::instructions::interrupts::without_interrupts(|| {
+        let context_guard = unsafe {
+            arch::x86_64::syscall::install_current_process_context(
+                &mut space,
+                &mut capabilities,
+                &mut endpoint_registry,
+                &mut process_capability_registry,
+            )
+        }
+        .expect("контекст ELF-процесса уже установлен");
+        let address_space_guard = unsafe { space.activate() };
+        let result =
+            arch::x86_64::syscall::run_user_mode_self_test(loaded.entry_point, stack_pointer);
+        drop(address_space_guard);
+        drop(context_guard);
+        result
+    });
+
+    if !passed {
+        panic!("загруженная ELF-точка входа не завершила пользовательский SYSCALL-цикл");
+    }
+
+    space
+        .destroy(frames)
+        .expect("не удалось уничтожить адресное пространство ELF-процесса");
+    if frames.free_frames() != free_before {
+        panic!("запуск ELF не вернул физические страницы распределителю");
     }
 }
 

@@ -319,10 +319,16 @@ fn init_apic_timer(
     arch::x86_64::apic::wait_for_ticks(target_tick);
 
     let observed_tick = thread_manager::last_timer_tick();
+    let observed_context = thread_manager::last_timer_context()
+        .expect("планировочный слой не получил прерываемый контекст таймера");
     arch::x86_64::apic::remove_timer_hook();
 
     if observed_tick < target_tick {
         panic!("планировочный слой не получил ожидаемые аппаратные тики");
+    }
+
+    if observed_context.instruction_pointer == 0 || observed_context.stack_pointer == 0 {
+        panic!("таймерный IRQ передал неполный аппаратный контекст");
     }
 
     serial::line(
@@ -338,6 +344,17 @@ fn init_apic_timer(
         out,
         "INFO",
         format_args!("thread preemption hook self-test: OK tick={observed_tick}"),
+    );
+
+    serial::line(
+        out,
+        "INFO",
+        format_args!(
+            "thread interrupt frame self-test: OK rip={:#x} rsp={:#x} rflags={:#x}",
+            observed_context.instruction_pointer,
+            observed_context.stack_pointer,
+            observed_context.cpu_flags
+        ),
     );
 }
 

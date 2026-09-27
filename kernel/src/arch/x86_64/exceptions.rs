@@ -72,8 +72,14 @@ extern "x86-interrupt" fn double_fault_handler(
     fatal_exception("double fault", &stack_frame, Some(error_code));
 }
 
-extern "x86-interrupt" fn apic_timer_handler(_stack_frame: InterruptStackFrame) {
-    apic::handle_timer_interrupt();
+extern "x86-interrupt" fn apic_timer_handler(stack_frame: InterruptStackFrame) {
+    let context = apic::TimerInterruptContext {
+        instruction_pointer: stack_frame.instruction_pointer.as_u64(),
+        stack_pointer: stack_frame.stack_pointer.as_u64(),
+        cpu_flags: stack_frame.cpu_flags.bits(),
+    };
+
+    apic::handle_timer_interrupt(context);
 }
 
 extern "x86-interrupt" fn apic_spurious_handler(_stack_frame: InterruptStackFrame) {}

@@ -42,7 +42,14 @@ static APIC_MODE: AtomicU8 = AtomicU8::new(MODE_UNINITIALIZED);
 static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
 static TIMER_HOOK: AtomicUsize = AtomicUsize::new(0);
 
-pub type TimerHook = fn(u64);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimerInterruptContext {
+    pub instruction_pointer: u64,
+    pub stack_pointer: u64,
+    pub cpu_flags: u64,
+}
+
+pub type TimerHook = fn(u64, TimerInterruptContext);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimerHookError {
@@ -121,11 +128,11 @@ pub fn remove_timer_hook() {
     TIMER_HOOK.store(0, Ordering::Release);
 }
 
-pub(super) fn handle_timer_interrupt() {
+pub(super) fn handle_timer_interrupt(context: TimerInterruptContext) {
     let tick = TIMER_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
 
     end_of_interrupt();
-    notify_timer_hook(tick);
+    notify_timer_hook(tick, context);
 }
 
 fn end_of_interrupt() {
@@ -140,14 +147,14 @@ fn end_of_interrupt() {
     }
 }
 
-fn notify_timer_hook(tick: u64) {
+fn notify_timer_hook(tick: u64, context: TimerInterruptContext) {
     let raw = TIMER_HOOK.load(Ordering::Acquire);
     if raw == 0 {
         return;
     }
 
     let hook: TimerHook = unsafe { core::mem::transmute(raw) };
-    hook(tick);
+    hook(tick, context);
 }
 
 fn init_xapic<const MAX_RANGES: usize>(

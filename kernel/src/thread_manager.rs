@@ -10,13 +10,31 @@ use crate::thread::{KernelThread, ThreadError, ThreadId, ThreadState};
 const DEFAULT_STACK_SIZE: usize = 64 * 1024;
 
 static LAST_TIMER_TICK: AtomicU64 = AtomicU64::new(0);
+static LAST_TIMER_RIP: AtomicU64 = AtomicU64::new(0);
+static LAST_TIMER_RSP: AtomicU64 = AtomicU64::new(0);
+static LAST_TIMER_RFLAGS: AtomicU64 = AtomicU64::new(0);
 
-pub fn timer_tick_hook(tick: u64) {
+pub fn timer_tick_hook(tick: u64, context: crate::arch::x86_64::apic::TimerInterruptContext) {
+    LAST_TIMER_RIP.store(context.instruction_pointer, Ordering::Relaxed);
+    LAST_TIMER_RSP.store(context.stack_pointer, Ordering::Relaxed);
+    LAST_TIMER_RFLAGS.store(context.cpu_flags, Ordering::Relaxed);
     LAST_TIMER_TICK.store(tick, Ordering::Release);
 }
 
 pub fn last_timer_tick() -> u64 {
     LAST_TIMER_TICK.load(Ordering::Acquire)
+}
+
+pub fn last_timer_context() -> Option<crate::arch::x86_64::apic::TimerInterruptContext> {
+    if LAST_TIMER_TICK.load(Ordering::Acquire) == 0 {
+        return None;
+    }
+
+    Some(crate::arch::x86_64::apic::TimerInterruptContext {
+        instruction_pointer: LAST_TIMER_RIP.load(Ordering::Relaxed),
+        stack_pointer: LAST_TIMER_RSP.load(Ordering::Relaxed),
+        cpu_flags: LAST_TIMER_RFLAGS.load(Ordering::Relaxed),
+    })
 }
 
 #[derive(Debug)]

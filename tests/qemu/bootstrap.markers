@@ -8,6 +8,7 @@ thread context self-test: OK
 kernel thread object self-test: OK
 kernel thread scheduler self-test: OK
 thread preemption hook self-test: OK
+thread interrupt frame self-test: OK
 process page table root self-test: OK
 process user mapping self-test: OK
 process region mapping self-test: OK

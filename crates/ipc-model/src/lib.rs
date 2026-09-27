@@ -294,7 +294,11 @@ mod tests {
         let message = Message::new(ProcessId(10), &[1, 2]).unwrap();
 
         registry.insert(Endpoint::new(endpoint_id)).unwrap();
-        registry.get_mut(endpoint_id).unwrap().send(message).unwrap();
+        registry
+            .get_mut(endpoint_id)
+            .unwrap()
+            .send(message)
+            .unwrap();
 
         assert_eq!(registry.len(), 1);
         assert_eq!(registry.get(endpoint_id).unwrap().len(), 1);

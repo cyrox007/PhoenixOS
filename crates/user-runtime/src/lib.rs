@@ -119,8 +119,7 @@ mod tests {
     #[test]
     fn send_wrapper_marks_missing_transfer_explicitly() {
         let words = [1_u64];
-        let request =
-            build_ipc_send_request(PackedCapabilityHandle::new(1, 1), &words, None);
+        let request = build_ipc_send_request(PackedCapabilityHandle::new(1, 1), &words, None);
 
         assert_eq!(request.arguments[3], NO_TRANSFERRED_CAPABILITY);
     }

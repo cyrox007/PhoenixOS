@@ -168,10 +168,7 @@ pub fn entry_self_test() -> bool {
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn phoenix_syscall_dispatch(
-    request: *const SyscallRequest,
-    result: *mut SyscallReturn,
-) {
+extern "C" fn phoenix_syscall_dispatch(request: *const SyscallRequest, result: *mut SyscallReturn) {
     if request.is_null() || result.is_null() {
         return;
     }

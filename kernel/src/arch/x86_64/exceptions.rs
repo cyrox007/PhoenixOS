@@ -1,16 +1,17 @@
 use core::arch::global_asm;
 
 use lazy_static::lazy_static;
+use x86_64::VirtAddr;
 use x86_64::instructions::interrupts;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
-use x86_64::VirtAddr;
 
 use super::{apic, gdt};
 use crate::qemu::{self, ExitCode};
 use crate::serial;
 
 #[unsafe(export_name = "phoenix_timer_registers")]
-static mut TIMER_REGISTER_SNAPSHOT: apic::TimerGeneralRegisters = apic::TimerGeneralRegisters::EMPTY;
+static mut TIMER_REGISTER_SNAPSHOT: apic::TimerGeneralRegisters =
+    apic::TimerGeneralRegisters::EMPTY;
 
 #[unsafe(export_name = "phoenix_timer_capture_marker")]
 static mut TIMER_CAPTURE_MARKER: u64 = 0;
@@ -69,9 +70,8 @@ fn build_idt() -> InterruptDescriptorTable {
     idt[apic::SPURIOUS_VECTOR].set_handler_fn(apic_spurious_handler);
 
     unsafe {
-        idt[apic::TIMER_VECTOR].set_handler_addr(VirtAddr::new(
-            phoenix_apic_timer_entry as *const () as u64,
-        ));
+        idt[apic::TIMER_VECTOR]
+            .set_handler_addr(VirtAddr::new(phoenix_apic_timer_entry as *const () as u64));
         idt.double_fault
             .set_handler_fn(double_fault_handler)
             .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);

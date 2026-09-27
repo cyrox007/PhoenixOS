@@ -82,9 +82,8 @@ pub fn timer_tick_hook(
             HARDWARE_PREEMPTION_TEST_BOOT_FRAME.store(boot_frame, Ordering::Release);
         }
 
-        let manager = unsafe {
-            &mut *(manager_ptr as *mut ThreadManager<HARDWARE_PREEMPTION_TEST_CAPACITY>)
-        };
+        let manager =
+            unsafe { &mut *(manager_ptr as *mut ThreadManager<HARDWARE_PREEMPTION_TEST_CAPACITY>) };
         let switches = HARDWARE_PREEMPTION_TEST_SWITCHES.load(Ordering::Acquire);
 
         if switches >= HARDWARE_PREEMPTION_TEST_SWITCH_TARGET {

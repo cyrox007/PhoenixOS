@@ -52,6 +52,7 @@ jobs:
           PHOENIXOS_EXPECT_SERIAL_2: "virtual memory self-test: OK"
           PHOENIXOS_EXPECT_SERIAL_3: "kernel heap self-test: OK"
           PHOENIXOS_EXPECT_SERIAL_4: "apic timer self-test: OK"
+          PHOENIXOS_EXPECT_SERIAL_5: "thread context self-test: OK"
         run: bash scripts/run-qemu-ci.sh artifacts/phoenixos-uefi.img
 
       - name: Сохранить UEFI-образ

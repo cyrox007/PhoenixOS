@@ -1,4 +1,5 @@
 pub mod apic;
+pub mod context;
 pub mod exceptions;
 mod gdt;
 

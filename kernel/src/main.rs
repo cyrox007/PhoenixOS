@@ -27,6 +27,7 @@ const VM_TEST_ADDRESS: u64 = 0x0000_6000_0000_0000;
 const VM_TEST_VALUE: u64 = 0x5048_4f45_4e49_584f;
 const HEAP_TEST_VALUE: u64 = 0x4845_4150_5f4f_4b21;
 const APIC_TIMER_TEST_TICKS: u64 = 3;
+const THREAD_CONTEXT_TEST_STACK_SIZE: usize = 64 * 1024;
 
 pub static BOOTLOADER_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
@@ -92,6 +93,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     heap_self_test();
     serial::line(&mut out, "INFO", format_args!("kernel heap self-test: OK"));
 
+    thread_context_self_test();
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("thread context self-test: OK"),
+    );
+
     init_apic_timer(&mut out, &mut page_table, &mut frames);
 
     render_boot_banner(boot_info, &mut out);
@@ -118,6 +126,55 @@ fn log_memory_summary(out: &mut serial::Com1, memory: MemorySummary) {
             memory.usable_bytes / (1024 * 1024)
         ),
     );
+}
+
+struct ThreadContextTestState {
+    main: *mut arch::x86_64::context::Context,
+    worker: *mut arch::x86_64::context::Context,
+    completed: bool,
+}
+
+fn thread_context_self_test() {
+    let mut stack = Vec::new();
+    stack.resize(THREAD_CONTEXT_TEST_STACK_SIZE, 0);
+
+    let mut main = arch::x86_64::context::Context::empty();
+    let mut worker = arch::x86_64::context::Context::empty();
+
+    let mut state = ThreadContextTestState {
+        main: &mut main,
+        worker: &mut worker,
+        completed: false,
+    };
+
+    let argument = &mut state as *mut ThreadContextTestState as usize;
+    worker = arch::x86_64::context::Context::for_stack(
+        stack.as_mut_slice(),
+        thread_context_test_entry,
+        argument,
+    )
+    .expect("не удалось подготовить стек тестового потока");
+
+    unsafe {
+        arch::x86_64::context::switch(&mut main, &worker);
+    }
+
+    if !state.completed {
+        panic!("тестовый поток не вернул управление основному контексту");
+    }
+}
+
+extern "C" fn thread_context_test_entry(argument: usize) -> ! {
+    let state = unsafe { &mut *(argument as *mut ThreadContextTestState) };
+    state.completed = true;
+
+    unsafe {
+        arch::x86_64::context::switch(&mut *state.worker, &*state.main);
+    }
+
+    loop {
+        core::hint::spin_loop();
+    }
 }
 
 fn init_apic_timer(

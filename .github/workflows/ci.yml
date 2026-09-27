@@ -32,6 +32,9 @@ jobs:
       - name: Проверить форматирование
         run: cargo fmt --all -- --check
 
+      - name: Проверить реестр загрузочных маркеров
+        run: bash scripts/test-check-serial-markers.sh
+
       - name: Запустить модульные проверки ядра
         run: |
           cargo test -p phoenix-framebuffer
@@ -48,13 +51,7 @@ jobs:
 
       - name: Проверить ядро в QEMU
         env:
-          PHOENIXOS_EXPECT_SERIAL: "exception: breakpoint"
-          PHOENIXOS_EXPECT_SERIAL_2: "virtual memory self-test: OK"
-          PHOENIXOS_EXPECT_SERIAL_3: "kernel heap self-test: OK"
-          PHOENIXOS_EXPECT_SERIAL_4: "apic timer self-test: OK"
-          PHOENIXOS_EXPECT_SERIAL_5: "thread context self-test: OK"
-          PHOENIXOS_EXPECT_SERIAL_6: "kernel thread object self-test: OK"
-          PHOENIXOS_EXPECT_SERIAL_7: "kernel thread scheduler self-test: OK"
+          PHOENIXOS_MARKERS_FILE: tests/qemu/bootstrap.markers
         run: bash scripts/run-qemu-ci.sh artifacts/phoenixos-uefi.img
 
       - name: Сохранить UEFI-образ

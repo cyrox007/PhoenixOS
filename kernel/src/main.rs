@@ -27,6 +27,8 @@ use x86_64::structures::paging::{Page, PageTableFlags, Size4KiB};
 const SYSTEM_MEMORY_RANGE_CAPACITY: usize = 256;
 const VM_TEST_ADDRESS: u64 = 0x0000_6000_0000_0000;
 const VM_TEST_VALUE: u64 = 0x5048_4f45_4e49_584f;
+const PROCESS_VM_TEST_ADDRESS: u64 = 0x0000_0000_4000_0000;
+const PROCESS_VM_TEST_VALUE: u64 = 0x5052_4f43_5f56_4d21;
 const HEAP_TEST_VALUE: u64 = 0x4845_4150_5f4f_4b21;
 const APIC_TIMER_TEST_TICKS: u64 = 3;
 const THREAD_CONTEXT_TEST_STACK_SIZE: usize = 64 * 1024;
@@ -85,6 +87,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         &mut out,
         "INFO",
         format_args!("process page table root self-test: OK"),
+    );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("process user mapping self-test: OK"),
     );
 
     let heap_stats =
@@ -353,6 +360,37 @@ fn inactive_page_table_self_test(
 
     if !root.user_half_is_empty() || !root.kernel_half_matches_active(physical_memory_offset) {
         panic!("корень процесса неверно унаследовал отображения ядра");
+    }
+
+    let process_page = Page::<Size4KiB>::containing_address(VirtAddr::new(PROCESS_VM_TEST_ADDRESS));
+    let process_frame = root
+        .map_owned_user_4k(process_page, PageTableFlags::WRITABLE, frames)
+        .expect("не удалось создать пользовательское отображение процесса");
+
+    let translated = root
+        .translate_user_addr(VirtAddr::new(PROCESS_VM_TEST_ADDRESS))
+        .expect("пользовательское отображение процесса не транслируется");
+
+    if translated != process_frame.start_address() {
+        panic!("пользовательское отображение процесса указывает на неверный кадр");
+    }
+
+    let physical_ptr =
+        (physical_memory_offset + process_frame.start_address().as_u64()).as_mut_ptr::<u64>();
+    unsafe {
+        physical_ptr.write_volatile(PROCESS_VM_TEST_VALUE);
+    }
+
+    if unsafe { physical_ptr.read_volatile() } != PROCESS_VM_TEST_VALUE {
+        panic!("физическая страница процесса повредила контрольное значение");
+    }
+
+    let released = root
+        .destroy_user_half(frames)
+        .expect("не удалось уничтожить пользовательскую половину адресного пространства");
+
+    if released < 4 || !root.user_half_is_empty() {
+        panic!("пользовательские страницы процесса освобождены некорректно");
     }
 
     // Разделяемые ядерные записи не принадлежат процессу, поэтому очищаем их

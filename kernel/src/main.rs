@@ -419,9 +419,7 @@ fn process_region_mapping_self_test(
     physical_memory_offset: VirtAddr,
     frames: &mut SystemFrameAllocator<SYSTEM_MEMORY_RANGE_CAPACITY>,
 ) {
-    use phoenix_process::{
-        AddressSpaceId, MemoryPermissions, RegionKind, VirtualRegion,
-    };
+    use phoenix_process::{AddressSpaceId, MemoryPermissions, RegionKind, VirtualRegion};
 
     let free_before = frames.free_frames();
     let mut space = unsafe {

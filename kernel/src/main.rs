@@ -1548,6 +1548,7 @@ fn user_mode_syscall_self_test(
                 &mut space,
                 &mut capabilities,
                 &mut endpoint_registry,
+                &mut process_capability_registry,
             )
         }
         .expect("контекст пользовательского системного вызова уже установлен");

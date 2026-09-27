@@ -1,7 +1,7 @@
 use phoenix_elf_loader::{ElfError, ElfImage, ElfType, LoadSegment};
-use phoenix_process::{MemoryPermissions, RegionKind, VirtualRegion, PAGE_SIZE};
-use x86_64::structures::paging::{FrameAllocator, FrameDeallocator, Size4KiB};
+use phoenix_process::{MemoryPermissions, PAGE_SIZE, RegionKind, VirtualRegion};
 use x86_64::VirtAddr;
+use x86_64::structures::paging::{FrameAllocator, FrameDeallocator, Size4KiB};
 
 use crate::process_space::{ProcessAddressSpace, ProcessAddressSpaceError};
 

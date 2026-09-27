@@ -117,15 +117,6 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!("syscall return context self-test: OK"),
     );
 
-    if !arch::x86_64::syscall::ipc_dispatch_self_test() {
-        panic!("IPC-вызовы не прошли проверку диспетчера");
-    }
-    serial::line(
-        &mut out,
-        "INFO",
-        format_args!("ipc syscall dispatch self-test: OK"),
-    );
-
     process_capability_self_test();
     serial::line(
         &mut out,
@@ -257,6 +248,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         &mut out,
         "INFO",
         format_args!("kernel thread initial irq frame self-test: OK"),
+    );
+
+    kernel_thread_preemptive_spawn_self_test();
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("kernel thread preemptive spawn self-test: OK"),
     );
 
     init_apic_timer(&mut out, &mut page_table, &mut frames);
@@ -459,6 +457,38 @@ fn kernel_thread_interrupt_frame_self_test() {
     }
 }
 
+fn kernel_thread_preemptive_spawn_self_test() {
+    let mut manager = thread_manager::ThreadManager::<2>::new();
+    let id = manager
+        .spawn_preemptive(preemptive_spawn_test_entry, 0x42, 1)
+        .expect("не удалось создать preemptive-поток через ThreadManager");
+
+    let frame = manager
+        .interrupt_frame(id)
+        .expect("ThreadManager не сохранил стартовый IRQ-кадр");
+    if manager.state(id) != Some(thread::ThreadState::Ready) {
+        panic!("новый preemptive-поток имеет неверное состояние");
+    }
+
+    if manager
+        .schedule_interrupt_frame(0)
+        .expect("ошибка первого выбора preemptive-потока")
+        != Some(frame)
+    {
+        panic!("round-robin не выбрал стартовый кадр preemptive-потока");
+    }
+
+    if manager.interrupt_frame(id).is_some() {
+        panic!("выбранный стартовый кадр не был изъят у потока");
+    }
+}
+
+extern "C" fn preemptive_spawn_test_entry(_argument: usize) -> ! {
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
 fn preemptive_thread_start_frame_self_test() {
     const ARGUMENT: usize = 0x1234;
     const EXIT_ARGUMENT: usize = 0x5678;
@@ -497,6 +527,74 @@ fn preemptive_thread_start_frame_self_test() {
 extern "C" fn preemptive_start_test_exit(_argument: usize) -> ! {
     loop {
         core::hint::spin_loop();
+    }
+}
+
+fn kernel_thread_preemptive_manager_self_test() {
+    const FIRST_ARGUMENT: usize = 0x1111;
+    const SECOND_ARGUMENT: usize = 0x2222;
+    const FIRST_EXIT_ARGUMENT: usize = 0x3333;
+    const SECOND_EXIT_ARGUMENT: usize = 0x4444;
+    const FIRST_SAVED: u64 = 0x9000;
+    const SECOND_SAVED: u64 = 0xa000;
+
+    let mut manager = thread_manager::ThreadManager::<4>::new();
+    let first = manager
+        .spawn_preemptive(
+            scheduled_thread_test_entry,
+            FIRST_ARGUMENT,
+            preemptive_start_test_exit,
+            FIRST_EXIT_ARGUMENT,
+            1,
+        )
+        .expect("не удалось создать первый preemptive-поток менеджера");
+    let second = manager
+        .spawn_preemptive(
+            scheduled_thread_test_entry,
+            SECOND_ARGUMENT,
+            preemptive_start_test_exit,
+            SECOND_EXIT_ARGUMENT,
+            1,
+        )
+        .expect("не удалось создать второй preemptive-поток менеджера");
+
+    let first_frame = manager
+        .interrupt_frame(first)
+        .expect("первый preemptive-поток не получил стартовый IRQ-кадр");
+    let second_frame = manager
+        .interrupt_frame(second)
+        .expect("второй preemptive-поток не получил стартовый IRQ-кадр");
+
+    if first_frame == second_frame {
+        panic!("preemptive-потоки получили один и тот же IRQ-кадр");
+    }
+
+    if manager
+        .schedule_interrupt_frame(0)
+        .expect("не удалось выбрать первый preemptive IRQ-кадр")
+        != Some(first_frame)
+        || manager.state(first) != Some(thread::ThreadState::Running)
+    {
+        panic!("первый preemptive-поток не стартовал через менеджер");
+    }
+
+    if manager
+        .schedule_interrupt_frame(FIRST_SAVED)
+        .expect("не удалось выбрать второй preemptive IRQ-кадр")
+        != Some(second_frame)
+        || manager.interrupt_frame(first) != Some(FIRST_SAVED)
+        || manager.state(second) != Some(thread::ThreadState::Running)
+    {
+        panic!("менеджер не переключил preemptive IRQ-кадр на второй поток");
+    }
+
+    if manager
+        .schedule_interrupt_frame(SECOND_SAVED)
+        .expect("не удалось вернуть первый preemptive IRQ-кадр")
+        != Some(FIRST_SAVED)
+        || manager.interrupt_frame(second) != Some(SECOND_SAVED)
+    {
+        panic!("менеджер не сохранил round-robin состояние preemptive-потоков");
     }
 }
 

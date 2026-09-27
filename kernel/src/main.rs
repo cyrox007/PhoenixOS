@@ -1280,7 +1280,7 @@ fn user_mode_syscall_self_test(
 
     let free_before = frames.free_frames();
     let mut space = unsafe {
-        process_space::ProcessAddressSpace::<2>::new(
+        process_space::ProcessAddressSpace::<{ process_space::PROCESS_REGION_CAPACITY }>::new(
             AddressSpaceId(44),
             physical_memory_offset,
             frames,
@@ -1320,15 +1320,75 @@ fn user_mode_syscall_self_test(
         .write_user_bytes(VirtAddr::new(USER_MODE_TEST_CODE_ADDRESS), image)
         .expect("не удалось загрузить пользовательскую самопроверку");
 
+    let ipc_words_address = USER_MODE_TEST_STACK_ADDRESS;
+    let send_words = [0x1122_3344_5566_7788_u64, 0x8877_6655_4433_2211_u64];
+    for (index, word) in send_words.iter().enumerate() {
+        space
+            .write_user_bytes(
+                VirtAddr::new(ipc_words_address + index as u64 * 8),
+                &word.to_le_bytes(),
+            )
+            .expect("не удалось подготовить IPC send-буфер системного вызова");
+    }
+
+    let receive_words = [0x0123_4567_89ab_cdef_u64, 0xfedc_ba98_7654_3210_u64];
+    let context_guard = unsafe { arch::x86_64::syscall::install_current_process_context(&mut space) }
+        .expect("контекст текущего процесса уже установлен");
+    let context_ok = arch::x86_64::syscall::ipc_user_memory_context_self_test(
+        phoenix_syscall_abi::IpcSendArguments {
+            endpoint: phoenix_syscall_abi::PackedCapabilityHandle::new(1, 1),
+            words_address: ipc_words_address,
+            word_count: send_words.len() as u64,
+            transferred_capability: None,
+            flags: 0,
+        },
+        phoenix_syscall_abi::IpcSendArguments {
+            endpoint: phoenix_syscall_abi::PackedCapabilityHandle::new(1, 1),
+            words_address: USER_MODE_TEST_STACK_ADDRESS + phoenix_process::PAGE_SIZE,
+            word_count: 1,
+            transferred_capability: None,
+            flags: 0,
+        },
+        phoenix_syscall_abi::IpcReceiveArguments {
+            endpoint: phoenix_syscall_abi::PackedCapabilityHandle::new(1, 1),
+            words_address: ipc_words_address,
+            word_capacity: receive_words.len() as u64,
+            metadata_address: USER_MODE_TEST_STACK_ADDRESS + 0x100,
+            flags: 0,
+        },
+        &receive_words,
+    );
+    drop(context_guard);
+
+    let mut copied_back = [0_u8; 16];
+    space
+        .read_user_bytes(VirtAddr::new(ipc_words_address), &mut copied_back)
+        .expect("не удалось проверить IPC copy-out из контекста системного вызова");
+    let copied_receive_words = [
+        u64::from_le_bytes(copied_back[..8].try_into().unwrap()),
+        u64::from_le_bytes(copied_back[8..].try_into().unwrap()),
+    ];
+    if !context_ok || copied_receive_words != receive_words {
+        panic!("IPC-память не связана с контекстом текущего системного вызова");
+    }
+    serial::emergency(format_args!(
+        "[INFO] ipc syscall memory context self-test: OK\n"
+    ));
+
     let stack_pointer = USER_MODE_TEST_STACK_ADDRESS + phoenix_process::PAGE_SIZE - 16;
 
     let passed = x86_64::instructions::interrupts::without_interrupts(|| {
+        let context_guard = unsafe {
+            arch::x86_64::syscall::install_current_process_context(&mut space)
+        }
+        .expect("контекст пользовательского системного вызова уже установлен");
         let guard = unsafe { space.activate() };
         let result = arch::x86_64::syscall::run_user_mode_self_test(
             USER_MODE_TEST_CODE_ADDRESS,
             stack_pointer,
         );
         drop(guard);
+        drop(context_guard);
         result
     });
 

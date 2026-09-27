@@ -1,10 +1,13 @@
 use core::arch::{global_asm, x86_64::__cpuid};
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use phoenix_syscall_abi::{
-    IpcReceiveArguments, IpcSendArguments, PackedCapabilityHandle, SYSCALL_IPC_RECEIVE,
-    SYSCALL_IPC_SEND, SyscallRequest, SyscallReturn, SyscallStatus,
+    IpcReceiveArguments, IpcSendArguments, NO_TRANSFERRED_CAPABILITY, PackedCapabilityHandle,
+    SYSCALL_IPC_RECEIVE, SYSCALL_IPC_SEND, SyscallRequest, SyscallReturn, SyscallStatus,
 };
+
+use crate::ipc_user_memory::{self, IpcUserMemoryError};
+use crate::process_space::{PROCESS_REGION_CAPACITY, ProcessAddressSpace};
 
 const IA32_EFER: u32 = 0xc000_0080;
 const IA32_STAR: u32 = 0xc000_0081;
@@ -44,6 +47,68 @@ const IPC_INLINE_WORD_CAPACITY: u64 = 6;
 const ENTRY_STACK_SIZE: u64 = 64 * 1024;
 
 static USER_SELF_TEST_RESULT: AtomicU64 = AtomicU64::new(0);
+static CURRENT_PROCESS_ADDRESS_SPACE: AtomicUsize = AtomicUsize::new(0);
+
+pub struct CurrentProcessContextGuard {
+    address_space: usize,
+}
+
+impl Drop for CurrentProcessContextGuard {
+    fn drop(&mut self) {
+        let _ = CURRENT_PROCESS_ADDRESS_SPACE.compare_exchange(
+            self.address_space,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurrentProcessContextError {
+    NotInstalled,
+    UserMemory(IpcUserMemoryError),
+}
+
+/// Registers the address space used by the current system-call execution context.
+///
+/// # Safety
+///
+/// `space` must remain alive and exclusively owned until the returned guard is
+/// dropped. The early implementation is single-CPU and callers must keep
+/// interrupts disabled while user code can enter the system-call dispatcher.
+pub unsafe fn install_current_process_context(
+    space: &mut ProcessAddressSpace<PROCESS_REGION_CAPACITY>,
+) -> Option<CurrentProcessContextGuard> {
+    let address_space = space as *mut ProcessAddressSpace<PROCESS_REGION_CAPACITY> as usize;
+    CURRENT_PROCESS_ADDRESS_SPACE
+        .compare_exchange(0, address_space, Ordering::AcqRel, Ordering::Acquire)
+        .ok()
+        .map(|_| CurrentProcessContextGuard { address_space })
+}
+
+fn with_current_process_address_space<T>(
+    operation: impl FnOnce(&mut ProcessAddressSpace<PROCESS_REGION_CAPACITY>) -> T,
+) -> Option<T> {
+    let address_space = CURRENT_PROCESS_ADDRESS_SPACE.load(Ordering::Acquire);
+    if address_space == 0 {
+        return None;
+    }
+
+    let space = unsafe { &mut *(address_space as *mut ProcessAddressSpace<PROCESS_REGION_CAPACITY>) };
+    Some(operation(space))
+}
+
+pub fn copy_ipc_receive_words_to_current_process(
+    arguments: IpcReceiveArguments,
+    words: &[u64],
+) -> Result<(), CurrentProcessContextError> {
+    with_current_process_address_space(|space| {
+        ipc_user_memory::copy_receive_words(space, arguments, words)
+    })
+    .ok_or(CurrentProcessContextError::NotInstalled)?
+    .map_err(CurrentProcessContextError::UserMemory)
+}
 
 #[unsafe(export_name = "phoenix_user_test_active")]
 static mut USER_TEST_ACTIVE: u64 = 0;
@@ -507,9 +572,10 @@ fn dispatch(request: SyscallRequest) -> SyscallReturn {
 }
 
 fn dispatch_ipc_send(request: SyscallRequest) -> SyscallReturn {
-    let words_address = request.arguments[1];
-    let word_count = request.arguments[2];
-    let flags = request.arguments[4];
+    let arguments = ipc_send_arguments(request);
+    let words_address = arguments.words_address;
+    let word_count = arguments.word_count;
+    let flags = arguments.flags;
     let reserved = request.arguments[5];
 
     if flags != 0 || reserved != 0 || word_count > IPC_INLINE_WORD_CAPACITY {
@@ -520,14 +586,24 @@ fn dispatch_ipc_send(request: SyscallRequest) -> SyscallReturn {
         return syscall_failure(STATUS_BAD_ARGUMENTS);
     }
 
+    if matches!(
+        with_current_process_address_space(|space| {
+            ipc_user_memory::copy_send_words(space, arguments)
+        }),
+        Some(Err(_))
+    ) {
+        return syscall_failure(STATUS_BAD_ARGUMENTS);
+    }
+
     syscall_failure(STATUS_OPERATION_NOT_READY)
 }
 
 fn dispatch_ipc_receive(request: SyscallRequest) -> SyscallReturn {
-    let words_address = request.arguments[1];
-    let word_capacity = request.arguments[2];
-    let metadata_address = request.arguments[3];
-    let flags = request.arguments[4];
+    let arguments = ipc_receive_arguments(request);
+    let words_address = arguments.words_address;
+    let word_capacity = arguments.word_capacity;
+    let metadata_address = arguments.metadata_address;
+    let flags = arguments.flags;
     let reserved = request.arguments[5];
 
     if flags != 0 || reserved != 0 {
@@ -540,7 +616,52 @@ fn dispatch_ipc_receive(request: SyscallRequest) -> SyscallReturn {
         return syscall_failure(STATUS_BAD_ARGUMENTS);
     }
 
+    if matches!(
+        with_current_process_address_space(|space| {
+            ipc_user_memory::copy_receive_words(space, arguments, &[])
+        }),
+        Some(Err(_))
+    ) {
+        return syscall_failure(STATUS_BAD_ARGUMENTS);
+    }
+
     syscall_failure(STATUS_OPERATION_NOT_READY)
+}
+
+fn ipc_send_arguments(request: SyscallRequest) -> IpcSendArguments {
+    IpcSendArguments {
+        endpoint: PackedCapabilityHandle::from_raw(request.arguments[0]),
+        words_address: request.arguments[1],
+        word_count: request.arguments[2],
+        transferred_capability: (request.arguments[3] != NO_TRANSFERRED_CAPABILITY)
+            .then(|| PackedCapabilityHandle::from_raw(request.arguments[3])),
+        flags: request.arguments[4],
+    }
+}
+
+fn ipc_receive_arguments(request: SyscallRequest) -> IpcReceiveArguments {
+    IpcReceiveArguments {
+        endpoint: PackedCapabilityHandle::from_raw(request.arguments[0]),
+        words_address: request.arguments[1],
+        word_capacity: request.arguments[2],
+        metadata_address: request.arguments[3],
+        flags: request.arguments[4],
+    }
+}
+
+pub fn ipc_user_memory_context_self_test(
+    send: IpcSendArguments,
+    unmapped_send: IpcSendArguments,
+    receive: IpcReceiveArguments,
+    receive_words: &[u64],
+) -> bool {
+    let send_result = dispatch(SyscallRequest::ipc_send(send));
+    let unmapped_result = dispatch(SyscallRequest::ipc_send(unmapped_send));
+    let receive_result = copy_ipc_receive_words_to_current_process(receive, receive_words);
+
+    send_result.status.raw() == u64::from(STATUS_OPERATION_NOT_READY)
+        && unmapped_result.status.raw() == u64::from(STATUS_BAD_ARGUMENTS)
+        && receive_result.is_ok()
 }
 
 pub fn ipc_dispatch_self_test() -> bool {

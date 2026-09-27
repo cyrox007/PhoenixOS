@@ -7,3 +7,4 @@ apic timer self-test: OK
 thread context self-test: OK
 kernel thread object self-test: OK
 kernel thread scheduler self-test: OK
+thread preemption hook self-test: OK

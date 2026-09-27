@@ -125,6 +125,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!("syscall return context self-test: OK"),
     );
 
+    if !arch::x86_64::syscall::process_exit_dispatch_self_test() {
+        panic!("системный вызов завершения процесса не прошёл проверку диспетчера");
+    }
+
     if !arch::x86_64::syscall::ipc_dispatch_self_test() {
         panic!("IPC-вызовы не прошли проверку диспетчера");
     }
@@ -220,6 +224,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         &mut out,
         "INFO",
         format_args!("user mode syscall self-test: OK"),
+    );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("user process exit self-test: OK"),
     );
 
     elf_user_execution_self_test(physical_memory_offset, &mut frames);

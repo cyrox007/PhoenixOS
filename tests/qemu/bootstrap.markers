@@ -31,6 +31,7 @@ process user copy-in self-test: OK
 ipc user word copy self-test: OK
 process cr3 switch self-test: OK
 user mode syscall self-test: OK
+user process exit self-test: OK
 user privilege stack self-test: OK
 syscall msr self-test: OK
 syscall user selectors self-test: OK

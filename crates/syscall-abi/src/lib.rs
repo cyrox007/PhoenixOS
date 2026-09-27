@@ -4,6 +4,7 @@ pub const ABI_VERSION: u32 = 0;
 pub const SYSCALL_ARGUMENT_COUNT: usize = 6;
 pub const SYSCALL_IPC_SEND: u64 = 0x100;
 pub const SYSCALL_IPC_RECEIVE: u64 = 0x101;
+pub const SYSCALL_PROCESS_EXIT: u64 = 0x102;
 pub const NO_TRANSFERRED_CAPABILITY: u64 = u64::MAX;
 
 #[repr(transparent)]
@@ -140,6 +141,10 @@ impl SyscallRequest {
         Self::new(SYSCALL_IPC_RECEIVE, arguments.registers())
     }
 
+    pub const fn process_exit(status: u64) -> Self {
+        Self::new(SYSCALL_PROCESS_EXIT, [status, 0, 0, 0, 0, 0])
+    }
+
     pub const fn argument(&self, index: usize) -> Option<u64> {
         if index < SYSCALL_ARGUMENT_COUNT {
             Some(self.arguments[index])
@@ -219,6 +224,14 @@ mod tests {
         assert_eq!(request.argument(3), Some(40));
         assert_eq!(request.argument(5), Some(60));
         assert_eq!(request.argument(6), None);
+    }
+
+    #[test]
+    fn process_exit_uses_status_and_zeroes_reserved_arguments() {
+        let request = SyscallRequest::process_exit(0x1234_5678_9abc_def0);
+
+        assert_eq!(request.number, SYSCALL_PROCESS_EXIT);
+        assert_eq!(request.arguments, [0x1234_5678_9abc_def0, 0, 0, 0, 0, 0]);
     }
 
     #[test]

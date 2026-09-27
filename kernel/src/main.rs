@@ -1,13 +1,20 @@
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
+#![feature(alloc_error_handler)]
+
+extern crate alloc;
 
 mod arch;
+mod heap;
 mod qemu;
 mod serial;
 
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use bootloader_api::config::{BootloaderConfig, Mapping};
 use bootloader_api::{BootInfo, entry_point};
+use core::alloc::Layout;
 use phoenix_framebuffer::draw_boot_banner;
 use phoenix_memory::{MemorySummary, SystemFrameAllocator};
 use phoenix_vm::ActivePageTable;
@@ -18,6 +25,7 @@ use x86_64::structures::paging::{Page, PageTableFlags, Size4KiB};
 const SYSTEM_MEMORY_RANGE_CAPACITY: usize = 256;
 const VM_TEST_ADDRESS: u64 = 0x0000_6000_0000_0000;
 const VM_TEST_VALUE: u64 = 0x5048_4f45_4e49_584f;
+const HEAP_TEST_VALUE: u64 = 0x4845_4150_5f4f_4b21;
 
 pub static BOOTLOADER_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
@@ -66,6 +74,22 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         "INFO",
         format_args!("virtual memory self-test: OK"),
     );
+
+    let heap_stats =
+        heap::init(&mut page_table, &mut frames).expect("не удалось инициализировать кучу ядра");
+
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "kernel heap: size={} KiB free={} KiB",
+            heap_stats.size / 1024,
+            heap_stats.free / 1024
+        ),
+    );
+
+    heap_self_test();
+    serial::line(&mut out, "INFO", format_args!("kernel heap self-test: OK"));
 
     render_boot_banner(boot_info, &mut out);
 
@@ -146,6 +170,38 @@ fn virtual_memory_self_test(
         .expect("не удалось вернуть тестовую физическую страницу");
 }
 
+fn heap_self_test() {
+    let before = heap::stats();
+
+    let boxed = Box::new(HEAP_TEST_VALUE);
+    if *boxed != HEAP_TEST_VALUE {
+        panic!("куча вернула повреждённое значение Box");
+    }
+
+    let mut values = Vec::with_capacity(128);
+    for value in 0_u64..128 {
+        values.push(value);
+    }
+
+    let expected_sum = (0_u64..128).sum::<u64>();
+    if values.iter().copied().sum::<u64>() != expected_sum {
+        panic!("куча повредила содержимое Vec");
+    }
+
+    let during = heap::stats();
+    if during.used <= before.used {
+        panic!("самопроверка кучи не зафиксировала выделение памяти");
+    }
+
+    drop(values);
+    drop(boxed);
+
+    let after = heap::stats();
+    if after.used != before.used {
+        panic!("куча не вернула память после освобождения тестовых объектов");
+    }
+}
+
 fn render_boot_banner(boot_info: &'static mut BootInfo, out: &mut serial::Com1) {
     let Some(framebuffer) = boot_info.framebuffer.as_mut() else {
         serial::line(out, "WARN", format_args!("framebuffer: unavailable"));
@@ -165,6 +221,16 @@ fn render_boot_banner(boot_info: &'static mut BootInfo, out: &mut serial::Com1) 
             info.width, info.height, info.bytes_per_pixel
         ),
     );
+}
+
+#[alloc_error_handler]
+fn allocation_error(layout: Layout) -> ! {
+    serial::emergency(format_args!(
+        "\n[OOM] не удалось выделить {} байт с выравниванием {}\n",
+        layout.size(),
+        layout.align()
+    ));
+    qemu::exit(ExitCode::Failure);
 }
 
 #[panic_handler]

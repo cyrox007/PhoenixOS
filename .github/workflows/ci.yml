@@ -45,10 +45,11 @@ jobs:
           test -f "$IMAGE"
           cp "$IMAGE" artifacts/phoenixos-uefi.img
 
-      - name: Проверить исключения и виртуальную память в QEMU
+      - name: Проверить память и исключения в QEMU
         env:
           PHOENIXOS_EXPECT_SERIAL: "exception: breakpoint"
           PHOENIXOS_EXPECT_SERIAL_2: "virtual memory self-test: OK"
+          PHOENIXOS_EXPECT_SERIAL_3: "kernel heap self-test: OK"
         run: bash scripts/run-qemu-ci.sh artifacts/phoenixos-uefi.img
 
       - name: Сохранить UEFI-образ

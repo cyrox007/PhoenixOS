@@ -1447,8 +1447,14 @@ mod tests {
             .commit_planned_chain(&[4, 5, 6], &mut sector_buffer)
             .unwrap();
 
-        assert_eq!(reader.read_entry(4, &mut sector_buffer), Ok(FatEntry::Data(5)));
-        assert_eq!(reader.read_entry(5, &mut sector_buffer), Ok(FatEntry::Data(6)));
+        assert_eq!(
+            reader.read_entry(4, &mut sector_buffer),
+            Ok(FatEntry::Data(5))
+        );
+        assert_eq!(
+            reader.read_entry(5, &mut sector_buffer),
+            Ok(FatEntry::Data(6))
+        );
         assert_eq!(
             reader.read_entry(6, &mut sector_buffer),
             Ok(FatEntry::EndOfChain)

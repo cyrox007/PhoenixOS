@@ -174,6 +174,7 @@ pub enum FatMutationError {
     Read(FatReadError),
     UnsupportedValue,
     NoFreeCluster,
+    PlanBufferTooSmall,
 }
 
 impl From<FatReadError> for FatMutationError {
@@ -371,6 +372,62 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
             return Err(FatFileError::ChainTooShort);
         }
         Ok(written)
+    }
+
+    pub fn plan_free_clusters(
+        &mut self,
+        count: usize,
+        start_cluster: u32,
+        output: &mut [u32],
+        sector_buffer: &mut [u8],
+    ) -> Result<usize, FatMutationError> {
+        self.validate_sector_buffer(sector_buffer)?;
+        if count > output.len() {
+            return Err(FatMutationError::PlanBufferTooSmall);
+        }
+        if count == 0 {
+            return Ok(0);
+        }
+        if matches!(self.boot.kind, FatKind::Fat12) {
+            return Err(FatReadError::UnsupportedFat12.into());
+        }
+
+        let last = self
+            .boot
+            .data_cluster_count
+            .checked_add(1)
+            .ok_or(FatReadError::ArithmeticOverflow)?;
+        let start = start_cluster.max(2);
+        if start > last {
+            return Err(FatReadError::ClusterOutOfRange.into());
+        }
+
+        let mut found = 0_usize;
+        for cluster in start..=last {
+            if !matches!(self.read_entry(cluster, sector_buffer)?, FatEntry::Free) {
+                continue;
+            }
+
+            output[found] = cluster;
+            found += 1;
+            if found == count {
+                return Ok(found);
+            }
+        }
+
+        for cluster in 2..start {
+            if !matches!(self.read_entry(cluster, sector_buffer)?, FatEntry::Free) {
+                continue;
+            }
+
+            output[found] = cluster;
+            found += 1;
+            if found == count {
+                return Ok(found);
+            }
+        }
+
+        Err(FatMutationError::NoFreeCluster)
     }
 
     pub fn find_free_cluster(
@@ -1330,6 +1387,54 @@ mod tests {
                 |_, _| true,
             ),
             Err(FatDirectoryError::LongNameBufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn plans_free_clusters_without_modifying_table() {
+        let boot = FatBootSector {
+            kind: FatKind::Fat32,
+            bytes_per_sector: 512,
+            sectors_per_cluster: 1,
+            reserved_sectors: 1,
+            fat_count: 1,
+            root_entry_count: 0,
+            total_sectors: 7,
+            fat_size_sectors: 1,
+            first_data_sector: 2,
+            data_cluster_count: 5,
+            root_cluster: Some(2),
+        };
+        let mut device = phoenix_block::MemoryBlockDevice::<512, 7>::new();
+        let mut fat_sector = [0_u8; 512];
+        fat_sector[8..12].copy_from_slice(&3_u32.to_le_bytes());
+        fat_sector[12..16].copy_from_slice(&0x0fff_fff8_u32.to_le_bytes());
+        fat_sector[20..24].copy_from_slice(&0x0fff_fff8_u32.to_le_bytes());
+        device.write_blocks(1, &fat_sector).unwrap();
+
+        let mut reader = FatTableReader::new(&mut device, boot).unwrap();
+        let mut sector_buffer = [0_u8; 512];
+        let mut plan = [0_u32; 2];
+
+        assert_eq!(
+            reader.plan_free_clusters(2, 5, &mut plan, &mut sector_buffer),
+            Ok(2)
+        );
+        assert_eq!(plan, [6, 4]);
+        assert_eq!(reader.read_entry(6, &mut sector_buffer), Ok(FatEntry::Free));
+        assert_eq!(reader.read_entry(4, &mut sector_buffer), Ok(FatEntry::Free));
+    }
+
+    #[test]
+    fn free_cluster_plan_rejects_small_output_buffer() {
+        let mut device = phoenix_block::MemoryBlockDevice::<512, 4>::new();
+        let mut reader = FatTableReader::new(&mut device, fat32_boot()).unwrap();
+        let mut sector_buffer = [0_u8; 512];
+        let mut plan = [0_u32; 1];
+
+        assert_eq!(
+            reader.plan_free_clusters(2, 2, &mut plan, &mut sector_buffer),
+            Err(FatMutationError::PlanBufferTooSmall)
         );
     }
 

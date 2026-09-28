@@ -655,15 +655,10 @@ mod tests {
         let mut sector_buffer = [0_u8; 512];
         let mut visited = None;
         reader
-            .read_directory(
-                FatDirectory::Root,
-                &mut [],
-                &mut sector_buffer,
-                |entry| {
-                    visited = Some(entry);
-                    false
-                },
-            )
+            .read_directory(FatDirectory::Root, &mut [], &mut sector_buffer, |entry| {
+                visited = Some(entry);
+                false
+            })
             .unwrap();
 
         assert_eq!(

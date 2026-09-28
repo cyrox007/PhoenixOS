@@ -525,6 +525,7 @@ phoenix_user_test_enter:
     push r8
     push rdx
     push rdi
+    mov rdi, r9
     iretq
     .size phoenix_user_test_enter, .-phoenix_user_test_enter
 
@@ -543,6 +544,51 @@ phoenix_user_process_return_from_syscall:
     .global phoenix_user_test_image_start
     .global phoenix_user_test_image_end
 phoenix_user_test_image_start:
+    test rdi, rdi
+    je 3f
+    cmp dword ptr [rdi + 0], 0
+    jne 3f
+    cmp dword ptr [rdi + 4], 0
+    jne 3f
+    cmp qword ptr [rdi + 8], 2
+    jne 3f
+    cmp qword ptr [rdi + 16], 0
+    je 3f
+    cmp qword ptr [rdi + 24], 1
+    jne 3f
+    cmp qword ptr [rdi + 32], 0
+    je 3f
+
+    mov r12, [rdi + 16]
+    cmp qword ptr [r12 + 8], 12
+    jne 3f
+    mov r13, [r12]
+    mov r14, 0x2d78696e656f6870
+    cmp qword ptr [r13], r14
+    jne 3f
+    cmp dword ptr [r13 + 8], 0x74736574
+    jne 3f
+    cmp qword ptr [r12 + 24], 11
+    jne 3f
+    mov r13, [r12 + 16]
+    mov r14, 0x742d666c65732d2d
+    cmp qword ptr [r13], r14
+    jne 3f
+    cmp word ptr [r13 + 8], 0x7365
+    jne 3f
+    cmp byte ptr [r13 + 10], 0x74
+    jne 3f
+
+    mov r12, [rdi + 32]
+    cmp qword ptr [r12 + 8], 9
+    jne 3f
+    mov r13, [r12]
+    mov r14, 0x6d65713d45444f4d
+    cmp qword ptr [r13], r14
+    jne 3f
+    cmp byte ptr [r13 + 8], 0x75
+    jne 3f
+
     mov rax, -1
     mov rdi, 0x11
     mov rsi, 0x2233
@@ -606,6 +652,7 @@ unsafe extern "C" {
         code_selector: u64,
         data_selector: u64,
         cpu_flags: u64,
+        start_info_address: u64,
     );
 }
 
@@ -793,6 +840,14 @@ pub fn run_user_process(
     instruction_pointer: u64,
     stack_pointer: u64,
 ) -> Result<u64, UserProcessRunError> {
+    run_user_process_with_start_info(instruction_pointer, stack_pointer, 0)
+}
+
+pub fn run_user_process_with_start_info(
+    instruction_pointer: u64,
+    stack_pointer: u64,
+    start_info_address: u64,
+) -> Result<u64, UserProcessRunError> {
     let context = UserReturnContext::new(instruction_pointer, stack_pointer, RFLAGS_RESERVED_ONE)
         .map_err(UserProcessRunError::InvalidContext)?;
 
@@ -806,6 +861,7 @@ pub fn run_user_process(
             u64::from(super::gdt::user_code_selector_raw()),
             u64::from(super::gdt::user_data_selector_raw()),
             context.cpu_flags,
+            start_info_address,
         );
     }
 
@@ -816,8 +872,13 @@ pub fn run_user_process(
     Ok(USER_PROCESS_EXIT_STATUS.load(Ordering::Acquire))
 }
 
-pub fn run_user_mode_self_test(instruction_pointer: u64, stack_pointer: u64) -> bool {
-    run_user_process(instruction_pointer, stack_pointer) == Ok(USER_SELF_TEST_SUCCESS)
+pub fn run_user_mode_self_test(
+    instruction_pointer: u64,
+    stack_pointer: u64,
+    start_info_address: u64,
+) -> bool {
+    run_user_process_with_start_info(instruction_pointer, stack_pointer, start_info_address)
+        == Ok(USER_SELF_TEST_SUCCESS)
 }
 
 pub fn return_context_self_test() -> bool {

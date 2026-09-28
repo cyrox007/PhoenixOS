@@ -13,5 +13,8 @@ int main(void) {
     if (PHOENIX_FILE_SEEK_END != UINT64_C(2)) {
         return 2;
     }
+    if (PHOENIX_EINVAL != 22 || PHOENIX_ENOSYS != 38) {
+        return 3;
+    }
     return result.status != 0;
 }

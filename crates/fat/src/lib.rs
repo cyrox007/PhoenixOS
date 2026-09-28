@@ -172,6 +172,7 @@ pub enum FatWriteError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FatMutationError {
     Read(FatReadError),
+    Chain(FatChainError),
     UnsupportedValue,
     NoFreeCluster,
     PlanBufferTooSmall,
@@ -189,6 +190,12 @@ impl From<FatReadError> for FatMutationError {
 impl From<BlockError> for FatMutationError {
     fn from(error: BlockError) -> Self {
         Self::Read(FatReadError::Device(error))
+    }
+}
+
+impl From<FatChainError> for FatMutationError {
+    fn from(error: FatChainError) -> Self {
+        Self::Chain(error)
     }
 }
 
@@ -375,6 +382,21 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
             return Err(FatFileError::ChainTooShort);
         }
         Ok(written)
+    }
+
+    pub fn free_detached_chain(
+        &mut self,
+        start_cluster: u32,
+        chain: &mut [u32],
+        sector_buffer: &mut [u8],
+    ) -> Result<usize, FatMutationError> {
+        let chain_length = self.read_chain(start_cluster, chain, sector_buffer)?;
+
+        for cluster in &chain[..chain_length] {
+            self.write_fat_entry(*cluster, FatEntry::Free, sector_buffer)?;
+        }
+
+        Ok(chain_length)
     }
 
     pub fn commit_planned_chain(
@@ -1421,6 +1443,78 @@ mod tests {
                 |_, _| true,
             ),
             Err(FatDirectoryError::LongNameBufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn frees_detached_chain_after_full_validation() {
+        let boot = FatBootSector {
+            kind: FatKind::Fat32,
+            bytes_per_sector: 512,
+            sectors_per_cluster: 1,
+            reserved_sectors: 1,
+            fat_count: 1,
+            root_entry_count: 0,
+            total_sectors: 6,
+            fat_size_sectors: 1,
+            first_data_sector: 2,
+            data_cluster_count: 4,
+            root_cluster: Some(2),
+        };
+        let mut device = phoenix_block::MemoryBlockDevice::<512, 6>::new();
+        let mut fat_sector = [0_u8; 512];
+        fat_sector[8..12].copy_from_slice(&3_u32.to_le_bytes());
+        fat_sector[12..16].copy_from_slice(&0x0fff_fff8_u32.to_le_bytes());
+        device.write_blocks(1, &fat_sector).unwrap();
+
+        let mut reader = FatTableReader::new(&mut device, boot).unwrap();
+        let mut sector_buffer = [0_u8; 512];
+        let mut chain = [0_u32; 2];
+
+        assert_eq!(
+            reader.free_detached_chain(2, &mut chain, &mut sector_buffer),
+            Ok(2)
+        );
+        assert_eq!(reader.read_entry(2, &mut sector_buffer), Ok(FatEntry::Free));
+        assert_eq!(reader.read_entry(3, &mut sector_buffer), Ok(FatEntry::Free));
+    }
+
+    #[test]
+    fn detached_chain_is_not_modified_when_validation_fails() {
+        let boot = FatBootSector {
+            kind: FatKind::Fat32,
+            bytes_per_sector: 512,
+            sectors_per_cluster: 1,
+            reserved_sectors: 1,
+            fat_count: 1,
+            root_entry_count: 0,
+            total_sectors: 6,
+            fat_size_sectors: 1,
+            first_data_sector: 2,
+            data_cluster_count: 4,
+            root_cluster: Some(2),
+        };
+        let mut device = phoenix_block::MemoryBlockDevice::<512, 6>::new();
+        let mut fat_sector = [0_u8; 512];
+        fat_sector[8..12].copy_from_slice(&3_u32.to_le_bytes());
+        fat_sector[12..16].copy_from_slice(&2_u32.to_le_bytes());
+        device.write_blocks(1, &fat_sector).unwrap();
+
+        let mut reader = FatTableReader::new(&mut device, boot).unwrap();
+        let mut sector_buffer = [0_u8; 512];
+        let mut chain = [0_u32; 3];
+
+        assert_eq!(
+            reader.free_detached_chain(2, &mut chain, &mut sector_buffer),
+            Err(FatMutationError::Chain(FatChainError::LoopDetected(2)))
+        );
+        assert_eq!(
+            reader.read_entry(2, &mut sector_buffer),
+            Ok(FatEntry::Data(3))
+        );
+        assert_eq!(
+            reader.read_entry(3, &mut sector_buffer),
+            Ok(FatEntry::Data(2))
         );
     }
 

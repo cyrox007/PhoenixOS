@@ -5,6 +5,20 @@ pub const SYSCALL_ARGUMENT_COUNT: usize = 6;
 pub const SYSCALL_IPC_SEND: u64 = 0x100;
 pub const SYSCALL_IPC_RECEIVE: u64 = 0x101;
 pub const SYSCALL_PROCESS_EXIT: u64 = 0x102;
+pub const SYSCALL_FILE_OPEN: u64 = 0x110;
+pub const SYSCALL_FILE_READ: u64 = 0x111;
+pub const SYSCALL_FILE_WRITE: u64 = 0x112;
+pub const SYSCALL_FILE_SEEK: u64 = 0x113;
+pub const SYSCALL_FILE_CLOSE: u64 = 0x114;
+
+pub const FILE_OPEN_READ: u64 = 1 << 0;
+pub const FILE_OPEN_WRITE: u64 = 1 << 1;
+pub const FILE_OPEN_CREATE: u64 = 1 << 2;
+pub const FILE_OPEN_TRUNCATE: u64 = 1 << 3;
+
+pub const FILE_SEEK_START: u64 = 0;
+pub const FILE_SEEK_CURRENT: u64 = 1;
+pub const FILE_SEEK_END: u64 = 2;
 pub const NO_TRANSFERRED_CAPABILITY: u64 = u64::MAX;
 pub const PROCESS_START_ABI_VERSION: u32 = 0;
 pub const PROCESS_START_MAX_ENTRIES: u64 = 256;
@@ -116,6 +130,83 @@ impl ProcessStartInfo {
             self.argument_vector,
             self.environment_count,
             self.environment_vector,
+        ]
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackedFileDescriptor {
+    pub slot: u32,
+    pub generation: u32,
+}
+
+impl PackedFileDescriptor {
+    pub const fn new(slot: u32, generation: u32) -> Self {
+        Self { slot, generation }
+    }
+
+    pub const fn raw(self) -> u64 {
+        (self.generation as u64) << 32 | self.slot as u64
+    }
+
+    pub const fn from_raw(raw: u64) -> Self {
+        Self {
+            slot: raw as u32,
+            generation: (raw >> 32) as u32,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileOpenArguments {
+    pub path_address: u64,
+    pub path_length: u64,
+    pub flags: u64,
+}
+
+impl FileOpenArguments {
+    pub const fn registers(self) -> [u64; SYSCALL_ARGUMENT_COUNT] {
+        [self.path_address, self.path_length, self.flags, 0, 0, 0]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileIoArguments {
+    pub descriptor: PackedFileDescriptor,
+    pub buffer_address: u64,
+    pub buffer_length: u64,
+}
+
+impl FileIoArguments {
+    pub const fn registers(self) -> [u64; SYSCALL_ARGUMENT_COUNT] {
+        [
+            self.descriptor.raw(),
+            self.buffer_address,
+            self.buffer_length,
+            0,
+            0,
+            0,
+        ]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileSeekArguments {
+    pub descriptor: PackedFileDescriptor,
+    pub offset: i64,
+    pub origin: u64,
+}
+
+impl FileSeekArguments {
+    pub const fn registers(self) -> [u64; SYSCALL_ARGUMENT_COUNT] {
+        [
+            self.descriptor.raw(),
+            self.offset as u64,
+            self.origin,
+            0,
+            0,
+            0,
         ]
     }
 }
@@ -258,6 +349,26 @@ impl SyscallRequest {
         Self::new(SYSCALL_PROCESS_EXIT, [status, 0, 0, 0, 0, 0])
     }
 
+    pub const fn file_open(arguments: FileOpenArguments) -> Self {
+        Self::new(SYSCALL_FILE_OPEN, arguments.registers())
+    }
+
+    pub const fn file_read(arguments: FileIoArguments) -> Self {
+        Self::new(SYSCALL_FILE_READ, arguments.registers())
+    }
+
+    pub const fn file_write(arguments: FileIoArguments) -> Self {
+        Self::new(SYSCALL_FILE_WRITE, arguments.registers())
+    }
+
+    pub const fn file_seek(arguments: FileSeekArguments) -> Self {
+        Self::new(SYSCALL_FILE_SEEK, arguments.registers())
+    }
+
+    pub const fn file_close(descriptor: PackedFileDescriptor) -> Self {
+        Self::new(SYSCALL_FILE_CLOSE, [descriptor.raw(), 0, 0, 0, 0, 0])
+    }
+
     pub const fn argument(&self, index: usize) -> Option<u64> {
         if index < SYSCALL_ARGUMENT_COUNT {
             Some(self.arguments[index])
@@ -376,6 +487,48 @@ mod tests {
 
         assert_eq!(request.number, SYSCALL_PROCESS_EXIT);
         assert_eq!(request.arguments, [0x1234_5678_9abc_def0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn file_descriptor_has_stable_c_encoding() {
+        let descriptor = PackedFileDescriptor::new(0x1122_3344, 0x5566_7788);
+
+        assert_eq!(core::mem::size_of::<PackedFileDescriptor>(), 8);
+        assert_eq!(descriptor.raw(), 0x5566_7788_1122_3344);
+        assert_eq!(PackedFileDescriptor::from_raw(descriptor.raw()), descriptor);
+    }
+
+    #[test]
+    fn file_syscalls_keep_reserved_registers_zero() {
+        let descriptor = PackedFileDescriptor::new(3, 7);
+        assert_eq!(
+            SyscallRequest::file_open(FileOpenArguments {
+                path_address: 0x4000,
+                path_length: 9,
+                flags: FILE_OPEN_READ | FILE_OPEN_WRITE,
+            }).arguments,
+            [0x4000, 9, 3, 0, 0, 0]
+        );
+        assert_eq!(
+            SyscallRequest::file_read(FileIoArguments {
+                descriptor,
+                buffer_address: 0x5000,
+                buffer_length: 32,
+            }).arguments,
+            [descriptor.raw(), 0x5000, 32, 0, 0, 0]
+        );
+        assert_eq!(
+            SyscallRequest::file_seek(FileSeekArguments {
+                descriptor,
+                offset: -4,
+                origin: FILE_SEEK_END,
+            }).arguments,
+            [descriptor.raw(), (-4_i64) as u64, FILE_SEEK_END, 0, 0, 0]
+        );
+        assert_eq!(
+            SyscallRequest::file_close(descriptor).arguments,
+            [descriptor.raw(), 0, 0, 0, 0, 0]
+        );
     }
 
     #[test]

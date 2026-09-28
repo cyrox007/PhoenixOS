@@ -1736,9 +1736,7 @@ fn user_mode_syscall_self_test(
 }
 
 fn write_process_start_info(
-    space: &mut process_space::ProcessAddressSpace<
-        { process_space::PROCESS_REGION_CAPACITY },
-    >,
+    space: &mut process_space::ProcessAddressSpace<{ process_space::PROCESS_REGION_CAPACITY }>,
     stack_address: u64,
 ) -> u64 {
     use phoenix_syscall_abi::{ProcessStartInfo, ProcessStartString};

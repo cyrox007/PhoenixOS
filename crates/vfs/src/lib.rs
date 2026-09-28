@@ -268,7 +268,10 @@ impl<'a, const CAPACITY: usize> FileSystemRegistry<'a, CAPACITY> {
             .truncate_node(node.node, length)?)
     }
 
-    fn filesystem(&self, id: FileSystemId) -> Result<&dyn FileSystem, FileSystemRegistryError> {
+    fn filesystem<'registry>(
+        &'registry self,
+        id: FileSystemId,
+    ) -> Result<&'registry (dyn FileSystem + 'a), FileSystemRegistryError> {
         self.entries
             .iter()
             .flatten()
@@ -277,10 +280,10 @@ impl<'a, const CAPACITY: usize> FileSystemRegistry<'a, CAPACITY> {
             .ok_or(FileSystemRegistryError::NotFound)
     }
 
-    fn filesystem_mut(
-        &mut self,
+    fn filesystem_mut<'registry>(
+        &'registry mut self,
         id: FileSystemId,
-    ) -> Result<&mut dyn FileSystem, FileSystemRegistryError> {
+    ) -> Result<&'registry mut (dyn FileSystem + 'a), FileSystemRegistryError> {
         self.entries
             .iter_mut()
             .flatten()

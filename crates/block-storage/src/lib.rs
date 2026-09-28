@@ -351,9 +351,7 @@ mod tests {
 
         let locked = unlocked.lock();
         let mut second_scratch = [0_u8; 8];
-        let mut unlocked = locked
-            .unlock(InvertTransform, &mut second_scratch)
-            .unwrap();
+        let mut unlocked = locked.unlock(InvertTransform, &mut second_scratch).unwrap();
         output.fill(0);
         unlocked.read_blocks(0, &mut output).unwrap();
         assert_eq!(&output, b"phoenix!");

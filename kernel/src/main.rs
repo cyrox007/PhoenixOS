@@ -230,6 +230,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         "INFO",
         format_args!("user process exit self-test: OK"),
     );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("user process start arguments self-test: OK"),
+    );
 
     elf_user_execution_self_test(physical_memory_offset, &mut frames);
     serial::line(
@@ -1469,6 +1474,7 @@ fn user_mode_syscall_self_test(
     space
         .write_user_bytes(VirtAddr::new(USER_MODE_TEST_CODE_ADDRESS), image)
         .expect("не удалось загрузить пользовательскую самопроверку");
+    let start_info_address = write_process_start_info(&mut space, USER_MODE_TEST_STACK_ADDRESS);
 
     let ipc_words_address = USER_MODE_TEST_STACK_ADDRESS;
     let send_words = [0x1122_3344_5566_7788_u64, 0x8877_6655_4433_2211_u64];
@@ -1676,8 +1682,11 @@ fn user_mode_syscall_self_test(
         }
         .expect("контекст пользовательского системного вызова уже установлен");
         let guard = unsafe { space.activate() };
-        let result =
-            arch::x86_64::syscall::run_user_process(USER_MODE_TEST_CODE_ADDRESS, stack_pointer);
+        let result = arch::x86_64::syscall::run_user_process_with_start_info(
+            USER_MODE_TEST_CODE_ADDRESS,
+            stack_pointer,
+            start_info_address,
+        );
         drop(guard);
         drop(context_guard);
         result
@@ -1724,6 +1733,73 @@ fn user_mode_syscall_self_test(
     if frames.free_frames() != free_before {
         panic!("пользовательская самопроверка не вернула всю физическую память");
     }
+}
+
+fn write_process_start_info(
+    space: &mut process_space::ProcessAddressSpace<{ process_space::PROCESS_REGION_CAPACITY }>,
+    stack_address: u64,
+) -> u64 {
+    use phoenix_syscall_abi::{ProcessStartInfo, ProcessStartString};
+
+    const ARGUMENT_ZERO: &[u8] = b"phoenix-test";
+    const ARGUMENT_ONE: &[u8] = b"--self-test";
+    const ENVIRONMENT_ZERO: &[u8] = b"MODE=qemu";
+
+    let info_address = stack_address + 0x200;
+    let argument_vector = stack_address + 0x300;
+    let environment_vector = stack_address + 0x340;
+    let argument_zero_address = stack_address + 0x380;
+    let argument_one_address = stack_address + 0x390;
+    let environment_zero_address = stack_address + 0x3a0;
+
+    let info = ProcessStartInfo::new(2, argument_vector, 1, environment_vector)
+        .expect("не удалось описать аргументы запуска процесса");
+    let arguments = [
+        ProcessStartString::new(argument_zero_address, ARGUMENT_ZERO.len() as u64),
+        ProcessStartString::new(argument_one_address, ARGUMENT_ONE.len() as u64),
+    ];
+    let environment = [ProcessStartString::new(
+        environment_zero_address,
+        ENVIRONMENT_ZERO.len() as u64,
+    )];
+
+    for (index, word) in info.words().iter().enumerate() {
+        space
+            .write_user_bytes(
+                VirtAddr::new(info_address + index as u64 * 8),
+                &word.to_le_bytes(),
+            )
+            .expect("не удалось записать блок запуска процесса");
+    }
+    for (index, entry) in arguments.iter().enumerate() {
+        let address = argument_vector + index as u64 * 16;
+        space
+            .write_user_bytes(VirtAddr::new(address), &entry.address.to_le_bytes())
+            .expect("не удалось записать адрес аргумента процесса");
+        space
+            .write_user_bytes(VirtAddr::new(address + 8), &entry.length.to_le_bytes())
+            .expect("не удалось записать длину аргумента процесса");
+    }
+    for (index, entry) in environment.iter().enumerate() {
+        let address = environment_vector + index as u64 * 16;
+        space
+            .write_user_bytes(VirtAddr::new(address), &entry.address.to_le_bytes())
+            .expect("не удалось записать адрес окружения процесса");
+        space
+            .write_user_bytes(VirtAddr::new(address + 8), &entry.length.to_le_bytes())
+            .expect("не удалось записать длину окружения процесса");
+    }
+    space
+        .write_user_bytes(VirtAddr::new(argument_zero_address), ARGUMENT_ZERO)
+        .expect("не удалось записать первый аргумент процесса");
+    space
+        .write_user_bytes(VirtAddr::new(argument_one_address), ARGUMENT_ONE)
+        .expect("не удалось записать второй аргумент процесса");
+    space
+        .write_user_bytes(VirtAddr::new(environment_zero_address), ENVIRONMENT_ZERO)
+        .expect("не удалось записать окружение процесса");
+
+    info_address
 }
 
 fn elf_user_execution_self_test(
@@ -1793,6 +1869,7 @@ fn elf_user_execution_self_test(
     space
         .map_region(stack_region, frames)
         .expect("не удалось отобразить стек ELF-процесса");
+    let start_info_address = write_process_start_info(&mut space, STACK_ADDRESS);
 
     let mut capabilities = ProcessCapabilitySet::<
         { arch::x86_64::syscall::PROCESS_CAPABILITY_CAPACITY },
@@ -1813,8 +1890,11 @@ fn elf_user_execution_self_test(
         }
         .expect("контекст ELF-процесса уже установлен");
         let address_space_guard = unsafe { space.activate() };
-        let result =
-            arch::x86_64::syscall::run_user_mode_self_test(loaded.entry_point, stack_pointer);
+        let result = arch::x86_64::syscall::run_user_mode_self_test(
+            loaded.entry_point,
+            stack_pointer,
+            start_info_address,
+        );
         drop(address_space_guard);
         drop(context_guard);
         result

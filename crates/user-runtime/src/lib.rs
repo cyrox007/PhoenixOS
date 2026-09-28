@@ -4,7 +4,7 @@ use core::arch::asm;
 
 use phoenix_syscall_abi::{
     IpcReceiveArguments, IpcReceiveMetadata, IpcSendArguments, PackedCapabilityHandle,
-    SyscallRequest,
+    ProcessStartInfo, SyscallRequest,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,11 +13,18 @@ pub struct SyscallError {
 }
 
 pub type MainFunction = extern "C" fn() -> u64;
+pub type ArgumentMainFunction = extern "C" fn(*const ProcessStartInfo) -> u64;
 
 /// Runs a user program's main function and terminates the current process with
 /// the returned status.
 pub fn start(main: MainFunction) -> ! {
     process_exit(run_main(main))
+}
+
+/// Runs a C-compatible main function with the kernel-provided process-entry
+/// block and terminates the process with its return value.
+pub fn start_with_info(main: ArgumentMainFunction, info: &ProcessStartInfo) -> ! {
+    process_exit(run_main_with_info(main, info))
 }
 
 /// Terminates the current process. A conforming kernel never returns from this
@@ -92,6 +99,10 @@ fn run_main(main: MainFunction) -> u64 {
     main()
 }
 
+fn run_main_with_info(main: ArgumentMainFunction, info: &ProcessStartInfo) -> u64 {
+    main(info)
+}
+
 #[inline(always)]
 fn invoke(request: SyscallRequest) -> Result<u64, SyscallError> {
     let arguments = request.arguments;
@@ -130,6 +141,11 @@ mod tests {
 
     extern "C" fn successful_main() -> u64 {
         23
+    }
+
+    extern "C" fn argument_main(info: *const ProcessStartInfo) -> u64 {
+        let info = unsafe { &*info };
+        info.argument_count + info.environment_count
     }
 
     #[test]
@@ -185,5 +201,12 @@ mod tests {
     #[test]
     fn runtime_entry_returns_main_status() {
         assert_eq!(run_main(successful_main), 23);
+    }
+
+    #[test]
+    fn runtime_entry_passes_process_start_info() {
+        let info = ProcessStartInfo::new(2, 0x4000, 1, 0x5000).unwrap();
+
+        assert_eq!(run_main_with_info(argument_main, &info), 3);
     }
 }

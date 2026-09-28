@@ -6,6 +6,119 @@ pub const SYSCALL_IPC_SEND: u64 = 0x100;
 pub const SYSCALL_IPC_RECEIVE: u64 = 0x101;
 pub const SYSCALL_PROCESS_EXIT: u64 = 0x102;
 pub const NO_TRANSFERRED_CAPABILITY: u64 = u64::MAX;
+pub const PROCESS_START_ABI_VERSION: u32 = 0;
+pub const PROCESS_START_MAX_ENTRIES: u64 = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessStartInfoError {
+    UnsupportedVersion,
+    UnsupportedFlags,
+    TooManyArguments,
+    TooManyEnvironmentEntries,
+    MissingArgumentVector,
+    MissingEnvironmentVector,
+    UnalignedArgumentVector,
+    UnalignedEnvironmentVector,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessStartString {
+    pub address: u64,
+    pub length: u64,
+}
+
+impl ProcessStartString {
+    pub const fn new(address: u64, length: u64) -> Self {
+        Self { address, length }
+    }
+}
+
+/// Stable process-entry block passed in RDI on x86-64.
+///
+/// Argument and environment vectors point to arrays of `ProcessStartString`.
+/// Strings are byte spans and do not require a trailing NUL byte.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessStartInfo {
+    pub abi_version: u32,
+    pub flags: u32,
+    pub argument_count: u64,
+    pub argument_vector: u64,
+    pub environment_count: u64,
+    pub environment_vector: u64,
+}
+
+impl ProcessStartInfo {
+    pub const fn empty() -> Self {
+        Self {
+            abi_version: PROCESS_START_ABI_VERSION,
+            flags: 0,
+            argument_count: 0,
+            argument_vector: 0,
+            environment_count: 0,
+            environment_vector: 0,
+        }
+    }
+
+    pub const fn new(
+        argument_count: u64,
+        argument_vector: u64,
+        environment_count: u64,
+        environment_vector: u64,
+    ) -> Result<Self, ProcessStartInfoError> {
+        let info = Self {
+            abi_version: PROCESS_START_ABI_VERSION,
+            flags: 0,
+            argument_count,
+            argument_vector,
+            environment_count,
+            environment_vector,
+        };
+        match info.validate() {
+            Ok(()) => Ok(info),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub const fn validate(self) -> Result<(), ProcessStartInfoError> {
+        if self.abi_version != PROCESS_START_ABI_VERSION {
+            return Err(ProcessStartInfoError::UnsupportedVersion);
+        }
+        if self.flags != 0 {
+            return Err(ProcessStartInfoError::UnsupportedFlags);
+        }
+        if self.argument_count > PROCESS_START_MAX_ENTRIES {
+            return Err(ProcessStartInfoError::TooManyArguments);
+        }
+        if self.environment_count > PROCESS_START_MAX_ENTRIES {
+            return Err(ProcessStartInfoError::TooManyEnvironmentEntries);
+        }
+        if self.argument_count != 0 && self.argument_vector == 0 {
+            return Err(ProcessStartInfoError::MissingArgumentVector);
+        }
+        if self.environment_count != 0 && self.environment_vector == 0 {
+            return Err(ProcessStartInfoError::MissingEnvironmentVector);
+        }
+        if self.argument_vector & 7 != 0 {
+            return Err(ProcessStartInfoError::UnalignedArgumentVector);
+        }
+        if self.environment_vector & 7 != 0 {
+            return Err(ProcessStartInfoError::UnalignedEnvironmentVector);
+        }
+        Ok(())
+    }
+
+    pub const fn words(self) -> [u64; 5] {
+        [
+            (self.flags as u64) << 32 | self.abi_version as u64,
+            self.argument_count,
+            self.argument_vector,
+            self.environment_count,
+            self.environment_vector,
+        ]
+    }
+}
 
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,6 +337,37 @@ mod tests {
         assert_eq!(request.argument(3), Some(40));
         assert_eq!(request.argument(5), Some(60));
         assert_eq!(request.argument(6), None);
+    }
+
+    #[test]
+    fn process_start_info_has_stable_c_layout() {
+        assert_eq!(core::mem::size_of::<ProcessStartString>(), 16);
+        assert_eq!(core::mem::align_of::<ProcessStartString>(), 8);
+        assert_eq!(core::mem::size_of::<ProcessStartInfo>(), 40);
+        assert_eq!(core::mem::align_of::<ProcessStartInfo>(), 8);
+
+        let info = ProcessStartInfo::new(2, 0x4000, 1, 0x5000).unwrap();
+        assert_eq!(info.words(), [0, 2, 0x4000, 1, 0x5000]);
+    }
+
+    #[test]
+    fn process_start_info_rejects_invalid_vectors_and_limits() {
+        assert_eq!(
+            ProcessStartInfo::new(1, 0, 0, 0),
+            Err(ProcessStartInfoError::MissingArgumentVector)
+        );
+        assert_eq!(
+            ProcessStartInfo::new(0, 0, 1, 0),
+            Err(ProcessStartInfoError::MissingEnvironmentVector)
+        );
+        assert_eq!(
+            ProcessStartInfo::new(PROCESS_START_MAX_ENTRIES + 1, 8, 0, 0),
+            Err(ProcessStartInfoError::TooManyArguments)
+        );
+        assert_eq!(
+            ProcessStartInfo::new(1, 3, 0, 0),
+            Err(ProcessStartInfoError::UnalignedArgumentVector)
+        );
     }
 
     #[test]

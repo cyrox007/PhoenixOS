@@ -18,6 +18,7 @@ phoenix-process-manager = { path = "../crates/process-manager" }
 phoenix-scheduler = { path = "../crates/scheduler" }
 phoenix-service-manager = { path = "../crates/service-manager" }
 phoenix-syscall-abi = { path = "../crates/syscall-abi" }
+phoenix-vfs = { path = "../crates/vfs" }
 phoenix-vm = { path = "../crates/virtual-memory" }
 uart_16550 = "0.8.0"
 x86_64 = "0.15.2"

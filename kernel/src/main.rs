@@ -1616,6 +1616,24 @@ fn user_mode_syscall_self_test(
         transferred_handle.generation,
     );
 
+    let file_path = b"/syscall";
+    let file_path_address = USER_MODE_TEST_STACK_ADDRESS + 0x180;
+    space
+        .write_user_bytes(VirtAddr::new(file_path_address), file_path)
+        .expect("не удалось подготовить путь файловой syscall-проверки");
+    let mut filesystem = arch::x86_64::syscall::KernelFileSystem::new();
+    filesystem
+        .create_file("/syscall")
+        .expect("не удалось создать файл syscall-проверки");
+    let mut file_descriptors = arch::x86_64::syscall::KernelDescriptorTable::new();
+    let file_context_guard = unsafe {
+        arch::x86_64::syscall::install_current_file_context(
+            &mut filesystem,
+            &mut file_descriptors,
+        )
+    }
+    .expect("файловый контекст текущего процесса уже установлен");
+
     let context_guard = unsafe {
         arch::x86_64::syscall::install_current_process_context(
             &mut space,
@@ -1665,7 +1683,12 @@ fn user_mode_syscall_self_test(
             flags: 0,
         },
     );
+    let file_context_ok = arch::x86_64::syscall::file_context_operations_self_test(
+        file_path_address,
+        file_path.len() as u64,
+    );
     drop(context_guard);
+    drop(file_context_guard);
 
     let mut copied_back = [0_u8; 16];
     space
@@ -1714,6 +1737,9 @@ fn user_mode_syscall_self_test(
     {
         panic!("атомарная передача capability через ipc_send нарушена");
     }
+    if !file_context_ok || !file_descriptors.is_empty() {
+        panic!("файловый syscall-контекст нарушил жизненный цикл дескриптора");
+    }
     serial::emergency(format_args!(
         "[INFO] ipc syscall memory context self-test: OK\n"
     ));
@@ -1726,10 +1752,20 @@ fn user_mode_syscall_self_test(
     serial::emergency(format_args!(
         "[INFO] ipc capability transfer self-test: OK\n"
     ));
+    serial::emergency(format_args!(
+        "[INFO] file syscall context operations self-test: OK\n"
+    ));
 
     let stack_pointer = USER_MODE_TEST_STACK_ADDRESS + phoenix_process::PAGE_SIZE - 16;
 
     let exit_status = x86_64::instructions::interrupts::without_interrupts(|| {
+        let file_context_guard = unsafe {
+            arch::x86_64::syscall::install_current_file_context(
+                &mut filesystem,
+                &mut file_descriptors,
+            )
+        }
+        .expect("файловый контекст пользовательского процесса уже установлен");
         let context_guard = unsafe {
             arch::x86_64::syscall::install_current_process_context(
                 &mut space,
@@ -1747,6 +1783,7 @@ fn user_mode_syscall_self_test(
         );
         drop(guard);
         drop(context_guard);
+        drop(file_context_guard);
         result
     });
 

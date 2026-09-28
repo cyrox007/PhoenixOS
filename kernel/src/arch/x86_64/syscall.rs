@@ -1097,7 +1097,68 @@ fn dispatch_file_io(request: SyscallRequest) -> SyscallReturn {
     {
         return syscall_failure(STATUS_BAD_ARGUMENTS);
     }
-    syscall_failure(STATUS_OPERATION_NOT_READY)
+    let Ok(length) = usize::try_from(request.arguments[2]) else {
+        return syscall_failure(STATUS_BAD_ARGUMENTS);
+    };
+    if length > FILE_CAPACITY {
+        return syscall_failure(STATUS_BAD_ARGUMENTS);
+    }
+    let descriptor = unpack_file_descriptor(request.arguments[0]);
+    let mut buffer = [0_u8; FILE_CAPACITY];
+
+    if request.number == SYSCALL_FILE_WRITE {
+        let copied = with_current_process_address_space(|space| {
+            file_user_memory::copy_from_user(
+                space,
+                request.arguments[1],
+                request.arguments[2],
+                &mut buffer,
+            )
+        });
+        let data = match copied {
+            Some(Ok(data)) => data,
+            Some(Err(_)) => return syscall_failure(STATUS_BAD_ARGUMENTS),
+            None => return syscall_failure(STATUS_OPERATION_NOT_READY),
+        };
+        return match with_current_file_context(|filesystem, descriptors| {
+            descriptors.write(filesystem, descriptor, data)
+        }) {
+            Some(Ok(written)) => SyscallReturn::success(written as u64),
+            Some(Err(_)) => syscall_failure(STATUS_BAD_ARGUMENTS),
+            None => syscall_failure(STATUS_OPERATION_NOT_READY),
+        };
+    }
+
+    match with_current_process_address_space(|space| {
+        file_user_memory::validate_user_buffer(
+            space,
+            request.arguments[1],
+            request.arguments[2],
+        )
+    }) {
+        Some(Ok(())) => {}
+        Some(Err(_)) => return syscall_failure(STATUS_BAD_ARGUMENTS),
+        None => return syscall_failure(STATUS_OPERATION_NOT_READY),
+    }
+    let read = match with_current_file_context(|filesystem, descriptors| {
+        descriptors.read(filesystem, descriptor, &mut buffer[..length])
+    }) {
+        Some(Ok(read)) => read,
+        Some(Err(_)) => return syscall_failure(STATUS_BAD_ARGUMENTS),
+        None => return syscall_failure(STATUS_OPERATION_NOT_READY),
+    };
+    match with_current_process_address_space(|space| {
+        file_user_memory::copy_to_user(
+            space,
+            request.arguments[1],
+            request.arguments[2],
+            &buffer[..read],
+        )
+    }) {
+        Some(Ok(())) => SyscallReturn::success(read as u64),
+        Some(Err(_)) => syscall_failure(STATUS_BAD_ARGUMENTS),
+        None => syscall_failure(STATUS_OPERATION_NOT_READY),
+    }
 }
 
 fn dispatch_file_seek(request: SyscallRequest) -> SyscallReturn {
@@ -1145,7 +1206,13 @@ fn unpack_file_descriptor(raw: u64) -> FileDescriptor {
     }
 }
 
-pub fn file_context_operations_self_test(path_address: u64, path_length: u64) -> bool {
+pub fn file_context_operations_self_test(
+    path_address: u64,
+    path_length: u64,
+    input_address: u64,
+    output_address: u64,
+    buffer_length: u64,
+) -> bool {
     let opened = dispatch(SyscallRequest::new(
         SYSCALL_FILE_OPEN,
         [
@@ -1160,9 +1227,17 @@ pub fn file_context_operations_self_test(path_address: u64, path_length: u64) ->
     if !opened.is_success() {
         return false;
     }
+    let write = dispatch(SyscallRequest::new(
+        SYSCALL_FILE_WRITE,
+        [opened.value, input_address, buffer_length, 0, 0, 0],
+    ));
     let seek = dispatch(SyscallRequest::new(
         SYSCALL_FILE_SEEK,
-        [opened.value, 7, FILE_SEEK_START, 0, 0, 0],
+        [opened.value, 0, FILE_SEEK_START, 0, 0, 0],
+    ));
+    let read = dispatch(SyscallRequest::new(
+        SYSCALL_FILE_READ,
+        [opened.value, output_address, buffer_length, 0, 0, 0],
     ));
     let close = dispatch(SyscallRequest::new(
         SYSCALL_FILE_CLOSE,
@@ -1172,7 +1247,14 @@ pub fn file_context_operations_self_test(path_address: u64, path_length: u64) ->
         SYSCALL_FILE_CLOSE,
         [opened.value, 0, 0, 0, 0, 0],
     ));
-    seek.is_success() && seek.value == 7 && close.is_success() && !stale_close.is_success()
+    write.is_success()
+        && write.value == buffer_length
+        && seek.is_success()
+        && seek.value == 0
+        && read.is_success()
+        && read.value == buffer_length
+        && close.is_success()
+        && !stale_close.is_success()
 }
 
 pub fn file_dispatch_self_test() -> bool {

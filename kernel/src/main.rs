@@ -1618,9 +1618,18 @@ fn user_mode_syscall_self_test(
 
     let file_path = b"/syscall";
     let file_path_address = USER_MODE_TEST_STACK_ADDRESS + 0x180;
+    let file_input = b"phoenix-file-io";
+    let file_input_address = USER_MODE_TEST_STACK_ADDRESS + 0x200;
+    let file_output_address = USER_MODE_TEST_STACK_ADDRESS + 0x240;
     space
         .write_user_bytes(VirtAddr::new(file_path_address), file_path)
         .expect("не удалось подготовить путь файловой syscall-проверки");
+    space
+        .write_user_bytes(VirtAddr::new(file_input_address), file_input)
+        .expect("не удалось подготовить входной буфер файловой syscall-проверки");
+    space
+        .write_user_bytes(VirtAddr::new(file_output_address), &[0; 15])
+        .expect("не удалось подготовить выходной буфер файловой syscall-проверки");
     let mut filesystem = arch::x86_64::syscall::KernelFileSystem::new();
     filesystem
         .create_file("/syscall")
@@ -1683,6 +1692,9 @@ fn user_mode_syscall_self_test(
     let file_context_ok = arch::x86_64::syscall::file_context_operations_self_test(
         file_path_address,
         file_path.len() as u64,
+        file_input_address,
+        file_output_address,
+        file_input.len() as u64,
     );
     drop(context_guard);
     drop(file_context_guard);
@@ -1734,7 +1746,11 @@ fn user_mode_syscall_self_test(
     {
         panic!("атомарная передача capability через ipc_send нарушена");
     }
-    if !file_context_ok || !file_descriptors.is_empty() {
+    let mut file_output = [0_u8; 15];
+    space
+        .read_user_bytes(VirtAddr::new(file_output_address), &mut file_output)
+        .expect("не удалось прочитать результат файловой syscall-проверки");
+    if !file_context_ok || !file_descriptors.is_empty() || file_output != *file_input {
         panic!("файловый syscall-контекст нарушил жизненный цикл дескриптора");
     }
     serial::emergency(format_args!(

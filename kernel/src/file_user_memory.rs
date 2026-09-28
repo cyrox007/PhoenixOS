@@ -69,6 +69,16 @@ pub fn copy_to_user<const REGIONS: usize>(
     Ok(())
 }
 
+pub fn validate_user_buffer<const REGIONS: usize>(
+    space: &mut ProcessAddressSpace<REGIONS>,
+    address: u64,
+    length: u64,
+) -> Result<(), FileUserMemoryError> {
+    let buffer = UserBuffer::for_array(address, length, 1, 1)?;
+    let length = usize::try_from(length).map_err(|_| FileUserMemoryError::BufferTooSmall)?;
+    preflight(space, buffer.start(), length)
+}
+
 fn preflight<const REGIONS: usize>(
     space: &mut ProcessAddressSpace<REGIONS>,
     start: u64,

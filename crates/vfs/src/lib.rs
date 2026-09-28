@@ -318,8 +318,8 @@ pub struct NodeMetadata {
 /// Независимые от конкретной файловой системы операции с узлами для ВФС и дескрипторов.
 ///
 /// Пути намеренно остаются вне этого контракта. Слой монтирования может разрешать путь
-/// по одному компоненту, а затем сохранять полученный `NodeId` в открытом описании
-/// файла без привязки вызывающего кода к конкретной реализации файловой системы.
+/// по одному компоненту, а открытое описание сохраняет составной `VfsNode`, чтобы
+/// локальный номер узла не терял идентичность файловой системы.
 pub trait FileSystem {
     fn root_node(&self) -> Result<NodeId, VfsError>;
     fn metadata(&self, node: NodeId) -> Result<NodeMetadata, VfsError>;
@@ -394,6 +394,7 @@ pub enum DescriptorError {
     TableFull,
     OffsetOverflow,
     Vfs(VfsError),
+    Registry(FileSystemRegistryError),
 }
 
 impl From<VfsError> for DescriptorError {
@@ -402,9 +403,15 @@ impl From<VfsError> for DescriptorError {
     }
 }
 
+impl From<FileSystemRegistryError> for DescriptorError {
+    fn from(error: FileSystemRegistryError) -> Self {
+        Self::Registry(error)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct OpenFile {
-    node: NodeId,
+    node: VfsNode,
     position: u64,
     access: AccessMode,
     references: u32,
@@ -461,16 +468,20 @@ impl<const CAPACITY: usize> DescriptorTable<CAPACITY> {
             return Err(DescriptorError::Vfs(VfsError::IsDirectory));
         }
 
-        let descriptor_index = self.free_descriptor_slot()?;
-        let open_file_index = self.free_open_file_slot()?;
-        self.open_files[open_file_index] = Some(OpenFile {
-            node,
-            position: 0,
-            access,
-            references: 1,
-        });
-        self.install_descriptor(descriptor_index, open_file_index);
-        Ok(self.descriptor(descriptor_index))
+        self.open_identity(VfsNode::new(FileSystemId(0), node), access)
+    }
+
+    pub fn open_vfs<'a, const FILESYSTEMS: usize>(
+        &mut self,
+        filesystems: &FileSystemRegistry<'a, FILESYSTEMS>,
+        node: VfsNode,
+        access: AccessMode,
+    ) -> Result<FileDescriptor, DescriptorError> {
+        if filesystems.metadata(node)?.kind != NodeKind::File {
+            return Err(DescriptorError::Vfs(VfsError::IsDirectory));
+        }
+
+        self.open_identity(node, access)
     }
 
     pub fn duplicate(
@@ -514,6 +525,10 @@ impl<const CAPACITY: usize> DescriptorTable<CAPACITY> {
         Ok(self.file(descriptor)?.position)
     }
 
+    pub fn node_identity(&self, descriptor: FileDescriptor) -> Result<VfsNode, DescriptorError> {
+        Ok(self.file(descriptor)?.node)
+    }
+
     pub fn set_position(
         &mut self,
         descriptor: FileDescriptor,
@@ -534,7 +549,7 @@ impl<const CAPACITY: usize> DescriptorTable<CAPACITY> {
         let base = match origin {
             SeekOrigin::Start => 0,
             SeekOrigin::Current => file.position,
-            SeekOrigin::End => filesystem.metadata(file.node)?.length,
+            SeekOrigin::End => filesystem.metadata(file.node.node)?.length,
         };
         let position = base
             .checked_add_signed(offset)
@@ -553,7 +568,7 @@ impl<const CAPACITY: usize> DescriptorTable<CAPACITY> {
         if !file.access.can_read() {
             return Err(DescriptorError::PermissionDenied);
         }
-        let read = filesystem.read_node(file.node, file.position, output)?;
+        let read = filesystem.read_node(file.node.node, file.position, output)?;
         file.position = file
             .position
             .checked_add(read as u64)
@@ -571,12 +586,87 @@ impl<const CAPACITY: usize> DescriptorTable<CAPACITY> {
         if !file.access.can_write() {
             return Err(DescriptorError::PermissionDenied);
         }
-        let written = filesystem.write_node(file.node, file.position, data)?;
+        let written = filesystem.write_node(file.node.node, file.position, data)?;
         file.position = file
             .position
             .checked_add(written as u64)
             .ok_or(DescriptorError::OffsetOverflow)?;
         Ok(written)
+    }
+
+    pub fn seek_vfs<'a, const FILESYSTEMS: usize>(
+        &mut self,
+        filesystems: &FileSystemRegistry<'a, FILESYSTEMS>,
+        descriptor: FileDescriptor,
+        offset: i64,
+        origin: SeekOrigin,
+    ) -> Result<u64, DescriptorError> {
+        let file = self.file(descriptor)?;
+        let base = match origin {
+            SeekOrigin::Start => 0,
+            SeekOrigin::Current => file.position,
+            SeekOrigin::End => filesystems.metadata(file.node)?.length,
+        };
+        let position = base
+            .checked_add_signed(offset)
+            .ok_or(DescriptorError::OffsetOverflow)?;
+        self.file_mut(descriptor)?.position = position;
+        Ok(position)
+    }
+
+    pub fn read_vfs<'a, const FILESYSTEMS: usize>(
+        &mut self,
+        filesystems: &FileSystemRegistry<'a, FILESYSTEMS>,
+        descriptor: FileDescriptor,
+        output: &mut [u8],
+    ) -> Result<usize, DescriptorError> {
+        let file = self.file_mut(descriptor)?;
+        if !file.access.can_read() {
+            return Err(DescriptorError::PermissionDenied);
+        }
+
+        let read = filesystems.read_node(file.node, file.position, output)?;
+        file.position = file
+            .position
+            .checked_add(read as u64)
+            .ok_or(DescriptorError::OffsetOverflow)?;
+        Ok(read)
+    }
+
+    pub fn write_vfs<'a, const FILESYSTEMS: usize>(
+        &mut self,
+        filesystems: &mut FileSystemRegistry<'a, FILESYSTEMS>,
+        descriptor: FileDescriptor,
+        data: &[u8],
+    ) -> Result<usize, DescriptorError> {
+        let file = self.file_mut(descriptor)?;
+        if !file.access.can_write() {
+            return Err(DescriptorError::PermissionDenied);
+        }
+
+        let written = filesystems.write_node(file.node, file.position, data)?;
+        file.position = file
+            .position
+            .checked_add(written as u64)
+            .ok_or(DescriptorError::OffsetOverflow)?;
+        Ok(written)
+    }
+
+    fn open_identity(
+        &mut self,
+        node: VfsNode,
+        access: AccessMode,
+    ) -> Result<FileDescriptor, DescriptorError> {
+        let descriptor_index = self.free_descriptor_slot()?;
+        let open_file_index = self.free_open_file_slot()?;
+        self.open_files[open_file_index] = Some(OpenFile {
+            node,
+            position: 0,
+            access,
+            references: 1,
+        });
+        self.install_descriptor(descriptor_index, open_file_index);
+        Ok(self.descriptor(descriptor_index))
     }
 
     fn free_descriptor_slot(&self) -> Result<usize, DescriptorError> {
@@ -1170,6 +1260,63 @@ mod tests {
             registry.metadata(VfsNode::new(FileSystemId(9), NodeId(0))),
             Err(FileSystemRegistryError::NotFound)
         );
+    }
+
+    #[test]
+    fn descriptors_preserve_filesystem_identity_through_registry_io() {
+        let mut first = MemoryFileSystem::<3, 16>::new();
+        let mut second = MemoryFileSystem::<3, 16>::new();
+        let first_root = first.root_node().unwrap();
+        let second_root = second.root_node().unwrap();
+        let first_file = first
+            .create_node(first_root, b"data", NodeKind::File)
+            .unwrap();
+        let second_file = second
+            .create_node(second_root, b"data", NodeKind::File)
+            .unwrap();
+        assert_eq!(first_file, second_file);
+
+        let mut registry = FileSystemRegistry::<2>::new();
+        registry.register(FileSystemId(1), &mut first).unwrap();
+        registry.register(FileSystemId(2), &mut second).unwrap();
+
+        let first_node = VfsNode::new(FileSystemId(1), first_file);
+        let second_node = VfsNode::new(FileSystemId(2), second_file);
+        let mut descriptors = DescriptorTable::<4>::new();
+        let first_descriptor = descriptors
+            .open_vfs(&registry, first_node, AccessMode::ReadWrite)
+            .unwrap();
+        let second_descriptor = descriptors
+            .open_vfs(&registry, second_node, AccessMode::ReadWrite)
+            .unwrap();
+
+        descriptors
+            .write_vfs(&mut registry, first_descriptor, b"one")
+            .unwrap();
+        descriptors
+            .write_vfs(&mut registry, second_descriptor, b"two")
+            .unwrap();
+
+        descriptors
+            .seek_vfs(&registry, first_descriptor, 0, SeekOrigin::Start)
+            .unwrap();
+        descriptors
+            .seek_vfs(&registry, second_descriptor, 0, SeekOrigin::Start)
+            .unwrap();
+
+        let mut first_output = [0_u8; 3];
+        let mut second_output = [0_u8; 3];
+        descriptors
+            .read_vfs(&registry, first_descriptor, &mut first_output)
+            .unwrap();
+        descriptors
+            .read_vfs(&registry, second_descriptor, &mut second_output)
+            .unwrap();
+
+        assert_eq!(first_output, *b"one");
+        assert_eq!(second_output, *b"two");
+        assert_eq!(descriptors.node_identity(first_descriptor), Ok(first_node));
+        assert_eq!(descriptors.node_identity(second_descriptor), Ok(second_node));
     }
 
     #[test]

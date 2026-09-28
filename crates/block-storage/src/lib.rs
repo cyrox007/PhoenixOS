@@ -151,6 +151,68 @@ impl<D: BlockDevice, T: BlockTransform> BlockDevice for TransformBlockDevice<'_,
     }
 }
 
+/// Заблокированный том хранит только нижележащее блочное устройство.
+///
+/// Этот тип намеренно не реализует `BlockDevice`: до успешной разблокировки
+/// файловая система не может получить путь чтения или записи открытых блоков.
+/// Проверка пользовательского секрета и получение ключевого материала находятся
+/// выше этого слоя; сюда передаётся уже подготовленное преобразование.
+pub struct LockedVolume<D> {
+    inner: D,
+}
+
+impl<D: BlockDevice> LockedVolume<D> {
+    pub const fn new(inner: D) -> Self {
+        Self { inner }
+    }
+
+    pub fn geometry(&self) -> BlockGeometry {
+        self.inner.geometry()
+    }
+
+    pub fn unlock<'a, T: BlockTransform>(
+        self,
+        transform: T,
+        scratch: &'a mut [u8],
+    ) -> Result<UnlockedVolume<'a, D, T>, BlockError> {
+        let device = TransformBlockDevice::new(self.inner, transform, scratch)?;
+        Ok(UnlockedVolume { device })
+    }
+}
+
+/// Разблокированный защищённый том.
+///
+/// Только это состояние реализует `BlockDevice`. Повторная блокировка уничтожает
+/// объект преобразования вместе с его рабочим состоянием и возвращает тип,
+/// через который невозможно выполнять блочный ввод-вывод.
+pub struct UnlockedVolume<'a, D, T> {
+    device: TransformBlockDevice<'a, D, T>,
+}
+
+impl<D: BlockDevice, T: BlockTransform> UnlockedVolume<'_, D, T> {
+    pub fn lock(self) -> LockedVolume<D> {
+        LockedVolume::new(self.device.into_inner())
+    }
+}
+
+impl<D: BlockDevice, T: BlockTransform> BlockDevice for UnlockedVolume<'_, D, T> {
+    fn geometry(&self) -> BlockGeometry {
+        self.device.geometry()
+    }
+
+    fn read_blocks(&mut self, first_block: u64, destination: &mut [u8]) -> Result<(), BlockError> {
+        self.device.read_blocks(first_block, destination)
+    }
+
+    fn write_blocks(&mut self, first_block: u64, source: &[u8]) -> Result<(), BlockError> {
+        self.device.write_blocks(first_block, source)
+    }
+
+    fn flush(&mut self) -> Result<(), BlockError> {
+        self.device.flush()
+    }
+}
+
 /// Раннее устройство памяти для модульных и файловых проверок.
 ///
 /// Размер блока и число блоков задаются типом, поэтому реализация не требует
@@ -265,6 +327,36 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    #[test]
+    fn protected_volume_exposes_io_only_after_unlock() {
+        let inner = MemoryBlockDevice::<8, 2>::new();
+        let locked = LockedVolume::new(inner);
+        assert_eq!(
+            locked.geometry(),
+            BlockGeometry {
+                block_size: 8,
+                block_count: 2,
+            }
+        );
+
+        let mut scratch = [0_u8; 8];
+        let mut unlocked = locked.unlock(InvertTransform, &mut scratch).unwrap();
+        unlocked.write_blocks(0, b"phoenix!").unwrap();
+
+        let mut output = [0_u8; 8];
+        unlocked.read_blocks(0, &mut output).unwrap();
+        assert_eq!(&output, b"phoenix!");
+
+        let locked = unlocked.lock();
+        let mut second_scratch = [0_u8; 8];
+        let mut unlocked = locked
+            .unlock(InvertTransform, &mut second_scratch)
+            .unwrap();
+        output.fill(0);
+        unlocked.read_blocks(0, &mut output).unwrap();
+        assert_eq!(&output, b"phoenix!");
     }
 
     #[test]

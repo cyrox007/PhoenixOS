@@ -119,6 +119,12 @@ impl From<FatChainError> for FatDirectoryError {
     }
 }
 
+impl From<BlockError> for FatDirectoryError {
+    fn from(error: BlockError) -> Self {
+        Self::Read(FatReadError::Device(error))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ParsedDirectorySlot {
     End,

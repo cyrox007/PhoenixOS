@@ -134,7 +134,9 @@ impl<const NODES: usize, const FILE_CAPACITY: usize> MemoryFileSystem<NODES, FIL
         }
 
         node.data[..data.len()].copy_from_slice(data);
-        node.data[data.len()..node.len].fill(0);
+        if data.len() < node.len {
+            node.data[data.len()..node.len].fill(0);
+        }
         node.len = data.len();
         Ok(())
     }

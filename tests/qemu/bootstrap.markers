@@ -26,6 +26,7 @@ process user mapping self-test: OK
 process region mapping self-test: OK
 elf process load self-test: OK
 elf user execution self-test: OK
+system service elf execution self-test: OK
 process user image write self-test: OK
 process user copy-in self-test: OK
 ipc user word copy self-test: OK

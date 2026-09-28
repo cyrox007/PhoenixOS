@@ -54,6 +54,7 @@ pub enum FatReadError {
     UnsupportedFat12,
     BufferSize,
     ClusterOutOfRange,
+    FatTableTooSmall,
     ArithmeticOverflow,
     Device(BlockError),
 }
@@ -269,8 +270,12 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
         let entry_offset = u64::from(cluster)
             .checked_mul(entry_size)
             .ok_or(FatReadError::ArithmeticOverflow)?;
+        let sector_inside_fat = entry_offset / bytes_per_sector;
+        if sector_inside_fat >= u64::from(self.boot.fat_size_sectors) {
+            return Err(FatReadError::FatTableTooSmall);
+        }
         let fat_sector = u64::from(self.boot.reserved_sectors)
-            .checked_add(entry_offset / bytes_per_sector)
+            .checked_add(sector_inside_fat)
             .ok_or(FatReadError::ArithmeticOverflow)?;
         let offset = usize::try_from(entry_offset % bytes_per_sector)
             .map_err(|_| FatReadError::ArithmeticOverflow)?;
@@ -412,6 +417,9 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
             .checked_mul(entry_size)
             .ok_or(FatReadError::ArithmeticOverflow)?;
         let sector_inside_fat = entry_offset / bytes_per_sector;
+        if sector_inside_fat >= u64::from(self.boot.fat_size_sectors) {
+            return Err(FatReadError::FatTableTooSmall.into());
+        }
         let byte_offset = usize::try_from(entry_offset % bytes_per_sector)
             .map_err(|_| FatReadError::ArithmeticOverflow)?;
 
@@ -1322,6 +1330,26 @@ mod tests {
                 |_, _| true,
             ),
             Err(FatDirectoryError::LongNameBufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn rejects_entry_outside_declared_fat_size() {
+        let mut boot = fat32_boot();
+        boot.fat_size_sectors = 1;
+        boot.data_cluster_count = 1_000;
+
+        let mut device = phoenix_block::MemoryBlockDevice::<512, 4>::new();
+        let mut reader = FatTableReader::new(&mut device, boot).unwrap();
+        let mut sector_buffer = [0_u8; 512];
+
+        assert_eq!(
+            reader.read_entry(200, &mut sector_buffer),
+            Err(FatReadError::FatTableTooSmall)
+        );
+        assert_eq!(
+            reader.write_fat_entry(200, FatEntry::Free, &mut sector_buffer),
+            Err(FatMutationError::Read(FatReadError::FatTableTooSmall))
         );
     }
 

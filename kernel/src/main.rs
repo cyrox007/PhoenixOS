@@ -132,6 +132,14 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     if !arch::x86_64::syscall::ipc_dispatch_self_test() {
         panic!("IPC-вызовы не прошли проверку диспетчера");
     }
+    if !arch::x86_64::syscall::file_dispatch_self_test() {
+        panic!("файловые системные вызовы не прошли проверку диспетчера");
+    }
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("file syscall dispatch self-test: OK"),
+    );
     serial::line(
         &mut out,
         "INFO",

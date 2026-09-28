@@ -10,9 +10,10 @@ use phoenix_process::{ProcessCapabilitySet, ProcessId};
 use phoenix_syscall_abi::{
     FILE_OPEN_CREATE, FILE_OPEN_READ, FILE_OPEN_TRUNCATE, FILE_OPEN_WRITE, FILE_SEEK_CURRENT,
     FILE_SEEK_END, FILE_SEEK_START, IpcReceiveArguments, IpcReceiveMetadata, IpcSendArguments,
-    NO_TRANSFERRED_CAPABILITY, PackedCapabilityHandle, SYSCALL_FILE_CLOSE, SYSCALL_FILE_OPEN,
-    SYSCALL_FILE_READ, SYSCALL_FILE_SEEK, SYSCALL_FILE_WRITE, SYSCALL_IPC_RECEIVE,
-    SYSCALL_IPC_SEND, SYSCALL_PROCESS_EXIT, SyscallRequest, SyscallReturn, SyscallStatus,
+    NO_TRANSFERRED_CAPABILITY, PackedCapabilityHandle, PackedFileDescriptor, SYSCALL_FILE_CLOSE,
+    SYSCALL_FILE_OPEN, SYSCALL_FILE_READ, SYSCALL_FILE_SEEK, SYSCALL_FILE_WRITE,
+    SYSCALL_IPC_RECEIVE, SYSCALL_IPC_SEND, SYSCALL_PROCESS_EXIT, SyscallRequest, SyscallReturn,
+    SyscallStatus,
 };
 use phoenix_vfs::{
     AccessMode, DescriptorError, DescriptorTable, FileDescriptor, FileSystem, MemoryFileSystem,

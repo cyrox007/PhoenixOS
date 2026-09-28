@@ -249,6 +249,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         "INFO",
         format_args!("elf user execution self-test: OK"),
     );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("system service elf execution self-test: OK"),
+    );
 
     let heap_stats =
         heap::init(&mut page_table, &mut frames).expect("не удалось инициализировать кучу ядра");
@@ -1867,14 +1872,35 @@ fn elf_user_execution_self_test(
     frames: &mut SystemFrameAllocator<SYSTEM_MEMORY_RANGE_CAPACITY>,
 ) {
     use phoenix_process::{
-        AddressSpaceId, MemoryPermissions, ProcessCapabilitySet, ProcessId, RegionKind,
-        VirtualRegion,
+        AddressSpaceId, MemoryPermissions, ProcessCapabilitySet, RegionKind, VirtualRegion,
+    };
+    use phoenix_service_manager::{
+        RestartPolicy, ServiceId, ServiceManager, ServiceManifest, ServiceState,
     };
 
     const LOAD_ADDRESS: u64 = 0x0000_0000_4300_0000;
     const STACK_ADDRESS: u64 = LOAD_ADDRESS + phoenix_process::PAGE_SIZE;
     const CODE_OFFSET: usize = 0x100;
     const IMAGE_SIZE: usize = phoenix_process::PAGE_SIZE as usize;
+    const SERVICE_ID: ServiceId = ServiceId(2);
+    const SERVICE_IMAGE_ID: u64 = 0x5048_4f45_4e49_5853;
+
+    let manifest = ServiceManifest {
+        id: SERVICE_ID,
+        image_id: SERVICE_IMAGE_ID,
+        quantum_ticks: 1,
+        restart_policy: RestartPolicy::Never,
+    };
+    let mut service_manager = ServiceManager::<1, 1>::new();
+    service_manager
+        .register(manifest)
+        .expect("не удалось зарегистрировать ELF-службу");
+    let launch = service_manager
+        .launch(SERVICE_ID)
+        .expect("не удалось создать процесс ELF-службы");
+    if launch.image_id != SERVICE_IMAGE_ID {
+        panic!("менеджер служб выбрал неверный ELF-образ");
+    }
 
     let user_code = arch::x86_64::syscall::user_mode_test_image();
     if user_code.is_empty() || CODE_OFFSET + user_code.len() > IMAGE_SIZE {
@@ -1933,7 +1959,7 @@ fn elf_user_execution_self_test(
 
     let mut capabilities = ProcessCapabilitySet::<
         { arch::x86_64::syscall::PROCESS_CAPABILITY_CAPACITY },
-    >::new(ProcessId(47));
+    >::new(launch.process);
     let mut endpoint_registry = arch::x86_64::syscall::KernelEndpointRegistry::new();
     let mut process_capability_registry =
         arch::x86_64::syscall::KernelProcessCapabilityRegistry::new();
@@ -1950,7 +1976,7 @@ fn elf_user_execution_self_test(
         }
         .expect("контекст ELF-процесса уже установлен");
         let address_space_guard = unsafe { space.activate() };
-        let result = arch::x86_64::syscall::run_user_mode_self_test(
+        let result = arch::x86_64::syscall::run_user_process_with_start_info(
             loaded.entry_point,
             stack_pointer,
             start_info_address,
@@ -1960,8 +1986,26 @@ fn elf_user_execution_self_test(
         result
     });
 
-    if !passed {
-        panic!("загруженная ELF-точка входа не завершила пользовательский SYSCALL-цикл");
+    let Ok(exit_status) = passed else {
+        panic!("ELF-служба не завершила пользовательский SYSCALL-цикл");
+    };
+    if exit_status != arch::x86_64::syscall::USER_SELF_TEST_SUCCESS {
+        panic!("ELF-служба вернула неожиданный статус");
+    }
+
+    let completion = service_manager
+        .complete(SERVICE_ID, exit_status)
+        .expect("не удалось завершить ELF-службу");
+    let record = service_manager
+        .record(SERVICE_ID)
+        .expect("ELF-служба исчезла из реестра");
+    if completion.exited_process != launch.process
+        || completion.restarted_as.is_some()
+        || record.state != ServiceState::Exited
+        || record.last_exit_status != Some(exit_status)
+        || service_manager.process_count() != 0
+    {
+        panic!("жизненный цикл ELF-службы завершён несогласованно");
     }
 
     space

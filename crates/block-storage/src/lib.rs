@@ -60,6 +60,94 @@ pub fn validate_transfer(
     Ok(blocks)
 }
 
+/// Преобразование одного блока между открытым представлением файловой системы
+/// и представлением нижележащего устройства.
+///
+/// Реализация шифрования в будущем должна предоставляться проверенной
+/// криптографической библиотекой через этот контракт.
+pub trait BlockTransform {
+    fn encode_block(
+        &mut self,
+        block_index: u64,
+        plaintext: &[u8],
+        encoded: &mut [u8],
+    ) -> Result<(), BlockError>;
+
+    fn decode_block(
+        &mut self,
+        block_index: u64,
+        encoded: &[u8],
+        plaintext: &mut [u8],
+    ) -> Result<(), BlockError>;
+}
+
+/// Блочное устройство, которое применяет преобразование перед нижележащим устройством.
+///
+/// Буфер задаётся вызывающим кодом явно: слой не выделяет память и поэтому остаётся
+/// пригодным для раннего `no_std`-ядра. Один экземпляр обслуживает по одному блоку,
+/// что также не позволяет случайно передать преобразованию неполный сектор.
+pub struct TransformBlockDevice<'a, D, T> {
+    inner: D,
+    transform: T,
+    scratch: &'a mut [u8],
+}
+
+impl<'a, D: BlockDevice, T: BlockTransform> TransformBlockDevice<'a, D, T> {
+    pub fn new(inner: D, transform: T, scratch: &'a mut [u8]) -> Result<Self, BlockError> {
+        let geometry = inner.geometry();
+        if geometry.block_size == 0 || scratch.len() != geometry.block_size {
+            return Err(BlockError::InvalidGeometry);
+        }
+        Ok(Self {
+            inner,
+            transform,
+            scratch,
+        })
+    }
+
+    pub fn into_inner(self) -> D {
+        self.inner
+    }
+}
+
+impl<D: BlockDevice, T: BlockTransform> BlockDevice for TransformBlockDevice<'_, D, T> {
+    fn geometry(&self) -> BlockGeometry {
+        self.inner.geometry()
+    }
+
+    fn read_blocks(&mut self, first_block: u64, destination: &mut [u8]) -> Result<(), BlockError> {
+        let geometry = self.geometry();
+        validate_transfer(geometry, first_block, destination.len())?;
+        for (offset, output) in destination.chunks_exact_mut(geometry.block_size).enumerate() {
+            let block_index = first_block
+                .checked_add(offset as u64)
+                .ok_or(BlockError::ArithmeticOverflow)?;
+            self.inner.read_blocks(block_index, self.scratch)?;
+            self.transform
+                .decode_block(block_index, self.scratch, output)?;
+        }
+        Ok(())
+    }
+
+    fn write_blocks(&mut self, first_block: u64, source: &[u8]) -> Result<(), BlockError> {
+        let geometry = self.geometry();
+        validate_transfer(geometry, first_block, source.len())?;
+        for (offset, input) in source.chunks_exact(geometry.block_size).enumerate() {
+            let block_index = first_block
+                .checked_add(offset as u64)
+                .ok_or(BlockError::ArithmeticOverflow)?;
+            self.transform
+                .encode_block(block_index, input, self.scratch)?;
+            self.inner.write_blocks(block_index, self.scratch)?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), BlockError> {
+        self.inner.flush()
+    }
+}
+
 /// Раннее устройство памяти для модульных и файловых проверок.
 ///
 /// Размер блока и число блоков задаются типом, поэтому реализация не требует
@@ -115,7 +203,11 @@ impl<const BLOCK_SIZE: usize, const BLOCK_COUNT: usize> BlockDevice
         }
     }
 
-    fn read_blocks(&mut self, first_block: u64, destination: &mut [u8]) -> Result<(), BlockError> {
+    fn read_blocks(
+        &mut self,
+        first_block: u64,
+        destination: &mut [u8],
+    ) -> Result<(), BlockError> {
         let (first, end) = self.checked_range(first_block, destination.len())?;
         for (chunk, block) in destination
             .chunks_exact_mut(BLOCK_SIZE)
@@ -147,6 +239,51 @@ impl<const BLOCK_SIZE: usize, const BLOCK_COUNT: usize> BlockDevice
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct InvertTransform;
+
+    impl BlockTransform for InvertTransform {
+        fn encode_block(
+            &mut self,
+            _block_index: u64,
+            plaintext: &[u8],
+            encoded: &mut [u8],
+        ) -> Result<(), BlockError> {
+            for (output, input) in encoded.iter_mut().zip(plaintext) {
+                *output = !*input;
+            }
+            Ok(())
+        }
+
+        fn decode_block(
+            &mut self,
+            _block_index: u64,
+            encoded: &[u8],
+            plaintext: &mut [u8],
+        ) -> Result<(), BlockError> {
+            for (output, input) in plaintext.iter_mut().zip(encoded) {
+                *output = !*input;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn transform_device_hides_plaintext_from_lower_device() {
+        let inner = MemoryBlockDevice::<8, 2>::new();
+        let mut scratch = [0_u8; 8];
+        let mut device =
+            TransformBlockDevice::new(inner, InvertTransform, &mut scratch).unwrap();
+
+        device.write_blocks(0, b"phoenix!").unwrap();
+        let mut output = [0_u8; 8];
+        device.read_blocks(0, &mut output).unwrap();
+        assert_eq!(&output, b"phoenix!");
+
+        let mut inner = device.into_inner();
+        inner.read_blocks(0, &mut output).unwrap();
+        assert_ne!(&output, b"phoenix!");
+    }
 
     #[test]
     fn memory_device_round_trips_multiple_blocks() {

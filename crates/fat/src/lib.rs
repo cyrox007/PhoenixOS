@@ -1508,8 +1508,14 @@ mod tests {
             reader.free_detached_chain(2, &mut chain, &mut sector_buffer),
             Err(FatMutationError::Chain(FatChainError::LoopDetected(2)))
         );
-        assert_eq!(reader.read_entry(2, &mut sector_buffer), Ok(FatEntry::Data(3)));
-        assert_eq!(reader.read_entry(3, &mut sector_buffer), Ok(FatEntry::Data(2)));
+        assert_eq!(
+            reader.read_entry(2, &mut sector_buffer),
+            Ok(FatEntry::Data(3))
+        );
+        assert_eq!(
+            reader.read_entry(3, &mut sector_buffer),
+            Ok(FatEntry::Data(2))
+        );
     }
 
     #[test]

@@ -1130,11 +1130,7 @@ fn dispatch_file_io(request: SyscallRequest) -> SyscallReturn {
     }
 
     match with_current_process_address_space(|space| {
-        file_user_memory::validate_user_buffer(
-            space,
-            request.arguments[1],
-            request.arguments[2],
-        )
+        file_user_memory::validate_user_buffer(space, request.arguments[1], request.arguments[2])
     }) {
         Some(Ok(())) => {}
         Some(Err(_)) => return syscall_failure(STATUS_BAD_ARGUMENTS),

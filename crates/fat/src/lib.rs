@@ -180,6 +180,7 @@ pub enum FatWriteError {
     MissingFirstCluster,
     ChainTooShort,
     PreparedChainChanged(u32),
+    ReadOnlyFat16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,6 +197,7 @@ pub enum FatMutationError {
     DirectoryEntryChanged,
     NotRegularFile,
     MissingFirstCluster,
+    ReadOnlyFat16,
 }
 
 impl From<FatReadError> for FatMutationError {
@@ -288,6 +290,22 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
             return Err(FatReadError::BufferSize);
         }
         Ok(Self { device, boot })
+    }
+
+    fn ensure_data_write_supported(&self) -> Result<(), FatWriteError> {
+        match self.boot.kind {
+            FatKind::Fat12 => Err(FatReadError::UnsupportedFat12.into()),
+            FatKind::Fat16 => Err(FatWriteError::ReadOnlyFat16),
+            FatKind::Fat32 => Ok(()),
+        }
+    }
+
+    fn ensure_mutation_supported(&self) -> Result<(), FatMutationError> {
+        match self.boot.kind {
+            FatKind::Fat12 => Err(FatReadError::UnsupportedFat12.into()),
+            FatKind::Fat16 => Err(FatMutationError::ReadOnlyFat16),
+            FatKind::Fat32 => Ok(()),
+        }
     }
 
     pub fn read_entry(
@@ -416,9 +434,7 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
         sector_buffer: &mut [u8],
     ) -> Result<FatDirectoryEntry, FatMutationError> {
         self.validate_sector_buffer(sector_buffer)?;
-        if matches!(self.boot.kind, FatKind::Fat12) {
-            return Err(FatReadError::UnsupportedFat12.into());
-        }
+        self.ensure_mutation_supported()?;
         if located.entry.is_directory() || located.entry.is_volume_label() {
             return Err(FatMutationError::NotRegularFile);
         }
@@ -474,6 +490,7 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
         chain: &mut [u32],
         sector_buffer: &mut [u8],
     ) -> Result<usize, FatMutationError> {
+        self.ensure_mutation_supported()?;
         let chain_length = self.read_chain(start_cluster, chain, sector_buffer)?;
 
         for cluster in &chain[..chain_length] {
@@ -488,6 +505,7 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
         clusters: &[u32],
         sector_buffer: &mut [u8],
     ) -> Result<(), FatMutationError> {
+        self.ensure_mutation_supported()?;
         self.validate_sector_buffer(sector_buffer)?;
         if clusters.is_empty() {
             return Err(FatMutationError::EmptyChainPlan);
@@ -602,6 +620,7 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
         value: FatEntry,
         sector_buffer: &mut [u8],
     ) -> Result<(), FatMutationError> {
+        self.ensure_mutation_supported()?;
         self.validate_cluster(cluster)?;
         self.validate_sector_buffer(sector_buffer)?;
         if let FatEntry::Data(next_cluster) = value {
@@ -660,6 +679,7 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
         source: &[u8],
     ) -> Result<usize, FatWriteError> {
         self.validate_sector_buffer(sector_buffer)?;
+        self.ensure_data_write_supported()?;
         u32::try_from(source.len()).map_err(|_| FatWriteError::SourceTooLarge)?;
 
         if source.is_empty() {
@@ -731,6 +751,7 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
         source: &[u8],
     ) -> Result<usize, FatWriteError> {
         self.validate_sector_buffer(sector_buffer)?;
+        self.ensure_data_write_supported()?;
 
         if entry.is_directory() || entry.is_volume_label() {
             return Err(FatWriteError::NotRegularFile);
@@ -2179,6 +2200,79 @@ mod tests {
             reader.write_fat_entry(2, FatEntry::Reserved(7), &mut sector_buffer),
             Err(FatMutationError::UnsupportedValue)
         );
+    }
+
+    #[test]
+    fn fat16_mutation_is_read_only() {
+        let boot = FatBootSector {
+            kind: FatKind::Fat16,
+            bytes_per_sector: 512,
+            sectors_per_cluster: 1,
+            reserved_sectors: 1,
+            fat_count: 1,
+            root_entry_count: 0,
+            total_sectors: 4,
+            fat_size_sectors: 1,
+            first_data_sector: 2,
+            data_cluster_count: 2,
+            root_cluster: None,
+        };
+        let mut device = phoenix_block::MemoryBlockDevice::<512, 4>::new();
+        let mut fat_sector = [0_u8; 512];
+        fat_sector[4..6].copy_from_slice(&3_u16.to_le_bytes());
+        device.write_blocks(1, &fat_sector).unwrap();
+
+        let mut reader = FatTableReader::new(&mut device, boot).unwrap();
+        let mut sector_buffer = [0_u8; 512];
+
+        assert_eq!(
+            reader.write_fat_entry(2, FatEntry::EndOfChain, &mut sector_buffer),
+            Err(FatMutationError::ReadOnlyFat16)
+        );
+        assert_eq!(
+            reader.read_entry(2, &mut sector_buffer),
+            Ok(FatEntry::Data(3))
+        );
+    }
+
+    #[test]
+    fn fat16_file_data_write_is_read_only() {
+        let boot = FatBootSector {
+            kind: FatKind::Fat16,
+            bytes_per_sector: 512,
+            sectors_per_cluster: 1,
+            reserved_sectors: 1,
+            fat_count: 1,
+            root_entry_count: 0,
+            total_sectors: 4,
+            fat_size_sectors: 1,
+            first_data_sector: 2,
+            data_cluster_count: 2,
+            root_cluster: None,
+        };
+        let mut device = phoenix_block::MemoryBlockDevice::<512, 4>::new();
+        let mut fat_sector = [0_u8; 512];
+        fat_sector[4..6].copy_from_slice(&0xfff8_u16.to_le_bytes());
+        device.write_blocks(1, &fat_sector).unwrap();
+        device.write_blocks(2, &[b'A'; 512]).unwrap();
+
+        let entry = FatDirectoryEntry {
+            short_name: *b"DATA    BIN",
+            attributes: 0x20,
+            first_cluster: 2,
+            file_size: 1,
+        };
+        let mut reader = FatTableReader::new(&mut device, boot).unwrap();
+        let mut sector_buffer = [0_u8; 512];
+        let mut chain = [0_u32; 1];
+
+        assert_eq!(
+            reader.write_file_in_place(entry, 0, &mut chain, &mut sector_buffer, b"X"),
+            Err(FatWriteError::ReadOnlyFat16)
+        );
+
+        reader.device.read_blocks(2, &mut sector_buffer).unwrap();
+        assert!(sector_buffer.iter().all(|byte| *byte == b'A'));
     }
 
     #[test]

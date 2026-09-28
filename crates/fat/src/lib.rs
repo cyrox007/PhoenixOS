@@ -876,12 +876,10 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
             self.read_chain(old_first_cluster, chain, sector_buffer)?;
         }
 
-        let file_size =
-            u32::try_from(source.len()).map_err(|_| FatWriteError::SourceTooLarge)?;
+        let file_size = u32::try_from(source.len()).map_err(|_| FatWriteError::SourceTooLarge)?;
 
         if source.is_empty() {
-            let active_entry =
-                self.update_file_directory_entry(located, 0, 0, sector_buffer)?;
+            let active_entry = self.update_file_directory_entry(located, 0, 0, sector_buffer)?;
             if old_first_cluster < 2 {
                 return Ok(active_entry);
             }

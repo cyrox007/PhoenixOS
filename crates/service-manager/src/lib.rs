@@ -1,9 +1,7 @@
 #![no_std]
 
 use phoenix_process::ProcessId;
-use phoenix_process_manager::{
-    ProcessManager, ProcessManagerError, ProcessScheduleDecision,
-};
+use phoenix_process_manager::{ProcessManager, ProcessManagerError, ProcessScheduleDecision};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ServiceId(pub u32);
@@ -134,7 +132,9 @@ impl<const SERVICES: usize, const PROCESSES: usize> ServiceManager<SERVICES, PRO
         if record.state != ServiceState::Running {
             return Err(ServiceManagerError::ServiceNotRunning);
         }
-        let process = record.process.ok_or(ServiceManagerError::ServiceNotRunning)?;
+        let process = record
+            .process
+            .ok_or(ServiceManagerError::ServiceNotRunning)?;
 
         self.processes
             .exit(process, status)
@@ -248,7 +248,10 @@ mod tests {
 
         assert_eq!(completion.restarted_as, None);
         assert_eq!(manager.process_count(), 0);
-        assert_eq!(manager.record(SERVICE.id).unwrap().state, ServiceState::Exited);
+        assert_eq!(
+            manager.record(SERVICE.id).unwrap().state,
+            ServiceState::Exited
+        );
     }
 
     #[test]

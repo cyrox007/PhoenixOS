@@ -75,6 +75,8 @@ impl From<FatReadError> for FatChainError {
 }
 
 pub const DIRECTORY_ENTRY_SIZE: usize = 32;
+pub const FAT_LONG_NAME_MAX_UNITS: usize = 255;
+pub const FAT_LONG_NAME_BUFFER_UNITS: usize = 260;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FatDirectory {
@@ -105,6 +107,7 @@ pub enum FatDirectoryError {
     Read(FatReadError),
     Chain(FatChainError),
     MissingRootCluster,
+    LongNameBufferTooSmall,
 }
 
 impl From<FatReadError> for FatDirectoryError {
@@ -159,6 +162,29 @@ enum ParsedDirectorySlot {
     End,
     Skip,
     Entry(FatDirectoryEntry),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LongNameState {
+    active: bool,
+    expected_sequence: u8,
+    checksum: u8,
+    total_units: usize,
+}
+
+impl LongNameState {
+    const fn new() -> Self {
+        Self {
+            active: false,
+            expected_sequence: 0,
+            checksum: 0,
+            total_units: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
 }
 
 impl From<BlockError> for FatReadError {
@@ -294,6 +320,60 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
         Ok(written)
     }
 
+    pub fn read_directory_with_names<F>(
+        &mut self,
+        directory: FatDirectory,
+        chain: &mut [u32],
+        sector_buffer: &mut [u8],
+        long_name_buffer: &mut [u16],
+        mut visitor: F,
+    ) -> Result<(), FatDirectoryError>
+    where
+        F: FnMut(FatDirectoryEntry, Option<&[u16]>) -> bool,
+    {
+        self.validate_sector_buffer(sector_buffer)?;
+        if long_name_buffer.len() < FAT_LONG_NAME_BUFFER_UNITS {
+            return Err(FatDirectoryError::LongNameBufferTooSmall);
+        }
+        if matches!(self.boot.kind, FatKind::Fat12) {
+            return Err(FatReadError::UnsupportedFat12.into());
+        }
+
+        let mut state = LongNameState::new();
+        match directory {
+            FatDirectory::Root if matches!(self.boot.kind, FatKind::Fat16) => {
+                self.read_fat16_root_directory_with_names(
+                    sector_buffer,
+                    long_name_buffer,
+                    &mut state,
+                    &mut visitor,
+                )
+            }
+            FatDirectory::Root => {
+                let start_cluster = self
+                    .boot
+                    .root_cluster
+                    .ok_or(FatDirectoryError::MissingRootCluster)?;
+                self.read_cluster_directory_with_names(
+                    start_cluster,
+                    chain,
+                    sector_buffer,
+                    long_name_buffer,
+                    &mut state,
+                    &mut visitor,
+                )
+            }
+            FatDirectory::Cluster(start_cluster) => self.read_cluster_directory_with_names(
+                start_cluster,
+                chain,
+                sector_buffer,
+                long_name_buffer,
+                &mut state,
+                &mut visitor,
+            ),
+        }
+    }
+
     pub fn read_directory<F>(
         &mut self,
         directory: FatDirectory,
@@ -325,6 +405,87 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
                 self.read_cluster_directory(start_cluster, chain, sector_buffer, &mut visitor)
             }
         }
+    }
+
+    fn read_fat16_root_directory_with_names<F>(
+        &mut self,
+        sector_buffer: &mut [u8],
+        long_name_buffer: &mut [u16],
+        state: &mut LongNameState,
+        visitor: &mut F,
+    ) -> Result<(), FatDirectoryError>
+    where
+        F: FnMut(FatDirectoryEntry, Option<&[u16]>) -> bool,
+    {
+        let fat_area = u64::from(self.boot.fat_count)
+            .checked_mul(u64::from(self.boot.fat_size_sectors))
+            .ok_or(FatReadError::ArithmeticOverflow)?;
+        let first_sector = u64::from(self.boot.reserved_sectors)
+            .checked_add(fat_area)
+            .ok_or(FatReadError::ArithmeticOverflow)?;
+        let root_bytes = u64::from(self.boot.root_entry_count)
+            .checked_mul(DIRECTORY_ENTRY_SIZE as u64)
+            .ok_or(FatReadError::ArithmeticOverflow)?;
+        let bytes_per_sector = u64::from(self.boot.bytes_per_sector);
+        let sector_count = root_bytes
+            .checked_add(bytes_per_sector - 1)
+            .ok_or(FatReadError::ArithmeticOverflow)?
+            / bytes_per_sector;
+
+        for offset in 0..sector_count {
+            let sector = first_sector
+                .checked_add(offset)
+                .ok_or(FatReadError::ArithmeticOverflow)?;
+            self.device.read_blocks(sector, sector_buffer)?;
+            if visit_directory_sector_with_names(
+                self.boot.kind,
+                sector_buffer,
+                long_name_buffer,
+                state,
+                visitor,
+            ) {
+                return Ok(());
+            }
+        }
+
+        Ok(())
+    }
+
+    fn read_cluster_directory_with_names<F>(
+        &mut self,
+        start_cluster: u32,
+        chain: &mut [u32],
+        sector_buffer: &mut [u8],
+        long_name_buffer: &mut [u16],
+        state: &mut LongNameState,
+        visitor: &mut F,
+    ) -> Result<(), FatDirectoryError>
+    where
+        F: FnMut(FatDirectoryEntry, Option<&[u16]>) -> bool,
+    {
+        let chain_length = self.read_chain(start_cluster, chain, sector_buffer)?;
+        let sectors_per_cluster = u64::from(self.boot.sectors_per_cluster);
+
+        for cluster in &chain[..chain_length] {
+            let first_sector = self.cluster_first_sector(*cluster)?;
+            for offset in 0..sectors_per_cluster {
+                let sector = first_sector
+                    .checked_add(offset)
+                    .ok_or(FatReadError::ArithmeticOverflow)?;
+                self.device.read_blocks(sector, sector_buffer)?;
+                if visit_directory_sector_with_names(
+                    self.boot.kind,
+                    sector_buffer,
+                    long_name_buffer,
+                    state,
+                    visitor,
+                ) {
+                    return Ok(());
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn read_fat16_root_directory<F>(
@@ -580,6 +741,118 @@ const fn classify_fat32_entry(raw: u32) -> FatEntry {
     }
 }
 
+fn visit_directory_sector_with_names<F>(
+    kind: FatKind,
+    sector: &[u8],
+    long_name_buffer: &mut [u16],
+    state: &mut LongNameState,
+    visitor: &mut F,
+) -> bool
+where
+    F: FnMut(FatDirectoryEntry, Option<&[u16]>) -> bool,
+{
+    for raw_entry in sector.chunks_exact(DIRECTORY_ENTRY_SIZE) {
+        if raw_entry[0] == 0x00 {
+            state.reset();
+            return true;
+        }
+        if raw_entry[0] == 0xe5 {
+            state.reset();
+            continue;
+        }
+        if raw_entry[11] == 0x0f {
+            consume_long_name_slot(raw_entry, long_name_buffer, state);
+            continue;
+        }
+
+        let ParsedDirectorySlot::Entry(entry) = parse_directory_slot(kind, raw_entry) else {
+            state.reset();
+            continue;
+        };
+        let long_name = finish_long_name(entry.short_name, long_name_buffer, state);
+        if !visitor(entry, long_name) {
+            state.reset();
+            return true;
+        }
+        state.reset();
+    }
+    false
+}
+
+fn consume_long_name_slot(raw: &[u8], buffer: &mut [u16], state: &mut LongNameState) {
+    let sequence = raw[0] & 0x3f;
+    let is_last = raw[0] & 0x40 != 0;
+    let checksum = raw[13];
+
+    if sequence == 0
+        || sequence > 20
+        || raw[12] != 0
+        || read_u16(raw, 26) != 0
+        || usize::from(sequence) * 13 > buffer.len()
+    {
+        state.reset();
+        return;
+    }
+
+    if is_last {
+        state.active = true;
+        state.expected_sequence = sequence;
+        state.checksum = checksum;
+        state.total_units = usize::from(sequence) * 13;
+    }
+
+    if !state.active || state.expected_sequence != sequence || state.checksum != checksum {
+        state.reset();
+        return;
+    }
+
+    let start = usize::from(sequence - 1) * 13;
+    for (index, offset) in [1_usize, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30]
+        .iter()
+        .copied()
+        .enumerate()
+    {
+        buffer[start + index] = read_u16(raw, offset);
+    }
+
+    state.expected_sequence -= 1;
+}
+
+fn finish_long_name<'a>(
+    short_name: [u8; 11],
+    buffer: &'a [u16],
+    state: &LongNameState,
+) -> Option<&'a [u16]> {
+    if !state.active
+        || state.expected_sequence != 0
+        || state.checksum != short_name_checksum(&short_name)
+    {
+        return None;
+    }
+
+    let mut length = 0;
+    while length < state.total_units {
+        let value = buffer[length];
+        if value == 0x0000 || value == 0xffff {
+            break;
+        }
+        length += 1;
+    }
+
+    if length > FAT_LONG_NAME_MAX_UNITS {
+        return None;
+    }
+    Some(&buffer[..length])
+}
+
+fn short_name_checksum(short_name: &[u8; 11]) -> u8 {
+    let mut checksum = 0_u8;
+    for byte in short_name {
+        checksum = checksum.rotate_right(1).wrapping_add(*byte);
+    }
+    checksum
+}
+
 fn visit_directory_sector<F>(kind: FatKind, sector: &[u8], visitor: &mut F) -> bool
 where
     F: FnMut(FatDirectoryEntry) -> bool,
@@ -701,6 +974,144 @@ mod tests {
             data_cluster_count: 124_749,
             root_cluster: Some(2),
         }
+    }
+
+    fn write_long_name_slot(
+        slot: &mut [u8],
+        sequence: u8,
+        checksum: u8,
+        name: &[u16],
+    ) {
+        slot.fill(0xff);
+        slot[0] = sequence;
+        slot[11] = 0x0f;
+        slot[12] = 0;
+        slot[13] = checksum;
+        slot[26..28].copy_from_slice(&0_u16.to_le_bytes());
+
+        let ordinal = usize::from(sequence & 0x3f);
+        let start = (ordinal - 1) * 13;
+        let offsets = [1_usize, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30];
+        for (index, offset) in offsets.iter().copied().enumerate() {
+            let name_index = start + index;
+            let value = if name_index < name.len() {
+                name[name_index]
+            } else if name_index == name.len() {
+                0
+            } else {
+                0xffff
+            };
+            slot[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+
+    #[test]
+    fn reads_long_name_across_root_directory_sector_boundary() {
+        let mut device = phoenix_block::MemoryBlockDevice::<512, 80>::new();
+        let short_name = *b"PHOENI~1TXT";
+        let checksum = short_name_checksum(&short_name);
+        let name: [u16; 21] = [
+            0x0050, 0x0068, 0x006f, 0x0065, 0x006e, 0x0069, 0x0078,
+            0x0020, 0x004c, 0x006f, 0x006e, 0x0067, 0x0020, 0x0046,
+            0x0069, 0x006c, 0x0065, 0x002e, 0x0074, 0x0078, 0x0074,
+        ];
+
+        let mut first_sector = [0xe5_u8; 512];
+        write_long_name_slot(&mut first_sector[448..480], 0x42, checksum, &name);
+        write_long_name_slot(&mut first_sector[480..512], 0x01, checksum, &name);
+        device.write_blocks(41, &first_sector).unwrap();
+
+        let mut second_sector = [0_u8; 512];
+        second_sector[..11].copy_from_slice(&short_name);
+        second_sector[11] = 0x20;
+        second_sector[26..28].copy_from_slice(&2_u16.to_le_bytes());
+        second_sector[28..32].copy_from_slice(&55_u32.to_le_bytes());
+        device.write_blocks(42, &second_sector).unwrap();
+
+        let mut reader = FatTableReader::new(&mut device, fat16_boot()).unwrap();
+        let mut sector_buffer = [0_u8; 512];
+        let mut long_name_buffer = [0_u16; FAT_LONG_NAME_BUFFER_UNITS];
+        let mut actual_name = [0_u16; 21];
+        let mut actual_length = 0_usize;
+
+        reader
+            .read_directory_with_names(
+                FatDirectory::Root,
+                &mut [],
+                &mut sector_buffer,
+                &mut long_name_buffer,
+                |entry, long_name| {
+                    if entry.short_name == short_name {
+                        let long_name = long_name.unwrap();
+                        actual_length = long_name.len();
+                        actual_name[..long_name.len()].copy_from_slice(long_name);
+                        return false;
+                    }
+                    true
+                },
+            )
+            .unwrap();
+
+        assert_eq!(actual_length, name.len());
+        assert_eq!(actual_name, name);
+    }
+
+    #[test]
+    fn invalid_long_name_checksum_falls_back_to_short_name() {
+        let mut device = phoenix_block::MemoryBlockDevice::<512, 80>::new();
+        let short_name = *b"README~1TXT";
+        let name = [
+            0x0052_u16, 0x0065, 0x0061, 0x0064, 0x006d, 0x0065, 0x002e,
+            0x0074, 0x0078, 0x0074,
+        ];
+        let mut sector = [0_u8; 512];
+        write_long_name_slot(&mut sector[..32], 0x41, 0x55, &name);
+        sector[32..43].copy_from_slice(&short_name);
+        sector[43] = 0x20;
+        device.write_blocks(41, &sector).unwrap();
+
+        let mut reader = FatTableReader::new(&mut device, fat16_boot()).unwrap();
+        let mut sector_buffer = [0_u8; 512];
+        let mut long_name_buffer = [0_u16; FAT_LONG_NAME_BUFFER_UNITS];
+        let mut saw_short_name = false;
+
+        reader
+            .read_directory_with_names(
+                FatDirectory::Root,
+                &mut [],
+                &mut sector_buffer,
+                &mut long_name_buffer,
+                |entry, long_name| {
+                    if entry.short_name == short_name {
+                        saw_short_name = true;
+                        assert!(long_name.is_none());
+                        return false;
+                    }
+                    true
+                },
+            )
+            .unwrap();
+
+        assert!(saw_short_name);
+    }
+
+    #[test]
+    fn long_name_reader_requires_complete_work_buffer() {
+        let mut device = phoenix_block::MemoryBlockDevice::<512, 80>::new();
+        let mut reader = FatTableReader::new(&mut device, fat16_boot()).unwrap();
+        let mut sector_buffer = [0_u8; 512];
+        let mut short_buffer = [0_u16; FAT_LONG_NAME_MAX_UNITS];
+
+        assert_eq!(
+            reader.read_directory_with_names(
+                FatDirectory::Root,
+                &mut [],
+                &mut sector_buffer,
+                &mut short_buffer,
+                |_, _| true,
+            ),
+            Err(FatDirectoryError::LongNameBufferTooSmall)
+        );
     }
 
     #[test]

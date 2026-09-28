@@ -30,11 +30,7 @@ pub enum BlockError {
 pub trait BlockDevice {
     fn geometry(&self) -> BlockGeometry;
 
-    fn read_blocks(
-        &mut self,
-        first_block: u64,
-        destination: &mut [u8],
-    ) -> Result<(), BlockError>;
+    fn read_blocks(&mut self, first_block: u64, destination: &mut [u8]) -> Result<(), BlockError>;
 
     fn write_blocks(&mut self, first_block: u64, source: &[u8]) -> Result<(), BlockError>;
 
@@ -73,9 +69,7 @@ pub struct MemoryBlockDevice<const BLOCK_SIZE: usize, const BLOCK_COUNT: usize> 
     dirty: bool,
 }
 
-impl<const BLOCK_SIZE: usize, const BLOCK_COUNT: usize>
-    MemoryBlockDevice<BLOCK_SIZE, BLOCK_COUNT>
-{
+impl<const BLOCK_SIZE: usize, const BLOCK_COUNT: usize> MemoryBlockDevice<BLOCK_SIZE, BLOCK_COUNT> {
     pub const fn new() -> Self {
         Self {
             bytes: [[0; BLOCK_SIZE]; BLOCK_COUNT],
@@ -121,11 +115,7 @@ impl<const BLOCK_SIZE: usize, const BLOCK_COUNT: usize> BlockDevice
         }
     }
 
-    fn read_blocks(
-        &mut self,
-        first_block: u64,
-        destination: &mut [u8],
-    ) -> Result<(), BlockError> {
+    fn read_blocks(&mut self, first_block: u64, destination: &mut [u8]) -> Result<(), BlockError> {
         let (first, end) = self.checked_range(first_block, destination.len())?;
         for (chunk, block) in destination
             .chunks_exact_mut(BLOCK_SIZE)

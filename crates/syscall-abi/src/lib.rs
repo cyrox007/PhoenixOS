@@ -11,6 +11,10 @@ pub const SYSCALL_FILE_WRITE: u64 = 0x112;
 pub const SYSCALL_FILE_SEEK: u64 = 0x113;
 pub const SYSCALL_FILE_CLOSE: u64 = 0x114;
 
+pub const SYSCALL_STATUS_UNKNOWN_CALL: u32 = 1;
+pub const SYSCALL_STATUS_BAD_ARGUMENTS: u32 = 2;
+pub const SYSCALL_STATUS_OPERATION_NOT_READY: u32 = 3;
+
 pub const FILE_OPEN_READ: u64 = 1 << 0;
 pub const FILE_OPEN_WRITE: u64 = 1 << 1;
 pub const FILE_OPEN_CREATE: u64 = 1 << 2;
@@ -448,6 +452,13 @@ mod tests {
         assert_eq!(request.argument(3), Some(40));
         assert_eq!(request.argument(5), Some(60));
         assert_eq!(request.argument(6), None);
+    }
+
+    #[test]
+    fn public_status_codes_remain_stable() {
+        assert_eq!(SYSCALL_STATUS_UNKNOWN_CALL, 1);
+        assert_eq!(SYSCALL_STATUS_BAD_ARGUMENTS, 2);
+        assert_eq!(SYSCALL_STATUS_OPERATION_NOT_READY, 3);
     }
 
     #[test]

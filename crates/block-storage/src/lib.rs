@@ -118,7 +118,10 @@ impl<D: BlockDevice, T: BlockTransform> BlockDevice for TransformBlockDevice<'_,
     fn read_blocks(&mut self, first_block: u64, destination: &mut [u8]) -> Result<(), BlockError> {
         let geometry = self.geometry();
         validate_transfer(geometry, first_block, destination.len())?;
-        for (offset, output) in destination.chunks_exact_mut(geometry.block_size).enumerate() {
+        for (offset, output) in destination
+            .chunks_exact_mut(geometry.block_size)
+            .enumerate()
+        {
             let block_index = first_block
                 .checked_add(offset as u64)
                 .ok_or(BlockError::ArithmeticOverflow)?;
@@ -203,11 +206,7 @@ impl<const BLOCK_SIZE: usize, const BLOCK_COUNT: usize> BlockDevice
         }
     }
 
-    fn read_blocks(
-        &mut self,
-        first_block: u64,
-        destination: &mut [u8],
-    ) -> Result<(), BlockError> {
+    fn read_blocks(&mut self, first_block: u64, destination: &mut [u8]) -> Result<(), BlockError> {
         let (first, end) = self.checked_range(first_block, destination.len())?;
         for (chunk, block) in destination
             .chunks_exact_mut(BLOCK_SIZE)
@@ -272,8 +271,7 @@ mod tests {
     fn transform_device_hides_plaintext_from_lower_device() {
         let inner = MemoryBlockDevice::<8, 2>::new();
         let mut scratch = [0_u8; 8];
-        let mut device =
-            TransformBlockDevice::new(inner, InvertTransform, &mut scratch).unwrap();
+        let mut device = TransformBlockDevice::new(inner, InvertTransform, &mut scratch).unwrap();
 
         device.write_blocks(0, b"phoenix!").unwrap();
         let mut output = [0_u8; 8];

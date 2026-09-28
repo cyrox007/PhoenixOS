@@ -4,6 +4,7 @@ members = [
     "kernel",
     "crates/phoenix-framebuffer",
     "crates/boot-memory",
+    "crates/block-storage",
     "crates/virtual-memory",
     "crates/scheduler",
     "crates/process-model",

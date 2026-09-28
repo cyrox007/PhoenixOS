@@ -6,7 +6,8 @@ use phoenix_syscall_abi::{
     FILE_OPEN_CREATE, FILE_OPEN_READ, FILE_OPEN_TRUNCATE, FILE_OPEN_WRITE, FILE_SEEK_CURRENT,
     FILE_SEEK_END, FILE_SEEK_START, FileIoArguments, FileOpenArguments, FileSeekArguments,
     IpcReceiveArguments, IpcReceiveMetadata, IpcSendArguments, PackedCapabilityHandle,
-    PackedFileDescriptor, ProcessStartInfo, SyscallRequest,
+    PackedFileDescriptor, ProcessStartInfo, SYSCALL_STATUS_BAD_ARGUMENTS,
+    SYSCALL_STATUS_OPERATION_NOT_READY, SYSCALL_STATUS_UNKNOWN_CALL, SyscallRequest,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +26,26 @@ impl RuntimeCallResult {
     pub const fn is_success(self) -> bool {
         self.status == 0
     }
+}
+
+pub const ERRNO_EIO: i32 = 5;
+pub const ERRNO_EAGAIN: i32 = 11;
+pub const ERRNO_EINVAL: i32 = 22;
+pub const ERRNO_ENOSYS: i32 = 38;
+
+pub const fn errno_from_status(status: u64) -> i32 {
+    match status {
+        0 => 0,
+        value if value == SYSCALL_STATUS_UNKNOWN_CALL as u64 => ERRNO_ENOSYS,
+        value if value == SYSCALL_STATUS_BAD_ARGUMENTS as u64 => ERRNO_EINVAL,
+        value if value == SYSCALL_STATUS_OPERATION_NOT_READY as u64 => ERRNO_EAGAIN,
+        _ => ERRNO_EIO,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn phoenix_errno_from_status(status: u64) -> i32 {
+    errno_from_status(status)
 }
 
 pub type MainFunction = extern "C" fn() -> u64;
@@ -331,6 +352,24 @@ mod tests {
     extern "C" fn argument_main(info: *const ProcessStartInfo) -> u64 {
         let info = unsafe { &*info };
         info.argument_count + info.environment_count
+    }
+
+    #[test]
+    fn syscall_status_maps_to_basic_errno_values() {
+        assert_eq!(errno_from_status(0), 0);
+        assert_eq!(
+            errno_from_status(SYSCALL_STATUS_UNKNOWN_CALL as u64),
+            ERRNO_ENOSYS
+        );
+        assert_eq!(
+            errno_from_status(SYSCALL_STATUS_BAD_ARGUMENTS as u64),
+            ERRNO_EINVAL
+        );
+        assert_eq!(
+            errno_from_status(SYSCALL_STATUS_OPERATION_NOT_READY as u64),
+            ERRNO_EAGAIN
+        );
+        assert_eq!(errno_from_status(u64::MAX), ERRNO_EIO);
     }
 
     #[test]

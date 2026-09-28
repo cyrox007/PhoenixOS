@@ -1829,26 +1829,30 @@ mod tests {
 
     #[test]
     fn updates_only_file_cluster_and_size_in_directory_entry() {
-        let mut device = phoenix_block::MemoryBlockDevice::<512, 80>::new();
+        let mut device = phoenix_block::MemoryBlockDevice::<512, 4>::new();
         let mut sector = [0_u8; 512];
         sector[..11].copy_from_slice(b"DATA    BIN");
         sector[11] = 0x20;
         sector[12] = 0x7a;
         sector[26..28].copy_from_slice(&2_u16.to_le_bytes());
         sector[28..32].copy_from_slice(&55_u32.to_le_bytes());
-        device.write_blocks(41, &sector).unwrap();
+        device.write_blocks(3, &sector).unwrap();
 
-        let mut reader = FatTableReader::new(&mut device, fat16_boot()).unwrap();
+        let entry = FatDirectoryEntry {
+            short_name: *b"DATA    BIN",
+            attributes: 0x20,
+            first_cluster: 2,
+            file_size: 55,
+        };
+        let located = FatLocatedDirectoryEntry {
+            entry,
+            location: FatDirectoryLocation {
+                sector: 3,
+                offset: 0,
+            },
+        };
+        let mut reader = FatTableReader::new(&mut device, fat32_boot()).unwrap();
         let mut sector_buffer = [0_u8; 512];
-        let located = reader
-            .find_directory_entry(
-                FatDirectory::Root,
-                *b"DATA    BIN",
-                &mut [],
-                &mut sector_buffer,
-            )
-            .unwrap()
-            .unwrap();
 
         let updated = reader
             .update_file_directory_entry(located, 3, 99, &mut sector_buffer)
@@ -1857,7 +1861,7 @@ mod tests {
         assert_eq!(updated.first_cluster, 3);
         assert_eq!(updated.file_size, 99);
 
-        reader.device.read_blocks(41, &mut sector_buffer).unwrap();
+        reader.device.read_blocks(3, &mut sector_buffer).unwrap();
         assert_eq!(&sector_buffer[..11], b"DATA    BIN");
         assert_eq!(sector_buffer[11], 0x20);
         assert_eq!(sector_buffer[12], 0x7a);
@@ -1867,67 +1871,75 @@ mod tests {
 
     #[test]
     fn directory_entry_update_rejects_stale_location() {
-        let mut device = phoenix_block::MemoryBlockDevice::<512, 80>::new();
+        let mut device = phoenix_block::MemoryBlockDevice::<512, 4>::new();
         let mut sector = [0_u8; 512];
         sector[..11].copy_from_slice(b"DATA    BIN");
         sector[11] = 0x20;
         sector[26..28].copy_from_slice(&2_u16.to_le_bytes());
         sector[28..32].copy_from_slice(&55_u32.to_le_bytes());
-        device.write_blocks(41, &sector).unwrap();
+        device.write_blocks(3, &sector).unwrap();
 
-        let mut reader = FatTableReader::new(&mut device, fat16_boot()).unwrap();
+        let entry = FatDirectoryEntry {
+            short_name: *b"DATA    BIN",
+            attributes: 0x20,
+            first_cluster: 2,
+            file_size: 55,
+        };
+        let located = FatLocatedDirectoryEntry {
+            entry,
+            location: FatDirectoryLocation {
+                sector: 3,
+                offset: 0,
+            },
+        };
+        let mut reader = FatTableReader::new(&mut device, fat32_boot()).unwrap();
         let mut sector_buffer = [0_u8; 512];
-        let located = reader
-            .find_directory_entry(
-                FatDirectory::Root,
-                *b"DATA    BIN",
-                &mut [],
-                &mut sector_buffer,
-            )
-            .unwrap()
-            .unwrap();
 
-        sector_buffer[28..32].copy_from_slice(&56_u32.to_le_bytes());
-        reader.device.write_blocks(41, &sector_buffer).unwrap();
+        sector[28..32].copy_from_slice(&56_u32.to_le_bytes());
+        reader.device.write_blocks(3, &sector).unwrap();
 
         assert_eq!(
             reader.update_file_directory_entry(located, 3, 99, &mut sector_buffer),
             Err(FatMutationError::DirectoryEntryChanged)
         );
 
-        reader.device.read_blocks(41, &mut sector_buffer).unwrap();
+        reader.device.read_blocks(3, &mut sector_buffer).unwrap();
         assert_eq!(read_u16(&sector_buffer, 26), 2);
         assert_eq!(read_u32(&sector_buffer, 28), 56);
     }
 
     #[test]
     fn directory_entry_update_requires_cluster_for_nonempty_file() {
-        let mut device = phoenix_block::MemoryBlockDevice::<512, 80>::new();
+        let mut device = phoenix_block::MemoryBlockDevice::<512, 4>::new();
         let mut sector = [0_u8; 512];
         sector[..11].copy_from_slice(b"DATA    BIN");
         sector[11] = 0x20;
         sector[26..28].copy_from_slice(&2_u16.to_le_bytes());
         sector[28..32].copy_from_slice(&55_u32.to_le_bytes());
-        device.write_blocks(41, &sector).unwrap();
+        device.write_blocks(3, &sector).unwrap();
 
-        let mut reader = FatTableReader::new(&mut device, fat16_boot()).unwrap();
+        let entry = FatDirectoryEntry {
+            short_name: *b"DATA    BIN",
+            attributes: 0x20,
+            first_cluster: 2,
+            file_size: 55,
+        };
+        let located = FatLocatedDirectoryEntry {
+            entry,
+            location: FatDirectoryLocation {
+                sector: 3,
+                offset: 0,
+            },
+        };
+        let mut reader = FatTableReader::new(&mut device, fat32_boot()).unwrap();
         let mut sector_buffer = [0_u8; 512];
-        let located = reader
-            .find_directory_entry(
-                FatDirectory::Root,
-                *b"DATA    BIN",
-                &mut [],
-                &mut sector_buffer,
-            )
-            .unwrap()
-            .unwrap();
 
         assert_eq!(
             reader.update_file_directory_entry(located, 0, 1, &mut sector_buffer),
             Err(FatMutationError::MissingFirstCluster)
         );
 
-        reader.device.read_blocks(41, &mut sector_buffer).unwrap();
+        reader.device.read_blocks(3, &mut sector_buffer).unwrap();
         assert_eq!(read_u16(&sector_buffer, 26), 2);
         assert_eq!(read_u32(&sector_buffer, 28), 55);
     }

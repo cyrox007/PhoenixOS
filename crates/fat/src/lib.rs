@@ -58,6 +58,22 @@ pub enum FatReadError {
     Device(BlockError),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FatChainError {
+    Read(FatReadError),
+    ChainBufferFull,
+    LoopDetected(u32),
+    UnexpectedFree(u32),
+    BadCluster(u32),
+    ReservedEntry(u32),
+}
+
+impl From<FatReadError> for FatChainError {
+    fn from(error: FatReadError) -> Self {
+        Self::Read(error)
+    }
+}
+
 impl From<BlockError> for FatReadError {
     fn from(error: BlockError) -> Self {
         Self::Device(error)
@@ -106,6 +122,36 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
         };
 
         Ok(classify_entry(self.boot.kind, raw))
+    }
+
+    pub fn read_chain(
+        &mut self,
+        start_cluster: u32,
+        chain: &mut [u32],
+        sector_buffer: &mut [u8],
+    ) -> Result<usize, FatChainError> {
+        let mut current = start_cluster;
+        let mut count = 0;
+
+        loop {
+            if chain[..count].contains(&current) {
+                return Err(FatChainError::LoopDetected(current));
+            }
+            if count == chain.len() {
+                return Err(FatChainError::ChainBufferFull);
+            }
+
+            chain[count] = current;
+            count += 1;
+
+            match self.read_entry(current, sector_buffer)? {
+                FatEntry::Data(next) => current = next,
+                FatEntry::EndOfChain => return Ok(count),
+                FatEntry::Free => return Err(FatChainError::UnexpectedFree(current)),
+                FatEntry::Bad => return Err(FatChainError::BadCluster(current)),
+                FatEntry::Reserved(value) => return Err(FatChainError::ReservedEntry(value)),
+            }
+        }
     }
 
     fn validate_cluster(&self, cluster: u32) -> Result<(), FatReadError> {
@@ -358,6 +404,49 @@ mod tests {
             data_cluster_count: 124_749,
             root_cluster: Some(2),
         }
+    }
+
+    #[test]
+    fn reads_cluster_chain_without_allocation() {
+        let mut device = phoenix_block::MemoryBlockDevice::<512, 4>::new();
+        let mut fat_sector = [0_u8; 512];
+        fat_sector[4..6].copy_from_slice(&3_u16.to_le_bytes());
+        fat_sector[6..8].copy_from_slice(&4_u16.to_le_bytes());
+        fat_sector[8..10].copy_from_slice(&0xfff8_u16.to_le_bytes());
+        device.write_blocks(1, &fat_sector).unwrap();
+
+        let mut reader = FatTableReader::new(&mut device, fat16_boot()).unwrap();
+        let mut sector_buffer = [0_u8; 512];
+        let mut chain = [0_u32; 4];
+        let length = reader
+            .read_chain(2, &mut chain, &mut sector_buffer)
+            .unwrap();
+
+        assert_eq!(length, 3);
+        assert_eq!(&chain[..length], &[2, 3, 4]);
+    }
+
+    #[test]
+    fn cluster_chain_detects_loop_and_capacity_limit() {
+        let mut device = phoenix_block::MemoryBlockDevice::<512, 4>::new();
+        let mut fat_sector = [0_u8; 512];
+        fat_sector[4..6].copy_from_slice(&3_u16.to_le_bytes());
+        fat_sector[6..8].copy_from_slice(&2_u16.to_le_bytes());
+        device.write_blocks(1, &fat_sector).unwrap();
+
+        let mut reader = FatTableReader::new(&mut device, fat16_boot()).unwrap();
+        let mut sector_buffer = [0_u8; 512];
+        let mut chain = [0_u32; 4];
+        assert_eq!(
+            reader.read_chain(2, &mut chain, &mut sector_buffer),
+            Err(FatChainError::LoopDetected(2))
+        );
+
+        let mut short_chain = [0_u32; 1];
+        assert_eq!(
+            reader.read_chain(2, &mut short_chain, &mut sector_buffer),
+            Err(FatChainError::ChainBufferFull)
+        );
     }
 
     #[test]

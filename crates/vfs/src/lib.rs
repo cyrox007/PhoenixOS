@@ -661,9 +661,7 @@ mod tests {
         let mut fs = MemoryFileSystem::<3, 16>::new();
         let file = fs.create_file("/data").unwrap();
         let mut descriptors = DescriptorTable::<3>::new();
-        let writer = descriptors
-            .open(&fs, file, AccessMode::WriteOnly)
-            .unwrap();
+        let writer = descriptors.open(&fs, file, AccessMode::WriteOnly).unwrap();
         let reader = descriptors.open(&fs, file, AccessMode::ReadOnly).unwrap();
 
         assert_eq!(descriptors.write(&mut fs, writer, b"phoenix").unwrap(), 7);

@@ -431,16 +431,14 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
             match self.boot.kind {
                 FatKind::Fat12 => return Err(FatReadError::UnsupportedFat12.into()),
                 FatKind::Fat16 => {
-                    let raw = u16::try_from(raw_value)
-                        .map_err(|_| FatMutationError::UnsupportedValue)?;
-                    sector_buffer[byte_offset..byte_offset + 2]
-                        .copy_from_slice(&raw.to_le_bytes());
+                    let raw =
+                        u16::try_from(raw_value).map_err(|_| FatMutationError::UnsupportedValue)?;
+                    sector_buffer[byte_offset..byte_offset + 2].copy_from_slice(&raw.to_le_bytes());
                 }
                 FatKind::Fat32 => {
                     let existing = read_u32(sector_buffer, byte_offset);
                     let raw = (existing & 0xf000_0000) | (raw_value & 0x0fff_ffff);
-                    sector_buffer[byte_offset..byte_offset + 4]
-                        .copy_from_slice(&raw.to_le_bytes());
+                    sector_buffer[byte_offset..byte_offset + 4].copy_from_slice(&raw.to_le_bytes());
                 }
             }
             self.device.write_blocks(sector, sector_buffer)?;

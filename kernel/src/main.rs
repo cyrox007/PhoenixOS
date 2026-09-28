@@ -7,6 +7,7 @@ extern crate alloc;
 
 mod arch;
 mod elf_user_loader;
+mod file_user_memory;
 mod heap;
 mod ipc_user_memory;
 mod process_space;
@@ -1210,6 +1211,43 @@ fn process_region_mapping_self_test(
         },
     )
     .expect("checked IPC copy-in отклонил отображённый буфер");
+
+    let file_path_address = PROCESS_VM_TEST_ADDRESS + phoenix_process::PAGE_SIZE - 5;
+    let file_path = b"/tmp/phoenix.log";
+    space
+        .write_user_bytes(VirtAddr::new(file_path_address), file_path)
+        .expect("не удалось подготовить путь файлового системного вызова");
+    let mut copied_path = [0_u8; 64];
+    let copied_path = file_user_memory::copy_path(
+        &mut space,
+        file_path_address,
+        file_path.len() as u64,
+        &mut copied_path,
+    )
+    .expect("checked file copy-in отклонил отображённый путь");
+    if copied_path.as_bytes() != file_path {
+        panic!("checked file copy-in повредил путь");
+    }
+
+    let file_output_address = PROCESS_VM_TEST_ADDRESS + 0x280;
+    let file_output = b"phoenix-file-buffer";
+    file_user_memory::copy_to_user(
+        &mut space,
+        file_output_address,
+        file_output.len() as u64,
+        file_output,
+    )
+    .expect("checked file copy-out отклонил отображённый буфер");
+    let mut copied_file_output = [0_u8; 19];
+    space
+        .read_user_bytes(VirtAddr::new(file_output_address), &mut copied_file_output)
+        .expect("не удалось проверить файловый copy-out");
+    if copied_file_output != *file_output {
+        panic!("checked file copy-out повредил данные");
+    }
+    serial::emergency(format_args!(
+        "[INFO] file syscall user memory self-test: OK\n"
+    ));
 
     if copied.as_slice() != send_words {
         panic!("checked IPC copy-in повредил слова сообщения");

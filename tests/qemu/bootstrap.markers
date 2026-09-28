@@ -51,3 +51,4 @@ ipc endpoint syscall operations self-test: OK
 ipc capability transfer self-test: OK
 
 file syscall dispatch self-test: OK
+file syscall user memory self-test: OK

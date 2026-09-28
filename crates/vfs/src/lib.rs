@@ -120,6 +120,38 @@ impl<const CAPACITY: usize> MountTable<CAPACITY> {
     }
 }
 
+pub trait NamespaceLookup {
+    fn lookup_child(&self, parent: VfsNode, name: &[u8]) -> Result<NodeId, VfsError>;
+}
+
+pub fn resolve_mounted_path<L: NamespaceLookup + ?Sized, const CAPACITY: usize>(
+    lookup: &L,
+    mounts: &MountTable<CAPACITY>,
+    path: &str,
+) -> Result<VfsNode, VfsError> {
+    let mut current = mounts.cross_mount(mounts.root());
+    if path == "/" {
+        return Ok(current);
+    }
+    if !path.starts_with('/') || path.ends_with('/') {
+        return Err(VfsError::InvalidPath);
+    }
+
+    for component in path[1..].split('/') {
+        if component.is_empty() || component == "." || component == ".." {
+            return Err(VfsError::InvalidPath);
+        }
+    }
+
+    for component in path[1..].split('/') {
+        current = mounts.cross_mount(current);
+        let child = lookup.lookup_child(current, component.as_bytes())?;
+        current = VfsNode::new(current.filesystem, child);
+    }
+
+    Ok(mounts.cross_mount(current))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NodeMetadata {
     pub kind: NodeKind,
@@ -809,6 +841,87 @@ mod tests {
         assert!(mounts.is_empty());
         assert_eq!(mounts.cross_mount(location), location);
         assert_eq!(mounts.unmount(location), Err(MountError::NotMounted));
+    }
+
+    struct TestNamespace {
+        system: MemoryFileSystem<8, 32>,
+        media: MemoryFileSystem<8, 32>,
+    }
+
+    impl NamespaceLookup for TestNamespace {
+        fn lookup_child(&self, parent: VfsNode, name: &[u8]) -> Result<NodeId, VfsError> {
+            match parent.filesystem {
+                FileSystemId(1) => self.system.lookup_child(parent.node, name),
+                FileSystemId(2) => self.media.lookup_child(parent.node, name),
+                _ => Err(VfsError::NotFound),
+            }
+        }
+    }
+
+    #[test]
+    fn mounted_path_resolution_switches_filesystem_at_mount_point() {
+        let mut namespace = TestNamespace {
+            system: MemoryFileSystem::new(),
+            media: MemoryFileSystem::new(),
+        };
+        let system_root = namespace.system.root_node().unwrap();
+        let media_root = namespace.media.root_node().unwrap();
+        let media_directory = namespace
+            .system
+            .create_node(system_root, b"media", NodeKind::Directory)
+            .unwrap();
+        let etc_directory = namespace
+            .system
+            .create_node(system_root, b"etc", NodeKind::Directory)
+            .unwrap();
+        let photo = namespace
+            .media
+            .create_node(media_root, b"photo.jpg", NodeKind::File)
+            .unwrap();
+
+        let mut mounts = MountTable::<2>::new(VfsNode::new(FileSystemId(1), system_root));
+        mounts
+            .mount(
+                VfsNode::new(FileSystemId(1), media_directory),
+                VfsNode::new(FileSystemId(2), media_root),
+            )
+            .unwrap();
+
+        assert_eq!(
+            resolve_mounted_path(&namespace, &mounts, "/"),
+            Ok(VfsNode::new(FileSystemId(1), system_root))
+        );
+        assert_eq!(
+            resolve_mounted_path(&namespace, &mounts, "/etc"),
+            Ok(VfsNode::new(FileSystemId(1), etc_directory))
+        );
+        assert_eq!(
+            resolve_mounted_path(&namespace, &mounts, "/media"),
+            Ok(VfsNode::new(FileSystemId(2), media_root))
+        );
+        assert_eq!(
+            resolve_mounted_path(&namespace, &mounts, "/media/photo.jpg"),
+            Ok(VfsNode::new(FileSystemId(2), photo))
+        );
+    }
+
+    #[test]
+    fn mounted_path_resolution_rejects_invalid_components() {
+        let namespace = TestNamespace {
+            system: MemoryFileSystem::new(),
+            media: MemoryFileSystem::new(),
+        };
+        let root = namespace.system.root_node().unwrap();
+        let mounts = MountTable::<1>::new(VfsNode::new(FileSystemId(1), root));
+
+        assert_eq!(
+            resolve_mounted_path(&namespace, &mounts, "relative"),
+            Err(VfsError::InvalidPath)
+        );
+        assert_eq!(
+            resolve_mounted_path(&namespace, &mounts, "/a/../b"),
+            Err(VfsError::InvalidPath)
+        );
     }
 
     #[test]

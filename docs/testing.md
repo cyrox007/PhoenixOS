@@ -21,9 +21,13 @@ cargo test -p phoenix-memory
 cargo test -p phoenix-vm
 cargo test -p phoenix-scheduler
 cargo test -p phoenix-process
+cargo test -p phoenix-process-manager
+cargo test -p phoenix-service-manager
 cargo test -p phoenix-syscall-abi
 cargo test -p phoenix-capability
 cargo test -p phoenix-ipc
+cargo test -p phoenix-elf-loader
+cargo test -p phoenix-user-runtime
 ```
 
 Новый библиотечный пакет обязан быть добавлен в этот список в том же PR.

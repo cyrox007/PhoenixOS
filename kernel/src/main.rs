@@ -153,6 +153,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!("ipc endpoint registry self-test: OK"),
     );
 
+    system_service_lifecycle_self_test();
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("system service lifecycle self-test: OK"),
+    );
+
     arch::x86_64::exceptions::smoke_test_breakpoint();
     serial::line(&mut out, "INFO", format_args!("breakpoint self-test: OK"));
 
@@ -1732,6 +1739,59 @@ fn user_mode_syscall_self_test(
 
     if frames.free_frames() != free_before {
         panic!("пользовательская самопроверка не вернула всю физическую память");
+    }
+}
+
+fn system_service_lifecycle_self_test() {
+    use phoenix_process_manager::ProcessScheduleDecision;
+    use phoenix_service_manager::{
+        RestartPolicy, ServiceId, ServiceManager, ServiceManifest, ServiceState,
+    };
+
+    let manifest = ServiceManifest {
+        id: ServiceId(1),
+        image_id: 0x5048_4f45_4e49_5849,
+        quantum_ticks: 2,
+        restart_policy: RestartPolicy::OnFailure,
+    };
+    let mut manager = ServiceManager::<1, 1>::new();
+    manager
+        .register(manifest)
+        .expect("не удалось зарегистрировать начальную системную службу");
+    let first_process = manager
+        .start(manifest.id)
+        .expect("не удалось запустить начальную системную службу");
+    if !matches!(
+        manager.on_tick(),
+        ProcessScheduleDecision::Switch { to, .. } if to == first_process
+    ) {
+        panic!("процесс системной службы не попал в планировщик");
+    }
+
+    let failed = manager
+        .complete(manifest.id, 1)
+        .expect("не удалось обработать аварийное завершение системной службы");
+    let restarted_process = failed
+        .restarted_as
+        .expect("аварийная системная служба не была перезапущена");
+    if failed.exited_process != first_process || restarted_process == first_process {
+        panic!("перезапуск системной службы не заменил завершённый процесс");
+    }
+
+    let completed = manager
+        .complete(manifest.id, 0)
+        .expect("не удалось обработать штатное завершение системной службы");
+    let record = manager
+        .record(manifest.id)
+        .expect("запись системной службы исчезла из реестра");
+    if completed.restarted_as.is_some()
+        || record.state != ServiceState::Exited
+        || record.process.is_some()
+        || record.last_exit_status != Some(0)
+        || record.restart_count != 1
+        || manager.process_count() != 0
+    {
+        panic!("политика жизненного цикла системной службы нарушена");
     }
 }
 

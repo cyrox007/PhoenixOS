@@ -43,6 +43,7 @@ jobs:
           cargo test -p phoenix-scheduler
           cargo test -p phoenix-process
           cargo test -p phoenix-process-manager
+          cargo test -p phoenix-service-manager
           cargo test -p phoenix-syscall-abi
           cargo test -p phoenix-capability
           cargo test -p phoenix-ipc

@@ -8,6 +8,7 @@ members = [
     "crates/scheduler",
     "crates/process-model",
     "crates/process-manager",
+    "crates/service-manager",
     "crates/syscall-abi",
     "crates/capability-model",
     "crates/ipc-model",

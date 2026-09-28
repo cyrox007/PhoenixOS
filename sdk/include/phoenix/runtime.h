@@ -16,6 +16,11 @@ extern "C" {
 #define PHOENIX_FILE_SEEK_CURRENT UINT64_C(1)
 #define PHOENIX_FILE_SEEK_END UINT64_C(2)
 
+#define PHOENIX_EIO 5
+#define PHOENIX_EAGAIN 11
+#define PHOENIX_EINVAL 22
+#define PHOENIX_ENOSYS 38
+
 typedef struct PhoenixFileDescriptor {
     uint32_t slot;
     uint32_t generation;
@@ -51,6 +56,8 @@ PhoenixRuntimeCallResult phoenix_file_seek(
 );
 
 PhoenixRuntimeCallResult phoenix_file_close(PhoenixFileDescriptor descriptor);
+
+int32_t phoenix_errno_from_status(uint64_t status);
 
 #ifdef __cplusplus
 }

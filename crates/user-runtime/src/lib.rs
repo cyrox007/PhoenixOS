@@ -14,6 +14,19 @@ pub struct SyscallError {
     status: u64,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeCallResult {
+    pub value: u64,
+    pub status: u64,
+}
+
+impl RuntimeCallResult {
+    pub const fn is_success(self) -> bool {
+        self.status == 0
+    }
+}
+
 pub type MainFunction = extern "C" fn() -> u64;
 pub type ArgumentMainFunction = extern "C" fn(*const ProcessStartInfo) -> u64;
 
@@ -111,6 +124,63 @@ pub fn file_seek(descriptor: PackedFileDescriptor, from: SeekFrom) -> Result<u64
 
 pub fn file_close(descriptor: PackedFileDescriptor) -> Result<(), SyscallError> {
     invoke(SyscallRequest::file_close(descriptor)).map(|_| ())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn phoenix_file_open(
+    path: *const u8,
+    path_length: u64,
+    flags: u64,
+) -> RuntimeCallResult {
+    invoke_raw(SyscallRequest::file_open(FileOpenArguments {
+        path_address: path as u64,
+        path_length,
+        flags,
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn phoenix_file_read(
+    descriptor: PackedFileDescriptor,
+    buffer: *mut u8,
+    buffer_length: u64,
+) -> RuntimeCallResult {
+    invoke_raw(SyscallRequest::file_read(FileIoArguments {
+        descriptor,
+        buffer_address: buffer as u64,
+        buffer_length,
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn phoenix_file_write(
+    descriptor: PackedFileDescriptor,
+    buffer: *const u8,
+    buffer_length: u64,
+) -> RuntimeCallResult {
+    invoke_raw(SyscallRequest::file_write(FileIoArguments {
+        descriptor,
+        buffer_address: buffer as u64,
+        buffer_length,
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn phoenix_file_seek(
+    descriptor: PackedFileDescriptor,
+    offset: i64,
+    origin: u64,
+) -> RuntimeCallResult {
+    invoke_raw(SyscallRequest::file_seek(FileSeekArguments {
+        descriptor,
+        offset,
+        origin,
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn phoenix_file_close(descriptor: PackedFileDescriptor) -> RuntimeCallResult {
+    invoke_raw(SyscallRequest::file_close(descriptor))
 }
 
 pub fn ipc_send(
@@ -212,6 +282,18 @@ fn run_main_with_info(main: ArgumentMainFunction, info: &ProcessStartInfo) -> u6
 
 #[inline(always)]
 fn invoke(request: SyscallRequest) -> Result<u64, SyscallError> {
+    let result = invoke_raw(request);
+    if result.is_success() {
+        return Ok(result.value);
+    }
+
+    Err(SyscallError {
+        status: result.status,
+    })
+}
+
+#[inline(always)]
+fn invoke_raw(request: SyscallRequest) -> RuntimeCallResult {
     let arguments = request.arguments;
     let mut value = request.number;
     let mut status = arguments[2];
@@ -232,11 +314,7 @@ fn invoke(request: SyscallRequest) -> Result<u64, SyscallError> {
         );
     }
 
-    if status == 0 {
-        return Ok(value);
-    }
-
-    Err(SyscallError { status })
+    RuntimeCallResult { value, status }
 }
 
 #[cfg(test)]
@@ -253,6 +331,26 @@ mod tests {
     extern "C" fn argument_main(info: *const ProcessStartInfo) -> u64 {
         let info = unsafe { &*info };
         info.argument_count + info.environment_count
+    }
+
+    #[test]
+    fn c_result_has_stable_layout() {
+        assert_eq!(core::mem::size_of::<RuntimeCallResult>(), 16);
+        assert_eq!(core::mem::align_of::<RuntimeCallResult>(), 8);
+        assert!(
+            RuntimeCallResult {
+                value: 7,
+                status: 0,
+            }
+            .is_success()
+        );
+        assert!(
+            !RuntimeCallResult {
+                value: 0,
+                status: 2,
+            }
+            .is_success()
+        );
     }
 
     #[test]

@@ -35,6 +35,9 @@ jobs:
       - name: Проверить реестр загрузочных маркеров
         run: bash scripts/test-check-serial-markers.sh
 
+      - name: Проверить C-заголовок пользовательской среды
+        run: cc -std=c11 -Wall -Wextra -Werror -Isdk/include -fsyntax-only tests/c/runtime_header.c
+
       - name: Запустить модульные проверки ядра
         run: |
           cargo test -p phoenix-framebuffer

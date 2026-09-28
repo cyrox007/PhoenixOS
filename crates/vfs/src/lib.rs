@@ -45,18 +45,8 @@ pub trait FileSystem {
         name: &[u8],
         kind: NodeKind,
     ) -> Result<NodeId, VfsError>;
-    fn read_node(
-        &self,
-        node: NodeId,
-        offset: u64,
-        output: &mut [u8],
-    ) -> Result<usize, VfsError>;
-    fn write_node(
-        &mut self,
-        node: NodeId,
-        offset: u64,
-        data: &[u8],
-    ) -> Result<usize, VfsError>;
+    fn read_node(&self, node: NodeId, offset: u64, output: &mut [u8]) -> Result<usize, VfsError>;
+    fn write_node(&mut self, node: NodeId, offset: u64, data: &[u8]) -> Result<usize, VfsError>;
     fn truncate_node(&mut self, node: NodeId, length: u64) -> Result<(), VfsError>;
 }
 
@@ -291,12 +281,7 @@ impl<const NODES: usize, const FILE_CAPACITY: usize> FileSystem
         Ok(NodeId(index as u32))
     }
 
-    fn read_node(
-        &self,
-        node: NodeId,
-        offset: u64,
-        output: &mut [u8],
-    ) -> Result<usize, VfsError> {
+    fn read_node(&self, node: NodeId, offset: u64, output: &mut [u8]) -> Result<usize, VfsError> {
         let node = self.node(node)?;
         if node.kind != NodeKind::File {
             return Err(VfsError::IsDirectory);
@@ -310,12 +295,7 @@ impl<const NODES: usize, const FILE_CAPACITY: usize> FileSystem
         Ok(length)
     }
 
-    fn write_node(
-        &mut self,
-        node: NodeId,
-        offset: u64,
-        data: &[u8],
-    ) -> Result<usize, VfsError> {
+    fn write_node(&mut self, node: NodeId, offset: u64, data: &[u8]) -> Result<usize, VfsError> {
         let offset = usize::try_from(offset).map_err(|_| VfsError::InvalidOffset)?;
         let end = offset
             .checked_add(data.len())

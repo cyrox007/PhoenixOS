@@ -439,8 +439,7 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
         self.device
             .read_blocks(located.location.sector, sector_buffer)?;
         let raw_entry = &sector_buffer[offset..end];
-        let ParsedDirectorySlot::Entry(current) =
-            parse_directory_slot(self.boot.kind, raw_entry)
+        let ParsedDirectorySlot::Entry(current) = parse_directory_slot(self.boot.kind, raw_entry)
         else {
             return Err(FatMutationError::DirectoryEntryChanged);
         };
@@ -450,8 +449,7 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
 
         if matches!(self.boot.kind, FatKind::Fat32) {
             let high_cluster = ((first_cluster >> 16) & 0xffff) as u16;
-            sector_buffer[offset + 20..offset + 22]
-                .copy_from_slice(&high_cluster.to_le_bytes());
+            sector_buffer[offset + 20..offset + 22].copy_from_slice(&high_cluster.to_le_bytes());
         }
         let low_cluster = (first_cluster & 0xffff) as u16;
         sector_buffer[offset + 26..offset + 28].copy_from_slice(&low_cluster.to_le_bytes());

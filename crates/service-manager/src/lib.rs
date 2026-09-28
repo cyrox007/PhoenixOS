@@ -38,6 +38,13 @@ pub struct ServiceRecord {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServiceLaunch {
+    pub service: ServiceId,
+    pub process: ProcessId,
+    pub image_id: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ServiceCompletion {
     pub exited_process: ProcessId,
     pub restarted_as: Option<ProcessId>,
@@ -99,7 +106,7 @@ impl<const SERVICES: usize, const PROCESSES: usize> ServiceManager<SERVICES, PRO
         Ok(())
     }
 
-    pub fn start(&mut self, id: ServiceId) -> Result<ProcessId, ServiceManagerError> {
+    pub fn launch(&mut self, id: ServiceId) -> Result<ServiceLaunch, ServiceManagerError> {
         let index = self
             .find_index(id)
             .ok_or(ServiceManagerError::ServiceNotFound)?;
@@ -117,7 +124,15 @@ impl<const SERVICES: usize, const PROCESSES: usize> ServiceManager<SERVICES, PRO
             process: Some(process.id),
             ..record
         });
-        Ok(process.id)
+        Ok(ServiceLaunch {
+            service: id,
+            process: process.id,
+            image_id: record.manifest.image_id,
+        })
+    }
+
+    pub fn start(&mut self, id: ServiceId) -> Result<ProcessId, ServiceManagerError> {
+        self.launch(id).map(|launch| launch.process)
     }
 
     pub fn complete(
@@ -206,6 +221,18 @@ mod tests {
         quantum_ticks: 2,
         restart_policy: RestartPolicy::OnFailure,
     };
+
+    #[test]
+    fn launch_identifies_image_and_runnable_process() {
+        let mut manager = ServiceManager::<1, 1>::new();
+        manager.register(SERVICE).unwrap();
+
+        let launch = manager.launch(SERVICE.id).unwrap();
+
+        assert_eq!(launch.service, SERVICE.id);
+        assert_eq!(launch.image_id, SERVICE.image_id);
+        assert_eq!(manager.record(SERVICE.id).unwrap().process, Some(launch.process));
+    }
 
     #[test]
     fn registers_and_starts_service_as_runnable_process() {

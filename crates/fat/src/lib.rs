@@ -126,6 +126,35 @@ impl From<BlockError> for FatDirectoryError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FatFileError {
+    Read(FatReadError),
+    Chain(FatChainError),
+    NotRegularFile,
+    DestinationTooSmall,
+    FileTooLarge,
+    MissingFirstCluster,
+    ChainTooShort,
+}
+
+impl From<FatReadError> for FatFileError {
+    fn from(error: FatReadError) -> Self {
+        Self::Read(error)
+    }
+}
+
+impl From<FatChainError> for FatFileError {
+    fn from(error: FatChainError) -> Self {
+        Self::Chain(error)
+    }
+}
+
+impl From<BlockError> for FatFileError {
+    fn from(error: BlockError) -> Self {
+        Self::Read(FatReadError::Device(error))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ParsedDirectorySlot {
     End,
     Skip,
@@ -210,6 +239,60 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
                 FatEntry::Reserved(value) => return Err(FatChainError::ReservedEntry(value)),
             }
         }
+    }
+
+    pub fn read_file(
+        &mut self,
+        entry: FatDirectoryEntry,
+        chain: &mut [u32],
+        sector_buffer: &mut [u8],
+        destination: &mut [u8],
+    ) -> Result<usize, FatFileError> {
+        self.validate_sector_buffer(sector_buffer)?;
+
+        if entry.is_directory() || entry.is_volume_label() {
+            return Err(FatFileError::NotRegularFile);
+        }
+
+        let file_size =
+            usize::try_from(entry.file_size).map_err(|_| FatFileError::FileTooLarge)?;
+        if destination.len() < file_size {
+            return Err(FatFileError::DestinationTooSmall);
+        }
+        if file_size == 0 {
+            return Ok(0);
+        }
+        if entry.first_cluster < 2 {
+            return Err(FatFileError::MissingFirstCluster);
+        }
+
+        let chain_length = self.read_chain(entry.first_cluster, chain, sector_buffer)?;
+        let sectors_per_cluster = u64::from(self.boot.sectors_per_cluster);
+        let mut written = 0_usize;
+
+        for cluster in &chain[..chain_length] {
+            let first_sector = self.cluster_first_sector(*cluster)?;
+            for offset in 0..sectors_per_cluster {
+                if written == file_size {
+                    return Ok(written);
+                }
+
+                let sector = first_sector
+                    .checked_add(offset)
+                    .ok_or(FatReadError::ArithmeticOverflow)?;
+                self.device.read_blocks(sector, sector_buffer)?;
+
+                let remaining = file_size - written;
+                let copied = remaining.min(sector_buffer.len());
+                destination[written..written + copied].copy_from_slice(&sector_buffer[..copied]);
+                written += copied;
+            }
+        }
+
+        if written != file_size {
+            return Err(FatFileError::ChainTooShort);
+        }
+        Ok(written)
     }
 
     pub fn read_directory<F>(
@@ -619,6 +702,86 @@ mod tests {
             data_cluster_count: 124_749,
             root_cluster: Some(2),
         }
+    }
+
+    #[test]
+    fn reads_file_content_across_cluster_chain() {
+        let boot = FatBootSector {
+            kind: FatKind::Fat32,
+            bytes_per_sector: 512,
+            sectors_per_cluster: 1,
+            reserved_sectors: 1,
+            fat_count: 1,
+            root_entry_count: 0,
+            total_sectors: 5,
+            fat_size_sectors: 1,
+            first_data_sector: 2,
+            data_cluster_count: 3,
+            root_cluster: Some(2),
+        };
+        let mut device = phoenix_block::MemoryBlockDevice::<512, 5>::new();
+
+        let mut fat_sector = [0_u8; 512];
+        fat_sector[8..12].copy_from_slice(&3_u32.to_le_bytes());
+        fat_sector[12..16].copy_from_slice(&0x0fff_fff8_u32.to_le_bytes());
+        device.write_blocks(1, &fat_sector).unwrap();
+
+        device.write_blocks(2, &[b'A'; 512]).unwrap();
+        device.write_blocks(3, &[b'B'; 512]).unwrap();
+
+        let entry = FatDirectoryEntry {
+            short_name: *b"DATA    BIN",
+            attributes: 0x20,
+            first_cluster: 2,
+            file_size: 700,
+        };
+        let mut reader = FatTableReader::new(&mut device, boot).unwrap();
+        let mut sector_buffer = [0_u8; 512];
+        let mut chain = [0_u32; 2];
+        let mut destination = [0_u8; 700];
+
+        let length = reader
+            .read_file(entry, &mut chain, &mut sector_buffer, &mut destination)
+            .unwrap();
+
+        assert_eq!(length, 700);
+        assert!(destination[..512].iter().all(|byte| *byte == b'A'));
+        assert!(destination[512..].iter().all(|byte| *byte == b'B'));
+    }
+
+    #[test]
+    fn file_reader_rejects_small_destination_and_accepts_empty_file() {
+        let mut device = phoenix_block::MemoryBlockDevice::<512, 4>::new();
+        let mut reader = FatTableReader::new(&mut device, fat32_boot()).unwrap();
+        let mut sector_buffer = [0_u8; 512];
+        let mut chain = [0_u32; 1];
+
+        let non_empty = FatDirectoryEntry {
+            short_name: *b"DATA    BIN",
+            attributes: 0x20,
+            first_cluster: 2,
+            file_size: 2,
+        };
+        assert_eq!(
+            reader.read_file(
+                non_empty,
+                &mut chain,
+                &mut sector_buffer,
+                &mut [0_u8; 1],
+            ),
+            Err(FatFileError::DestinationTooSmall)
+        );
+
+        let empty = FatDirectoryEntry {
+            short_name: *b"EMPTY   TXT",
+            attributes: 0x20,
+            first_cluster: 0,
+            file_size: 0,
+        };
+        assert_eq!(
+            reader.read_file(empty, &mut [], &mut sector_buffer, &mut []),
+            Ok(0)
+        );
     }
 
     #[test]

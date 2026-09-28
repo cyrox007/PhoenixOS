@@ -14,7 +14,6 @@ pub struct SyscallError {
     status: u64,
 }
 
-
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeCallResult {

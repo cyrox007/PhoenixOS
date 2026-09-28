@@ -74,6 +74,58 @@ impl From<FatReadError> for FatChainError {
     }
 }
 
+pub const DIRECTORY_ENTRY_SIZE: usize = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FatDirectory {
+    Root,
+    Cluster(u32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FatDirectoryEntry {
+    pub short_name: [u8; 11],
+    pub attributes: u8,
+    pub first_cluster: u32,
+    pub file_size: u32,
+}
+
+impl FatDirectoryEntry {
+    pub const fn is_directory(self) -> bool {
+        self.attributes & 0x10 != 0
+    }
+
+    pub const fn is_volume_label(self) -> bool {
+        self.attributes & 0x08 != 0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FatDirectoryError {
+    Read(FatReadError),
+    Chain(FatChainError),
+    MissingRootCluster,
+}
+
+impl From<FatReadError> for FatDirectoryError {
+    fn from(error: FatReadError) -> Self {
+        Self::Read(error)
+    }
+}
+
+impl From<FatChainError> for FatDirectoryError {
+    fn from(error: FatChainError) -> Self {
+        Self::Chain(error)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParsedDirectorySlot {
+    End,
+    Skip,
+    Entry(FatDirectoryEntry),
+}
+
 impl From<BlockError> for FatReadError {
     fn from(error: BlockError) -> Self {
         Self::Device(error)
@@ -152,6 +204,122 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
                 FatEntry::Reserved(value) => return Err(FatChainError::ReservedEntry(value)),
             }
         }
+    }
+
+    pub fn read_directory<F>(
+        &mut self,
+        directory: FatDirectory,
+        chain: &mut [u32],
+        sector_buffer: &mut [u8],
+        mut visitor: F,
+    ) -> Result<(), FatDirectoryError>
+    where
+        F: FnMut(FatDirectoryEntry) -> bool,
+    {
+        self.validate_sector_buffer(sector_buffer)?;
+
+        if matches!(self.boot.kind, FatKind::Fat12) {
+            return Err(FatReadError::UnsupportedFat12.into());
+        }
+
+        match directory {
+            FatDirectory::Root if matches!(self.boot.kind, FatKind::Fat16) => {
+                self.read_fat16_root_directory(sector_buffer, &mut visitor)
+            }
+            FatDirectory::Root => {
+                let start_cluster = self
+                    .boot
+                    .root_cluster
+                    .ok_or(FatDirectoryError::MissingRootCluster)?;
+                self.read_cluster_directory(start_cluster, chain, sector_buffer, &mut visitor)
+            }
+            FatDirectory::Cluster(start_cluster) => {
+                self.read_cluster_directory(start_cluster, chain, sector_buffer, &mut visitor)
+            }
+        }
+    }
+
+    fn read_fat16_root_directory<F>(
+        &mut self,
+        sector_buffer: &mut [u8],
+        visitor: &mut F,
+    ) -> Result<(), FatDirectoryError>
+    where
+        F: FnMut(FatDirectoryEntry) -> bool,
+    {
+        let fat_area = u64::from(self.boot.fat_count)
+            .checked_mul(u64::from(self.boot.fat_size_sectors))
+            .ok_or(FatReadError::ArithmeticOverflow)?;
+        let first_sector = u64::from(self.boot.reserved_sectors)
+            .checked_add(fat_area)
+            .ok_or(FatReadError::ArithmeticOverflow)?;
+        let root_bytes = u64::from(self.boot.root_entry_count)
+            .checked_mul(DIRECTORY_ENTRY_SIZE as u64)
+            .ok_or(FatReadError::ArithmeticOverflow)?;
+        let bytes_per_sector = u64::from(self.boot.bytes_per_sector);
+        let sector_count = root_bytes
+            .checked_add(bytes_per_sector - 1)
+            .ok_or(FatReadError::ArithmeticOverflow)?
+            / bytes_per_sector;
+
+        for offset in 0..sector_count {
+            let sector = first_sector
+                .checked_add(offset)
+                .ok_or(FatReadError::ArithmeticOverflow)?;
+            self.device.read_blocks(sector, sector_buffer)?;
+            if visit_directory_sector(self.boot.kind, sector_buffer, visitor) {
+                return Ok(());
+            }
+        }
+
+        Ok(())
+    }
+
+    fn read_cluster_directory<F>(
+        &mut self,
+        start_cluster: u32,
+        chain: &mut [u32],
+        sector_buffer: &mut [u8],
+        visitor: &mut F,
+    ) -> Result<(), FatDirectoryError>
+    where
+        F: FnMut(FatDirectoryEntry) -> bool,
+    {
+        let chain_length = self.read_chain(start_cluster, chain, sector_buffer)?;
+        let sectors_per_cluster = u64::from(self.boot.sectors_per_cluster);
+
+        for cluster in &chain[..chain_length] {
+            let first_sector = self.cluster_first_sector(*cluster)?;
+            for offset in 0..sectors_per_cluster {
+                let sector = first_sector
+                    .checked_add(offset)
+                    .ok_or(FatReadError::ArithmeticOverflow)?;
+                self.device.read_blocks(sector, sector_buffer)?;
+                if visit_directory_sector(self.boot.kind, sector_buffer, visitor) {
+                    return Ok(());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn cluster_first_sector(&self, cluster: u32) -> Result<u64, FatReadError> {
+        self.validate_cluster(cluster)?;
+        let cluster_index = u64::from(cluster - 2);
+        let sector_offset = cluster_index
+            .checked_mul(u64::from(self.boot.sectors_per_cluster))
+            .ok_or(FatReadError::ArithmeticOverflow)?;
+        u64::from(self.boot.first_data_sector)
+            .checked_add(sector_offset)
+            .ok_or(FatReadError::ArithmeticOverflow)
+    }
+
+    fn validate_sector_buffer(&self, sector_buffer: &[u8]) -> Result<(), FatReadError> {
+        if sector_buffer.len() != usize::from(self.boot.bytes_per_sector) {
+            return Err(FatReadError::BufferSize);
+        }
+        Ok(())
     }
 
     fn validate_cluster(&self, cluster: u32) -> Result<(), FatReadError> {
@@ -324,6 +492,47 @@ const fn classify_fat32_entry(raw: u32) -> FatEntry {
     }
 }
 
+fn visit_directory_sector<F>(kind: FatKind, sector: &[u8], visitor: &mut F) -> bool
+where
+    F: FnMut(FatDirectoryEntry) -> bool,
+{
+    for raw_entry in sector.chunks_exact(DIRECTORY_ENTRY_SIZE) {
+        match parse_directory_slot(kind, raw_entry) {
+            ParsedDirectorySlot::End => return true,
+            ParsedDirectorySlot::Skip => continue,
+            ParsedDirectorySlot::Entry(entry) if !visitor(entry) => return true,
+            ParsedDirectorySlot::Entry(_) => {}
+        }
+    }
+    false
+}
+
+fn parse_directory_slot(kind: FatKind, raw: &[u8]) -> ParsedDirectorySlot {
+    if raw[0] == 0x00 {
+        return ParsedDirectorySlot::End;
+    }
+    if raw[0] == 0xe5 || raw[11] == 0x0f {
+        return ParsedDirectorySlot::Skip;
+    }
+
+    let mut short_name = [0_u8; 11];
+    short_name.copy_from_slice(&raw[..11]);
+
+    let high_cluster = if matches!(kind, FatKind::Fat32) {
+        u32::from(read_u16(raw, 20))
+    } else {
+        0
+    };
+    let low_cluster = u32::from(read_u16(raw, 26));
+
+    ParsedDirectorySlot::Entry(FatDirectoryEntry {
+        short_name,
+        attributes: raw[11],
+        first_cluster: (high_cluster << 16) | low_cluster,
+        file_size: read_u32(raw, 28),
+    })
+}
+
 fn validate_variant_fields(
     kind: FatKind,
     root_entry_count: u16,
@@ -404,6 +613,117 @@ mod tests {
             data_cluster_count: 124_749,
             root_cluster: Some(2),
         }
+    }
+
+    #[test]
+    fn parses_short_directory_entry_metadata() {
+        let mut raw = [0_u8; DIRECTORY_ENTRY_SIZE];
+        raw[..11].copy_from_slice(b"README  TXT");
+        raw[11] = 0x20;
+        raw[20..22].copy_from_slice(&1_u16.to_le_bytes());
+        raw[26..28].copy_from_slice(&2_u16.to_le_bytes());
+        raw[28..32].copy_from_slice(&1234_u32.to_le_bytes());
+
+        assert_eq!(
+            parse_directory_slot(FatKind::Fat32, &raw),
+            ParsedDirectorySlot::Entry(FatDirectoryEntry {
+                short_name: *b"README  TXT",
+                attributes: 0x20,
+                first_cluster: 0x0001_0002,
+                file_size: 1234,
+            })
+        );
+    }
+
+    #[test]
+    fn reads_fat16_fixed_root_directory() {
+        let mut device = phoenix_block::MemoryBlockDevice::<512, 80>::new();
+        let mut directory_sector = [0_u8; 512];
+        directory_sector[..11].copy_from_slice(b"README  TXT");
+        directory_sector[11] = 0x20;
+        directory_sector[26..28].copy_from_slice(&2_u16.to_le_bytes());
+        directory_sector[28..32].copy_from_slice(&77_u32.to_le_bytes());
+        device.write_blocks(41, &directory_sector).unwrap();
+
+        let mut reader = FatTableReader::new(&mut device, fat16_boot()).unwrap();
+        let mut sector_buffer = [0_u8; 512];
+        let mut visited = None;
+        reader
+            .read_directory(
+                FatDirectory::Root,
+                &mut [],
+                &mut sector_buffer,
+                |entry| {
+                    visited = Some(entry);
+                    false
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            visited,
+            Some(FatDirectoryEntry {
+                short_name: *b"README  TXT",
+                attributes: 0x20,
+                first_cluster: 2,
+                file_size: 77,
+            })
+        );
+    }
+
+    #[test]
+    fn reads_fat32_root_directory_through_cluster_chain() {
+        let boot = FatBootSector {
+            kind: FatKind::Fat32,
+            bytes_per_sector: 512,
+            sectors_per_cluster: 1,
+            reserved_sectors: 1,
+            fat_count: 1,
+            root_entry_count: 0,
+            total_sectors: 4,
+            fat_size_sectors: 1,
+            first_data_sector: 2,
+            data_cluster_count: 2,
+            root_cluster: Some(2),
+        };
+        let mut device = phoenix_block::MemoryBlockDevice::<512, 4>::new();
+
+        let mut fat_sector = [0_u8; 512];
+        fat_sector[8..12].copy_from_slice(&0x0fff_fff8_u32.to_le_bytes());
+        device.write_blocks(1, &fat_sector).unwrap();
+
+        let mut directory_sector = [0_u8; 512];
+        directory_sector[..11].copy_from_slice(b"SUBDIR     ");
+        directory_sector[11] = 0x10;
+        directory_sector[26..28].copy_from_slice(&3_u16.to_le_bytes());
+        device.write_blocks(2, &directory_sector).unwrap();
+
+        let mut reader = FatTableReader::new(&mut device, boot).unwrap();
+        let mut sector_buffer = [0_u8; 512];
+        let mut chain = [0_u32; 2];
+        let mut visited = None;
+        reader
+            .read_directory(
+                FatDirectory::Root,
+                &mut chain,
+                &mut sector_buffer,
+                |entry| {
+                    visited = Some(entry);
+                    false
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            visited,
+            Some(FatDirectoryEntry {
+                short_name: *b"SUBDIR     ",
+                attributes: 0x10,
+                first_cluster: 3,
+                file_size: 0,
+            })
+        );
+        assert!(visited.unwrap().is_directory());
     }
 
     #[test]

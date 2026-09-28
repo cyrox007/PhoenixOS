@@ -153,6 +153,163 @@ pub fn resolve_mounted_path<L: NamespaceLookup + ?Sized, const CAPACITY: usize>(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileSystemRegistryError {
+    TableFull,
+    DuplicateId,
+    NotFound,
+    FileSystem(VfsError),
+}
+
+impl From<VfsError> for FileSystemRegistryError {
+    fn from(error: VfsError) -> Self {
+        Self::FileSystem(error)
+    }
+}
+
+struct RegisteredFileSystem<'a> {
+    id: FileSystemId,
+    filesystem: &'a mut dyn FileSystem,
+}
+
+pub struct FileSystemRegistry<'a, const CAPACITY: usize> {
+    entries: [Option<RegisteredFileSystem<'a>>; CAPACITY],
+    count: usize,
+}
+
+impl<'a, const CAPACITY: usize> FileSystemRegistry<'a, CAPACITY> {
+    pub const fn new() -> Self {
+        Self {
+            entries: [const { None }; CAPACITY],
+            count: 0,
+        }
+    }
+
+    pub const fn len(&self) -> usize {
+        self.count
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn register(
+        &mut self,
+        id: FileSystemId,
+        filesystem: &'a mut dyn FileSystem,
+    ) -> Result<(), FileSystemRegistryError> {
+        if self.entries.iter().flatten().any(|entry| entry.id == id) {
+            return Err(FileSystemRegistryError::DuplicateId);
+        }
+
+        let Some(slot) = self.entries.iter_mut().find(|entry| entry.is_none()) else {
+            return Err(FileSystemRegistryError::TableFull);
+        };
+        *slot = Some(RegisteredFileSystem { id, filesystem });
+        self.count += 1;
+        Ok(())
+    }
+
+    pub fn metadata(&self, node: VfsNode) -> Result<NodeMetadata, FileSystemRegistryError> {
+        Ok(self.filesystem(node.filesystem)?.metadata(node.node)?)
+    }
+
+    pub fn lookup_child(
+        &self,
+        parent: VfsNode,
+        name: &[u8],
+    ) -> Result<NodeId, FileSystemRegistryError> {
+        Ok(self
+            .filesystem(parent.filesystem)?
+            .lookup_child(parent.node, name)?)
+    }
+
+    pub fn create_node(
+        &mut self,
+        parent: VfsNode,
+        name: &[u8],
+        kind: NodeKind,
+    ) -> Result<VfsNode, FileSystemRegistryError> {
+        let filesystem = parent.filesystem;
+        let node = self
+            .filesystem_mut(filesystem)?
+            .create_node(parent.node, name, kind)?;
+        Ok(VfsNode::new(filesystem, node))
+    }
+
+    pub fn read_node(
+        &self,
+        node: VfsNode,
+        offset: u64,
+        output: &mut [u8],
+    ) -> Result<usize, FileSystemRegistryError> {
+        Ok(self
+            .filesystem(node.filesystem)?
+            .read_node(node.node, offset, output)?)
+    }
+
+    pub fn write_node(
+        &mut self,
+        node: VfsNode,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<usize, FileSystemRegistryError> {
+        Ok(self
+            .filesystem_mut(node.filesystem)?
+            .write_node(node.node, offset, data)?)
+    }
+
+    pub fn truncate_node(
+        &mut self,
+        node: VfsNode,
+        length: u64,
+    ) -> Result<(), FileSystemRegistryError> {
+        Ok(self
+            .filesystem_mut(node.filesystem)?
+            .truncate_node(node.node, length)?)
+    }
+
+    fn filesystem<'registry>(
+        &'registry self,
+        id: FileSystemId,
+    ) -> Result<&'registry (dyn FileSystem + 'a), FileSystemRegistryError> {
+        self.entries
+            .iter()
+            .flatten()
+            .find(|entry| entry.id == id)
+            .map(|entry| &*entry.filesystem)
+            .ok_or(FileSystemRegistryError::NotFound)
+    }
+
+    fn filesystem_mut<'registry>(
+        &'registry mut self,
+        id: FileSystemId,
+    ) -> Result<&'registry mut (dyn FileSystem + 'a), FileSystemRegistryError> {
+        self.entries
+            .iter_mut()
+            .flatten()
+            .find(|entry| entry.id == id)
+            .map(|entry| &mut *entry.filesystem)
+            .ok_or(FileSystemRegistryError::NotFound)
+    }
+}
+
+impl<'a, const CAPACITY: usize> Default for FileSystemRegistry<'a, CAPACITY> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'a, const CAPACITY: usize> NamespaceLookup for FileSystemRegistry<'a, CAPACITY> {
+    fn lookup_child(&self, parent: VfsNode, name: &[u8]) -> Result<NodeId, VfsError> {
+        match FileSystemRegistry::lookup_child(self, parent, name) {
+            Ok(node) => Ok(node),
+            Err(FileSystemRegistryError::FileSystem(error)) => Err(error),
+            Err(_) => Err(VfsError::NotFound),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NodeMetadata {
     pub kind: NodeKind,
     pub length: u64,
@@ -921,6 +1078,97 @@ mod tests {
         assert_eq!(
             resolve_mounted_path(&namespace, &mounts, "/a/../b"),
             Err(VfsError::InvalidPath)
+        );
+    }
+
+    #[test]
+    fn filesystem_registry_routes_same_local_node_to_different_filesystems() {
+        let mut first = MemoryFileSystem::<4, 16>::new();
+        let mut second = MemoryFileSystem::<4, 16>::new();
+        let first_root = first.root_node().unwrap();
+        let second_root = second.root_node().unwrap();
+        let first_file = first
+            .create_node(first_root, b"data", NodeKind::File)
+            .unwrap();
+        let second_file = second
+            .create_node(second_root, b"data", NodeKind::File)
+            .unwrap();
+        assert_eq!(first_file, second_file);
+
+        let mut registry = FileSystemRegistry::<2>::new();
+        registry.register(FileSystemId(1), &mut first).unwrap();
+        registry.register(FileSystemId(2), &mut second).unwrap();
+
+        let first_node = VfsNode::new(FileSystemId(1), first_file);
+        let second_node = VfsNode::new(FileSystemId(2), second_file);
+        registry.write_node(first_node, 0, b"one").unwrap();
+        registry.write_node(second_node, 0, b"two").unwrap();
+
+        let mut first_output = [0_u8; 3];
+        let mut second_output = [0_u8; 3];
+        registry
+            .read_node(first_node, 0, &mut first_output)
+            .unwrap();
+        registry
+            .read_node(second_node, 0, &mut second_output)
+            .unwrap();
+
+        assert_eq!(&first_output, b"one");
+        assert_eq!(&second_output, b"two");
+    }
+
+    #[test]
+    fn filesystem_registry_is_namespace_lookup_backend() {
+        let mut system = MemoryFileSystem::<4, 16>::new();
+        let mut media = MemoryFileSystem::<4, 16>::new();
+        let system_root = system.root_node().unwrap();
+        let media_root = media.root_node().unwrap();
+        let mount_node = system
+            .create_node(system_root, b"media", NodeKind::Directory)
+            .unwrap();
+        let photo = media
+            .create_node(media_root, b"p.jpg", NodeKind::File)
+            .unwrap();
+
+        let mut registry = FileSystemRegistry::<2>::new();
+        registry.register(FileSystemId(1), &mut system).unwrap();
+        registry.register(FileSystemId(2), &mut media).unwrap();
+
+        let mut mounts = MountTable::<1>::new(VfsNode::new(FileSystemId(1), system_root));
+        mounts
+            .mount(
+                VfsNode::new(FileSystemId(1), mount_node),
+                VfsNode::new(FileSystemId(2), media_root),
+            )
+            .unwrap();
+
+        assert_eq!(
+            resolve_mounted_path(&registry, &mounts, "/media/p.jpg"),
+            Ok(VfsNode::new(FileSystemId(2), photo))
+        );
+    }
+
+    #[test]
+    fn filesystem_registry_rejects_duplicate_and_capacity_overflow() {
+        let mut first = MemoryFileSystem::<1, 1>::new();
+        let mut duplicate = MemoryFileSystem::<1, 1>::new();
+        let mut second = MemoryFileSystem::<1, 1>::new();
+        let mut overflow = MemoryFileSystem::<1, 1>::new();
+        let mut registry = FileSystemRegistry::<2>::new();
+
+        registry.register(FileSystemId(1), &mut first).unwrap();
+        assert_eq!(
+            registry.register(FileSystemId(1), &mut duplicate),
+            Err(FileSystemRegistryError::DuplicateId)
+        );
+        registry.register(FileSystemId(2), &mut second).unwrap();
+        assert_eq!(
+            registry.register(FileSystemId(3), &mut overflow),
+            Err(FileSystemRegistryError::TableFull)
+        );
+        assert_eq!(
+            registry.metadata(VfsNode::new(FileSystemId(9), NodeId(0))),
+            Err(FileSystemRegistryError::NotFound)
         );
     }
 

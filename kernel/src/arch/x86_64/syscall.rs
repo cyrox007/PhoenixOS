@@ -9,8 +9,11 @@ use phoenix_ipc::{
 use phoenix_process::{ProcessCapabilitySet, ProcessId};
 use phoenix_syscall_abi::{
     IpcReceiveArguments, IpcReceiveMetadata, IpcSendArguments, NO_TRANSFERRED_CAPABILITY,
-    PackedCapabilityHandle, SYSCALL_IPC_RECEIVE, SYSCALL_IPC_SEND, SYSCALL_PROCESS_EXIT,
-    SyscallRequest, SyscallReturn, SyscallStatus,
+    FILE_OPEN_CREATE, FILE_OPEN_READ, FILE_OPEN_TRUNCATE, FILE_OPEN_WRITE, FILE_SEEK_CURRENT,
+    FILE_SEEK_END, FILE_SEEK_START, PackedCapabilityHandle, SYSCALL_FILE_CLOSE,
+    SYSCALL_FILE_OPEN, SYSCALL_FILE_READ, SYSCALL_FILE_SEEK, SYSCALL_FILE_WRITE,
+    SYSCALL_IPC_RECEIVE, SYSCALL_IPC_SEND, SYSCALL_PROCESS_EXIT, SyscallRequest, SyscallReturn,
+    SyscallStatus,
 };
 
 use crate::ipc_user_memory::{self, IpcUserMemoryError};
@@ -929,6 +932,10 @@ fn dispatch(request: SyscallRequest) -> SyscallReturn {
         SYSCALL_IPC_SEND => return dispatch_ipc_send(request),
         SYSCALL_IPC_RECEIVE => return dispatch_ipc_receive(request),
         SYSCALL_PROCESS_EXIT => return dispatch_process_exit(request),
+        SYSCALL_FILE_OPEN => return dispatch_file_open(request),
+        SYSCALL_FILE_READ | SYSCALL_FILE_WRITE => return dispatch_file_io(request),
+        SYSCALL_FILE_SEEK => return dispatch_file_seek(request),
+        SYSCALL_FILE_CLOSE => return dispatch_file_close(request),
         SELF_TEST_NUMBER => {}
         _ => return syscall_failure(STATUS_UNKNOWN_CALL),
     }
@@ -938,6 +945,68 @@ fn dispatch(request: SyscallRequest) -> SyscallReturn {
     }
 
     SyscallReturn::success(SELF_TEST_RESULT)
+}
+
+fn dispatch_file_open(request: SyscallRequest) -> SyscallReturn {
+    let flags = request.arguments[2];
+    let known_flags = FILE_OPEN_READ | FILE_OPEN_WRITE | FILE_OPEN_CREATE | FILE_OPEN_TRUNCATE;
+    if request.arguments[3..].iter().any(|argument| *argument != 0)
+        || flags == 0
+        || flags & !known_flags != 0
+        || flags & (FILE_OPEN_READ | FILE_OPEN_WRITE) == 0
+        || flags & FILE_OPEN_TRUNCATE != 0 && flags & FILE_OPEN_WRITE == 0
+    {
+        return syscall_failure(STATUS_BAD_ARGUMENTS);
+    }
+
+    if phoenix_vm::UserBuffer::for_array(request.arguments[0], request.arguments[1], 1, 1).is_err() {
+        return syscall_failure(STATUS_BAD_ARGUMENTS);
+    }
+    syscall_failure(STATUS_OPERATION_NOT_READY)
+}
+
+fn dispatch_file_io(request: SyscallRequest) -> SyscallReturn {
+    if request.arguments[3..].iter().any(|argument| *argument != 0) {
+        return syscall_failure(STATUS_BAD_ARGUMENTS);
+    }
+    if phoenix_vm::UserBuffer::for_array(request.arguments[1], request.arguments[2], 1, 1).is_err() {
+        return syscall_failure(STATUS_BAD_ARGUMENTS);
+    }
+    syscall_failure(STATUS_OPERATION_NOT_READY)
+}
+
+fn dispatch_file_seek(request: SyscallRequest) -> SyscallReturn {
+    if request.arguments[3..].iter().any(|argument| *argument != 0)
+        || !matches!(request.arguments[2], FILE_SEEK_START | FILE_SEEK_CURRENT | FILE_SEEK_END)
+    {
+        return syscall_failure(STATUS_BAD_ARGUMENTS);
+    }
+    syscall_failure(STATUS_OPERATION_NOT_READY)
+}
+
+fn dispatch_file_close(request: SyscallRequest) -> SyscallReturn {
+    if request.arguments[1..].iter().any(|argument| *argument != 0) {
+        return syscall_failure(STATUS_BAD_ARGUMENTS);
+    }
+    syscall_failure(STATUS_OPERATION_NOT_READY)
+}
+
+pub fn file_dispatch_self_test() -> bool {
+    let valid_open = SyscallRequest::new(
+        SYSCALL_FILE_OPEN,
+        [0x4000, 4, FILE_OPEN_READ, 0, 0, 0],
+    );
+    let invalid_open = SyscallRequest::new(
+        SYSCALL_FILE_OPEN,
+        [0x4000, 4, FILE_OPEN_TRUNCATE | FILE_OPEN_READ, 0, 0, 0],
+    );
+    let invalid_seek = SyscallRequest::new(SYSCALL_FILE_SEEK, [1, 0, 3, 0, 0, 0]);
+    let reserved_close = SyscallRequest::new(SYSCALL_FILE_CLOSE, [1, 1, 0, 0, 0, 0]);
+
+    dispatch(valid_open).status.raw() == u64::from(STATUS_OPERATION_NOT_READY)
+        && dispatch(invalid_open).status.raw() == u64::from(STATUS_BAD_ARGUMENTS)
+        && dispatch(invalid_seek).status.raw() == u64::from(STATUS_BAD_ARGUMENTS)
+        && dispatch(reserved_close).status.raw() == u64::from(STATUS_BAD_ARGUMENTS)
 }
 
 fn dispatch_process_exit(request: SyscallRequest) -> SyscallReturn {

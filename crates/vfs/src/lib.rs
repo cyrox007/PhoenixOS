@@ -78,6 +78,13 @@ pub enum AccessMode {
     ReadWrite,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeekOrigin {
+    Start,
+    Current,
+    End,
+}
+
 impl AccessMode {
     const fn can_read(self) -> bool {
         matches!(self, Self::ReadOnly | Self::ReadWrite)
@@ -229,6 +236,26 @@ impl<const CAPACITY: usize> DescriptorTable<CAPACITY> {
     ) -> Result<(), DescriptorError> {
         self.file_mut(descriptor)?.position = position;
         Ok(())
+    }
+
+    pub fn seek<F: FileSystem + ?Sized>(
+        &mut self,
+        filesystem: &F,
+        descriptor: FileDescriptor,
+        offset: i64,
+        origin: SeekOrigin,
+    ) -> Result<u64, DescriptorError> {
+        let file = self.file(descriptor)?;
+        let base = match origin {
+            SeekOrigin::Start => 0,
+            SeekOrigin::Current => file.position,
+            SeekOrigin::End => filesystem.metadata(file.node)?.length,
+        };
+        let position = base
+            .checked_add_signed(offset)
+            .ok_or(DescriptorError::OffsetOverflow)?;
+        self.file_mut(descriptor)?.position = position;
+        Ok(position)
     }
 
     pub fn read<F: FileSystem + ?Sized>(
@@ -775,5 +802,32 @@ mod tests {
             descriptors.open(&fs, root, AccessMode::ReadOnly),
             Err(DescriptorError::Vfs(VfsError::IsDirectory))
         );
+    }
+
+    #[test]
+    fn descriptor_seek_uses_start_current_and_end_without_wrapping() {
+        let mut fs = MemoryFileSystem::<2, 16>::new();
+        let file = fs.create_file("/data").unwrap();
+        fs.write("/data", b"phoenix").unwrap();
+        let mut descriptors = DescriptorTable::<1>::new();
+        let descriptor = descriptors.open(&fs, file, AccessMode::ReadOnly).unwrap();
+
+        assert_eq!(
+            descriptors.seek(&fs, descriptor, 2, SeekOrigin::Start),
+            Ok(2)
+        );
+        assert_eq!(
+            descriptors.seek(&fs, descriptor, 3, SeekOrigin::Current),
+            Ok(5)
+        );
+        assert_eq!(
+            descriptors.seek(&fs, descriptor, -2, SeekOrigin::End),
+            Ok(5)
+        );
+        assert_eq!(
+            descriptors.seek(&fs, descriptor, -8, SeekOrigin::End),
+            Err(DescriptorError::OffsetOverflow)
+        );
+        assert_eq!(descriptors.position(descriptor), Ok(5));
     }
 }

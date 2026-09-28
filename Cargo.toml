@@ -15,6 +15,7 @@ members = [
     "crates/capability-model",
     "crates/ipc-model",
     "crates/elf-loader",
+    "crates/fat",
     "crates/user-runtime",
     "crates/vfs",
 ]

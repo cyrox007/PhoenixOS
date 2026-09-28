@@ -363,7 +363,8 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
             return Err(FatWriteError::NotRegularFile);
         }
 
-        let source_length = u32::try_from(source.len()).map_err(|_| FatWriteError::SourceTooLarge)?;
+        let source_length =
+            u32::try_from(source.len()).map_err(|_| FatWriteError::SourceTooLarge)?;
         let end = offset
             .checked_add(source_length)
             .ok_or(FatReadError::ArithmeticOverflow)?;
@@ -388,8 +389,7 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
             return Err(FatWriteError::ChainTooShort);
         }
 
-        let start_offset =
-            usize::try_from(offset).map_err(|_| FatReadError::ArithmeticOverflow)?;
+        let start_offset = usize::try_from(offset).map_err(|_| FatReadError::ArithmeticOverflow)?;
         let bytes_per_sector = usize::from(self.boot.bytes_per_sector);
         let mut written = 0_usize;
 

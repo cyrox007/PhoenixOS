@@ -3,8 +3,10 @@
 use core::arch::asm;
 
 use phoenix_syscall_abi::{
+    FILE_OPEN_CREATE, FILE_OPEN_READ, FILE_OPEN_TRUNCATE, FILE_OPEN_WRITE, FILE_SEEK_CURRENT,
+    FILE_SEEK_END, FILE_SEEK_START, FileIoArguments, FileOpenArguments, FileSeekArguments,
     IpcReceiveArguments, IpcReceiveMetadata, IpcSendArguments, PackedCapabilityHandle,
-    ProcessStartInfo, SyscallRequest,
+    PackedFileDescriptor, ProcessStartInfo, SyscallRequest,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +45,80 @@ impl SyscallError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenOptions {
+    flags: u64,
+}
+
+impl OpenOptions {
+    pub const fn read_only() -> Self {
+        Self {
+            flags: FILE_OPEN_READ,
+        }
+    }
+
+    pub const fn write_only() -> Self {
+        Self {
+            flags: FILE_OPEN_WRITE,
+        }
+    }
+
+    pub const fn read_write() -> Self {
+        Self {
+            flags: FILE_OPEN_READ | FILE_OPEN_WRITE,
+        }
+    }
+
+    pub const fn create(mut self) -> Self {
+        self.flags |= FILE_OPEN_CREATE;
+        self
+    }
+
+    pub const fn truncate(mut self) -> Self {
+        self.flags |= FILE_OPEN_TRUNCATE;
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeekFrom {
+    Start(u64),
+    Current(i64),
+    End(i64),
+}
+
+pub fn file_open(path: &str, options: OpenOptions) -> Result<PackedFileDescriptor, SyscallError> {
+    let value = invoke(build_file_open_request(path, options))?;
+    Ok(PackedFileDescriptor::from_raw(value))
+}
+
+pub fn file_read(
+    descriptor: PackedFileDescriptor,
+    buffer: &mut [u8],
+) -> Result<usize, SyscallError> {
+    let value = invoke(build_file_read_request(descriptor, buffer))?;
+    usize::try_from(value).map_err(|_| SyscallError { status: u64::MAX })
+}
+
+pub fn file_write(
+    descriptor: PackedFileDescriptor,
+    buffer: &[u8],
+) -> Result<usize, SyscallError> {
+    let value = invoke(build_file_write_request(descriptor, buffer))?;
+    usize::try_from(value).map_err(|_| SyscallError { status: u64::MAX })
+}
+
+pub fn file_seek(
+    descriptor: PackedFileDescriptor,
+    from: SeekFrom,
+) -> Result<u64, SyscallError> {
+    invoke(build_file_seek_request(descriptor, from))
+}
+
+pub fn file_close(descriptor: PackedFileDescriptor) -> Result<(), SyscallError> {
+    invoke(SyscallRequest::file_close(descriptor)).map(|_| ())
+}
+
 pub fn ipc_send(
     endpoint: PackedCapabilityHandle,
     words: &[u64],
@@ -61,6 +137,49 @@ pub fn ipc_receive(
     metadata: &mut IpcReceiveMetadata,
 ) -> Result<u64, SyscallError> {
     invoke(build_ipc_receive_request(endpoint, words, metadata))
+}
+
+fn build_file_open_request(path: &str, options: OpenOptions) -> SyscallRequest {
+    SyscallRequest::file_open(FileOpenArguments {
+        path_address: path.as_ptr() as u64,
+        path_length: path.len() as u64,
+        flags: options.flags,
+    })
+}
+
+fn build_file_read_request(
+    descriptor: PackedFileDescriptor,
+    buffer: &mut [u8],
+) -> SyscallRequest {
+    SyscallRequest::file_read(FileIoArguments {
+        descriptor,
+        buffer_address: buffer.as_mut_ptr() as u64,
+        buffer_length: buffer.len() as u64,
+    })
+}
+
+fn build_file_write_request(descriptor: PackedFileDescriptor, buffer: &[u8]) -> SyscallRequest {
+    SyscallRequest::file_write(FileIoArguments {
+        descriptor,
+        buffer_address: buffer.as_ptr() as u64,
+        buffer_length: buffer.len() as u64,
+    })
+}
+
+fn build_file_seek_request(
+    descriptor: PackedFileDescriptor,
+    from: SeekFrom,
+) -> SyscallRequest {
+    let (offset, origin) = match from {
+        SeekFrom::Start(offset) => (offset as i64, FILE_SEEK_START),
+        SeekFrom::Current(offset) => (offset, FILE_SEEK_CURRENT),
+        SeekFrom::End(offset) => (offset, FILE_SEEK_END),
+    };
+    SyscallRequest::file_seek(FileSeekArguments {
+        descriptor,
+        offset,
+        origin,
+    })
 }
 
 fn build_ipc_send_request(
@@ -146,6 +265,44 @@ mod tests {
     extern "C" fn argument_main(info: *const ProcessStartInfo) -> u64 {
         let info = unsafe { &*info };
         info.argument_count + info.environment_count
+    }
+
+    #[test]
+    fn file_wrappers_build_stable_requests() {
+        let path = "/etc/hostname";
+        let open = build_file_open_request(path, OpenOptions::read_write().create().truncate());
+        assert_eq!(open.number, phoenix_syscall_abi::SYSCALL_FILE_OPEN);
+        assert_eq!(open.arguments[0], path.as_ptr() as u64);
+        assert_eq!(open.arguments[1], path.len() as u64);
+        assert_eq!(
+            open.arguments[2],
+            FILE_OPEN_READ | FILE_OPEN_WRITE | FILE_OPEN_CREATE | FILE_OPEN_TRUNCATE
+        );
+
+        let descriptor = PackedFileDescriptor::new(2, 7);
+        let mut read_buffer = [0_u8; 8];
+        let read_address = read_buffer.as_mut_ptr() as u64;
+        let read = build_file_read_request(descriptor, &mut read_buffer);
+        assert_eq!(read.arguments, [descriptor.raw(), read_address, 8, 0, 0, 0]);
+
+        let write_buffer = *b"phoenix!";
+        let write = build_file_write_request(descriptor, &write_buffer);
+        assert_eq!(
+            write.arguments,
+            [descriptor.raw(), write_buffer.as_ptr() as u64, 8, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn seek_wrapper_preserves_signed_relative_offsets() {
+        let descriptor = PackedFileDescriptor::new(3, 9);
+        let request = build_file_seek_request(descriptor, SeekFrom::End(-4));
+
+        assert_eq!(request.number, phoenix_syscall_abi::SYSCALL_FILE_SEEK);
+        assert_eq!(
+            request.arguments,
+            [descriptor.raw(), (-4_i64) as u64, FILE_SEEK_END, 0, 0, 0]
+        );
     }
 
     #[test]

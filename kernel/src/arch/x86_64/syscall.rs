@@ -10,11 +10,17 @@ use phoenix_process::{ProcessCapabilitySet, ProcessId};
 use phoenix_syscall_abi::{
     FILE_OPEN_CREATE, FILE_OPEN_READ, FILE_OPEN_TRUNCATE, FILE_OPEN_WRITE, FILE_SEEK_CURRENT,
     FILE_SEEK_END, FILE_SEEK_START, IpcReceiveArguments, IpcReceiveMetadata, IpcSendArguments,
-    NO_TRANSFERRED_CAPABILITY, PackedCapabilityHandle, SYSCALL_FILE_CLOSE, SYSCALL_FILE_OPEN,
-    SYSCALL_FILE_READ, SYSCALL_FILE_SEEK, SYSCALL_FILE_WRITE, SYSCALL_IPC_RECEIVE,
-    SYSCALL_IPC_SEND, SYSCALL_PROCESS_EXIT, SyscallRequest, SyscallReturn, SyscallStatus,
+    NO_TRANSFERRED_CAPABILITY, PackedCapabilityHandle, PackedFileDescriptor, SYSCALL_FILE_CLOSE,
+    SYSCALL_FILE_OPEN, SYSCALL_FILE_READ, SYSCALL_FILE_SEEK, SYSCALL_FILE_WRITE,
+    SYSCALL_IPC_RECEIVE, SYSCALL_IPC_SEND, SYSCALL_PROCESS_EXIT, SyscallRequest, SyscallReturn,
+    SyscallStatus,
+};
+use phoenix_vfs::{
+    AccessMode, DescriptorError, DescriptorTable, FileDescriptor, FileSystem, MemoryFileSystem,
+    SeekOrigin, VfsError, resolve_path,
 };
 
+use crate::file_user_memory;
 use crate::ipc_user_memory::{self, IpcUserMemoryError};
 use crate::process_space::{PROCESS_REGION_CAPACITY, ProcessAddressSpace};
 
@@ -51,12 +57,19 @@ const USER_SELF_TEST_FAILURE: u64 = 0x5553_4552_5f42_4144;
 const STATUS_UNKNOWN_CALL: u32 = 1;
 const STATUS_BAD_ARGUMENTS: u32 = 2;
 const STATUS_OPERATION_NOT_READY: u32 = 3;
+const FILE_PATH_CAPACITY: usize = 256;
 const IPC_INLINE_WORD_CAPACITY: u64 = 6;
 const ENTRY_STACK_SIZE: u64 = 64 * 1024;
 pub const PROCESS_CAPABILITY_CAPACITY: usize = 64;
 pub const ENDPOINT_REGISTRY_CAPACITY: usize = 8;
 pub const ENDPOINT_QUEUE_CAPACITY: usize = 4;
 pub const PROCESS_CAPABILITY_REGISTRY_CAPACITY: usize = 8;
+pub const FILESYSTEM_NODE_CAPACITY: usize = 8;
+pub const FILE_CAPACITY: usize = 512;
+pub const FILE_DESCRIPTOR_CAPACITY: usize = 16;
+
+pub type KernelFileSystem = MemoryFileSystem<FILESYSTEM_NODE_CAPACITY, FILE_CAPACITY>;
+pub type KernelDescriptorTable = DescriptorTable<FILE_DESCRIPTOR_CAPACITY>;
 
 pub type KernelEndpointRegistry =
     EndpointRegistry<ENDPOINT_REGISTRY_CAPACITY, ENDPOINT_QUEUE_CAPACITY>;
@@ -148,6 +161,30 @@ static CURRENT_PROCESS_ADDRESS_SPACE: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_PROCESS_CAPABILITIES: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_ENDPOINT_REGISTRY: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_PROCESS_CAPABILITY_REGISTRY: AtomicUsize = AtomicUsize::new(0);
+static CURRENT_FILESYSTEM: AtomicUsize = AtomicUsize::new(0);
+static CURRENT_FILE_DESCRIPTORS: AtomicUsize = AtomicUsize::new(0);
+
+pub struct CurrentFileContextGuard {
+    filesystem: usize,
+    descriptors: usize,
+}
+
+impl Drop for CurrentFileContextGuard {
+    fn drop(&mut self) {
+        let _ = CURRENT_FILE_DESCRIPTORS.compare_exchange(
+            self.descriptors,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        let _ = CURRENT_FILESYSTEM.compare_exchange(
+            self.filesystem,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+}
 
 pub struct CurrentProcessContextGuard {
     address_space: usize,
@@ -305,6 +342,51 @@ pub unsafe fn install_current_process_context(
             CURRENT_PROCESS_CAPABILITY_REGISTRY.store(0, Ordering::Release);
             None
         })
+}
+
+/// Installs the filesystem and descriptor table used by the current process.
+///
+/// # Safety
+///
+/// Both objects must remain alive and exclusively owned until the guard is dropped.
+/// The early implementation is single-CPU; callers must keep interrupts disabled
+/// while user code can enter the dispatcher.
+pub unsafe fn install_current_file_context(
+    filesystem: &mut KernelFileSystem,
+    descriptors: &mut KernelDescriptorTable,
+) -> Option<CurrentFileContextGuard> {
+    let filesystem = filesystem as *mut KernelFileSystem as usize;
+    let descriptors = descriptors as *mut KernelDescriptorTable as usize;
+    if CURRENT_FILESYSTEM
+        .compare_exchange(0, filesystem, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return None;
+    }
+    CURRENT_FILE_DESCRIPTORS
+        .compare_exchange(0, descriptors, Ordering::AcqRel, Ordering::Acquire)
+        .ok()
+        .map(|_| CurrentFileContextGuard {
+            filesystem,
+            descriptors,
+        })
+        .or_else(|| {
+            CURRENT_FILESYSTEM.store(0, Ordering::Release);
+            None
+        })
+}
+
+fn with_current_file_context<T>(
+    operation: impl FnOnce(&mut KernelFileSystem, &mut KernelDescriptorTable) -> T,
+) -> Option<T> {
+    let filesystem = CURRENT_FILESYSTEM.load(Ordering::Acquire);
+    let descriptors = CURRENT_FILE_DESCRIPTORS.load(Ordering::Acquire);
+    if filesystem == 0 || descriptors == 0 {
+        return None;
+    }
+    let filesystem = unsafe { &mut *(filesystem as *mut KernelFileSystem) };
+    let descriptors = unsafe { &mut *(descriptors as *mut KernelDescriptorTable) };
+    Some(operation(filesystem, descriptors))
 }
 
 fn with_current_process_address_space<T>(
@@ -962,7 +1044,49 @@ fn dispatch_file_open(request: SyscallRequest) -> SyscallReturn {
     {
         return syscall_failure(STATUS_BAD_ARGUMENTS);
     }
-    syscall_failure(STATUS_OPERATION_NOT_READY)
+    let mut path_bytes = [0_u8; FILE_PATH_CAPACITY];
+    let path = match with_current_process_address_space(|space| {
+        file_user_memory::copy_path(
+            space,
+            request.arguments[0],
+            request.arguments[1],
+            &mut path_bytes,
+        )
+    }) {
+        Some(Ok(path)) => path,
+        Some(Err(_)) => return syscall_failure(STATUS_BAD_ARGUMENTS),
+        None => return syscall_failure(STATUS_OPERATION_NOT_READY),
+    };
+
+    let Some(result) = with_current_file_context(
+        |filesystem, descriptors| -> Result<FileDescriptor, DescriptorError> {
+            let node = match resolve_path(filesystem, path) {
+                Ok(node) => node,
+                Err(VfsError::NotFound) if flags & FILE_OPEN_CREATE != 0 => {
+                    filesystem.create_file(path)?
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if flags & FILE_OPEN_TRUNCATE != 0 {
+                filesystem.truncate_node(node, 0)?;
+            }
+            let access = match flags & (FILE_OPEN_READ | FILE_OPEN_WRITE) {
+                FILE_OPEN_READ => AccessMode::ReadOnly,
+                FILE_OPEN_WRITE => AccessMode::WriteOnly,
+                _ => AccessMode::ReadWrite,
+            };
+            descriptors.open(filesystem, node, access)
+        },
+    ) else {
+        return syscall_failure(STATUS_OPERATION_NOT_READY);
+    };
+
+    match result {
+        Ok(descriptor) => SyscallReturn::success(
+            PackedFileDescriptor::new(descriptor.slot, descriptor.generation).raw(),
+        ),
+        Err(_) => syscall_failure(STATUS_BAD_ARGUMENTS),
+    }
 }
 
 fn dispatch_file_io(request: SyscallRequest) -> SyscallReturn {
@@ -985,14 +1109,70 @@ fn dispatch_file_seek(request: SyscallRequest) -> SyscallReturn {
     {
         return syscall_failure(STATUS_BAD_ARGUMENTS);
     }
-    syscall_failure(STATUS_OPERATION_NOT_READY)
+    let descriptor = unpack_file_descriptor(request.arguments[0]);
+    let origin = match request.arguments[2] {
+        FILE_SEEK_START => SeekOrigin::Start,
+        FILE_SEEK_CURRENT => SeekOrigin::Current,
+        FILE_SEEK_END => SeekOrigin::End,
+        _ => unreachable!(),
+    };
+    match with_current_file_context(|filesystem, descriptors| {
+        descriptors.seek(filesystem, descriptor, request.arguments[1] as i64, origin)
+    }) {
+        Some(Ok(position)) => SyscallReturn::success(position),
+        Some(Err(_)) => syscall_failure(STATUS_BAD_ARGUMENTS),
+        None => syscall_failure(STATUS_OPERATION_NOT_READY),
+    }
 }
 
 fn dispatch_file_close(request: SyscallRequest) -> SyscallReturn {
     if request.arguments[1..].iter().any(|argument| *argument != 0) {
         return syscall_failure(STATUS_BAD_ARGUMENTS);
     }
-    syscall_failure(STATUS_OPERATION_NOT_READY)
+    let descriptor = unpack_file_descriptor(request.arguments[0]);
+    match with_current_file_context(|_, descriptors| descriptors.close(descriptor)) {
+        Some(Ok(())) => SyscallReturn::success(0),
+        Some(Err(_)) => syscall_failure(STATUS_BAD_ARGUMENTS),
+        None => syscall_failure(STATUS_OPERATION_NOT_READY),
+    }
+}
+
+fn unpack_file_descriptor(raw: u64) -> FileDescriptor {
+    let descriptor = PackedFileDescriptor::from_raw(raw);
+    FileDescriptor {
+        slot: descriptor.slot,
+        generation: descriptor.generation,
+    }
+}
+
+pub fn file_context_operations_self_test(path_address: u64, path_length: u64) -> bool {
+    let opened = dispatch(SyscallRequest::new(
+        SYSCALL_FILE_OPEN,
+        [
+            path_address,
+            path_length,
+            FILE_OPEN_READ | FILE_OPEN_WRITE,
+            0,
+            0,
+            0,
+        ],
+    ));
+    if !opened.is_success() {
+        return false;
+    }
+    let seek = dispatch(SyscallRequest::new(
+        SYSCALL_FILE_SEEK,
+        [opened.value, 7, FILE_SEEK_START, 0, 0, 0],
+    ));
+    let close = dispatch(SyscallRequest::new(
+        SYSCALL_FILE_CLOSE,
+        [opened.value, 0, 0, 0, 0, 0],
+    ));
+    let stale_close = dispatch(SyscallRequest::new(
+        SYSCALL_FILE_CLOSE,
+        [opened.value, 0, 0, 0, 0, 0],
+    ));
+    seek.is_success() && seek.value == 7 && close.is_success() && !stale_close.is_success()
 }
 
 pub fn file_dispatch_self_test() -> bool {

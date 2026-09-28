@@ -1116,12 +1116,7 @@ fn dispatch_file_seek(request: SyscallRequest) -> SyscallReturn {
         _ => unreachable!(),
     };
     match with_current_file_context(|filesystem, descriptors| {
-        descriptors.seek(
-            filesystem,
-            descriptor,
-            request.arguments[1] as i64,
-            origin,
-        )
+        descriptors.seek(filesystem, descriptor, request.arguments[1] as i64, origin)
     }) {
         Some(Ok(position)) => SyscallReturn::success(position),
         Some(Err(_)) => syscall_failure(STATUS_BAD_ARGUMENTS),
@@ -1176,10 +1171,7 @@ pub fn file_context_operations_self_test(path_address: u64, path_length: u64) ->
         SYSCALL_FILE_CLOSE,
         [opened.value, 0, 0, 0, 0, 0],
     ));
-    seek.is_success()
-        && seek.value == 7
-        && close.is_success()
-        && !stale_close.is_success()
+    seek.is_success() && seek.value == 7 && close.is_success() && !stale_close.is_success()
 }
 
 pub fn file_dispatch_self_test() -> bool {

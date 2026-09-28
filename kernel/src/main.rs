@@ -1627,10 +1627,7 @@ fn user_mode_syscall_self_test(
         .expect("не удалось создать файл syscall-проверки");
     let mut file_descriptors = arch::x86_64::syscall::KernelDescriptorTable::new();
     let file_context_guard = unsafe {
-        arch::x86_64::syscall::install_current_file_context(
-            &mut filesystem,
-            &mut file_descriptors,
-        )
+        arch::x86_64::syscall::install_current_file_context(&mut filesystem, &mut file_descriptors)
     }
     .expect("файловый контекст текущего процесса уже установлен");
 

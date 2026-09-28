@@ -707,8 +707,7 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
                 let remaining = source.len() - written;
                 let copied = remaining.min(bytes_per_sector);
                 if copied != 0 {
-                    sector_buffer[..copied]
-                        .copy_from_slice(&source[written..written + copied]);
+                    sector_buffer[..copied].copy_from_slice(&source[written..written + copied]);
                     written += copied;
                 }
 

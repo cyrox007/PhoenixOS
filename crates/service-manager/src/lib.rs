@@ -231,7 +231,10 @@ mod tests {
 
         assert_eq!(launch.service, SERVICE.id);
         assert_eq!(launch.image_id, SERVICE.image_id);
-        assert_eq!(manager.record(SERVICE.id).unwrap().process, Some(launch.process));
+        assert_eq!(
+            manager.record(SERVICE.id).unwrap().process,
+            Some(launch.process)
+        );
     }
 
     #[test]

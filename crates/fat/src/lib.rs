@@ -200,6 +200,16 @@ pub enum FatMutationError {
     ReadOnlyFat16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FatReplacementError {
+    Mutation(FatMutationError),
+    Write(FatWriteError),
+    OldChainCleanupFailed {
+        active_entry: FatDirectoryEntry,
+        error: FatMutationError,
+    },
+}
+
 impl From<FatReadError> for FatMutationError {
     fn from(error: FatReadError) -> Self {
         Self::Read(error)
@@ -215,6 +225,30 @@ impl From<BlockError> for FatMutationError {
 impl From<FatChainError> for FatMutationError {
     fn from(error: FatChainError) -> Self {
         Self::Chain(error)
+    }
+}
+
+impl From<FatReadError> for FatReplacementError {
+    fn from(error: FatReadError) -> Self {
+        Self::Mutation(error.into())
+    }
+}
+
+impl From<FatChainError> for FatReplacementError {
+    fn from(error: FatChainError) -> Self {
+        Self::Mutation(error.into())
+    }
+}
+
+impl From<FatMutationError> for FatReplacementError {
+    fn from(error: FatMutationError) -> Self {
+        Self::Mutation(error)
+    }
+}
+
+impl From<FatWriteError> for FatReplacementError {
+    fn from(error: FatWriteError) -> Self {
+        Self::Write(error)
     }
 }
 
@@ -815,6 +849,73 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
 
         self.device.flush()?;
         Ok(written)
+    }
+
+    pub fn replace_file_contents(
+        &mut self,
+        located: FatLocatedDirectoryEntry,
+        chain: &mut [u32],
+        sector_buffer: &mut [u8],
+        source: &[u8],
+    ) -> Result<FatDirectoryEntry, FatReplacementError> {
+        self.validate_sector_buffer(sector_buffer)?;
+        self.ensure_mutation_supported()?;
+
+        if located.entry.is_directory() || located.entry.is_volume_label() {
+            return Err(FatMutationError::NotRegularFile.into());
+        }
+
+        let old_first_cluster = located.entry.first_cluster;
+        if old_first_cluster == 0 && located.entry.file_size != 0 {
+            return Err(FatMutationError::MissingFirstCluster.into());
+        }
+        if old_first_cluster == 1 {
+            return Err(FatMutationError::MissingFirstCluster.into());
+        }
+        if old_first_cluster >= 2 {
+            self.read_chain(old_first_cluster, chain, sector_buffer)?;
+        }
+
+        let file_size = u32::try_from(source.len()).map_err(|_| FatWriteError::SourceTooLarge)?;
+
+        if source.is_empty() {
+            let active_entry = self.update_file_directory_entry(located, 0, 0, sector_buffer)?;
+            if old_first_cluster < 2 {
+                return Ok(active_entry);
+            }
+
+            return match self.free_detached_chain(old_first_cluster, chain, sector_buffer) {
+                Ok(_) => Ok(active_entry),
+                Err(error) => Err(FatReplacementError::OldChainCleanupFailed {
+                    active_entry,
+                    error,
+                }),
+            };
+        }
+
+        let bytes_per_cluster = usize::from(self.boot.bytes_per_sector)
+            .checked_mul(usize::from(self.boot.sectors_per_cluster))
+            .ok_or(FatReadError::ArithmeticOverflow)?;
+        let required_clusters = source.len().div_ceil(bytes_per_cluster);
+
+        self.plan_free_clusters(required_clusters, 2, chain, sector_buffer)?;
+        let new_chain = &chain[..required_clusters];
+        self.commit_planned_chain(new_chain, sector_buffer)?;
+        self.write_prepared_chain(new_chain, sector_buffer, source)?;
+
+        let active_entry =
+            self.update_file_directory_entry(located, new_chain[0], file_size, sector_buffer)?;
+        if old_first_cluster < 2 {
+            return Ok(active_entry);
+        }
+
+        match self.free_detached_chain(old_first_cluster, chain, sector_buffer) {
+            Ok(_) => Ok(active_entry),
+            Err(error) => Err(FatReplacementError::OldChainCleanupFailed {
+                active_entry,
+                error,
+            }),
+        }
     }
 
     pub fn find_directory_entry(
@@ -2212,6 +2313,80 @@ mod tests {
             reader.write_fat_entry(2, FatEntry::Reserved(7), &mut sector_buffer),
             Err(FatMutationError::UnsupportedValue)
         );
+    }
+
+    #[test]
+    fn replaces_file_through_new_chain_before_releasing_old_chain() {
+        let boot = FatBootSector {
+            kind: FatKind::Fat32,
+            bytes_per_sector: 512,
+            sectors_per_cluster: 1,
+            reserved_sectors: 1,
+            fat_count: 1,
+            root_entry_count: 0,
+            total_sectors: 9,
+            fat_size_sectors: 1,
+            first_data_sector: 2,
+            data_cluster_count: 6,
+            root_cluster: Some(6),
+        };
+        let mut device = phoenix_block::MemoryBlockDevice::<512, 9>::new();
+
+        let mut fat_sector = [0_u8; 512];
+        fat_sector[8..12].copy_from_slice(&3_u32.to_le_bytes());
+        fat_sector[12..16].copy_from_slice(&0x0fff_fff8_u32.to_le_bytes());
+        device.write_blocks(1, &fat_sector).unwrap();
+        device.write_blocks(2, &[b'A'; 512]).unwrap();
+        device.write_blocks(3, &[b'B'; 512]).unwrap();
+
+        let entry = FatDirectoryEntry {
+            short_name: *b"DATA    BIN",
+            attributes: 0x20,
+            first_cluster: 2,
+            file_size: 600,
+        };
+        let mut directory_sector = [0_u8; 512];
+        directory_sector[..11].copy_from_slice(&entry.short_name);
+        directory_sector[11] = entry.attributes;
+        directory_sector[26..28].copy_from_slice(&(entry.first_cluster as u16).to_le_bytes());
+        directory_sector[28..32].copy_from_slice(&entry.file_size.to_le_bytes());
+        device.write_blocks(8, &directory_sector).unwrap();
+
+        let located = FatLocatedDirectoryEntry {
+            entry,
+            location: FatDirectoryLocation {
+                sector: 8,
+                offset: 0,
+            },
+        };
+        let mut reader = FatTableReader::new(&mut device, boot).unwrap();
+        let mut sector_buffer = [0_u8; 512];
+        let mut chain = [0_u32; 4];
+        let source = [b'X'; 700];
+
+        let active_entry = reader
+            .replace_file_contents(located, &mut chain, &mut sector_buffer, &source)
+            .unwrap();
+
+        assert_eq!(active_entry.first_cluster, 4);
+        assert_eq!(active_entry.file_size, source.len() as u32);
+        assert_eq!(reader.read_entry(2, &mut sector_buffer), Ok(FatEntry::Free));
+        assert_eq!(reader.read_entry(3, &mut sector_buffer), Ok(FatEntry::Free));
+        assert_eq!(
+            reader.read_entry(4, &mut sector_buffer),
+            Ok(FatEntry::Data(5))
+        );
+        assert_eq!(
+            reader.read_entry(5, &mut sector_buffer),
+            Ok(FatEntry::EndOfChain)
+        );
+
+        let mut output = [0_u8; 700];
+        assert_eq!(
+            reader.read_file(active_entry, &mut chain, &mut sector_buffer, &mut output),
+            Ok(source.len())
+        );
+        assert_eq!(output, source);
     }
 
     #[test]

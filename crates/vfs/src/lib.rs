@@ -141,7 +141,9 @@ pub fn resolve_mounted_path<L: NamespaceLookup + ?Sized, const CAPACITY: usize>(
         if component.is_empty() || component == "." || component == ".." {
             return Err(VfsError::InvalidPath);
         }
+    }
 
+    for component in path[1..].split('/') {
         current = mounts.cross_mount(current);
         let child = lookup.lookup_child(current, component.as_bytes())?;
         current = VfsNode::new(current.filesystem, child);

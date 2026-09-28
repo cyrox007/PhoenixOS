@@ -8,12 +8,11 @@ use phoenix_ipc::{
 };
 use phoenix_process::{ProcessCapabilitySet, ProcessId};
 use phoenix_syscall_abi::{
-    IpcReceiveArguments, IpcReceiveMetadata, IpcSendArguments, NO_TRANSFERRED_CAPABILITY,
     FILE_OPEN_CREATE, FILE_OPEN_READ, FILE_OPEN_TRUNCATE, FILE_OPEN_WRITE, FILE_SEEK_CURRENT,
-    FILE_SEEK_END, FILE_SEEK_START, PackedCapabilityHandle, SYSCALL_FILE_CLOSE,
-    SYSCALL_FILE_OPEN, SYSCALL_FILE_READ, SYSCALL_FILE_SEEK, SYSCALL_FILE_WRITE,
-    SYSCALL_IPC_RECEIVE, SYSCALL_IPC_SEND, SYSCALL_PROCESS_EXIT, SyscallRequest, SyscallReturn,
-    SyscallStatus,
+    FILE_SEEK_END, FILE_SEEK_START, IpcReceiveArguments, IpcReceiveMetadata, IpcSendArguments,
+    NO_TRANSFERRED_CAPABILITY, PackedCapabilityHandle, SYSCALL_FILE_CLOSE, SYSCALL_FILE_OPEN,
+    SYSCALL_FILE_READ, SYSCALL_FILE_SEEK, SYSCALL_FILE_WRITE, SYSCALL_IPC_RECEIVE,
+    SYSCALL_IPC_SEND, SYSCALL_PROCESS_EXIT, SyscallRequest, SyscallReturn, SyscallStatus,
 };
 
 use crate::ipc_user_memory::{self, IpcUserMemoryError};
@@ -959,7 +958,8 @@ fn dispatch_file_open(request: SyscallRequest) -> SyscallReturn {
         return syscall_failure(STATUS_BAD_ARGUMENTS);
     }
 
-    if phoenix_vm::UserBuffer::for_array(request.arguments[0], request.arguments[1], 1, 1).is_err() {
+    if phoenix_vm::UserBuffer::for_array(request.arguments[0], request.arguments[1], 1, 1).is_err()
+    {
         return syscall_failure(STATUS_BAD_ARGUMENTS);
     }
     syscall_failure(STATUS_OPERATION_NOT_READY)
@@ -969,7 +969,8 @@ fn dispatch_file_io(request: SyscallRequest) -> SyscallReturn {
     if request.arguments[3..].iter().any(|argument| *argument != 0) {
         return syscall_failure(STATUS_BAD_ARGUMENTS);
     }
-    if phoenix_vm::UserBuffer::for_array(request.arguments[1], request.arguments[2], 1, 1).is_err() {
+    if phoenix_vm::UserBuffer::for_array(request.arguments[1], request.arguments[2], 1, 1).is_err()
+    {
         return syscall_failure(STATUS_BAD_ARGUMENTS);
     }
     syscall_failure(STATUS_OPERATION_NOT_READY)
@@ -977,7 +978,10 @@ fn dispatch_file_io(request: SyscallRequest) -> SyscallReturn {
 
 fn dispatch_file_seek(request: SyscallRequest) -> SyscallReturn {
     if request.arguments[3..].iter().any(|argument| *argument != 0)
-        || !matches!(request.arguments[2], FILE_SEEK_START | FILE_SEEK_CURRENT | FILE_SEEK_END)
+        || !matches!(
+            request.arguments[2],
+            FILE_SEEK_START | FILE_SEEK_CURRENT | FILE_SEEK_END
+        )
     {
         return syscall_failure(STATUS_BAD_ARGUMENTS);
     }
@@ -992,10 +996,7 @@ fn dispatch_file_close(request: SyscallRequest) -> SyscallReturn {
 }
 
 pub fn file_dispatch_self_test() -> bool {
-    let valid_open = SyscallRequest::new(
-        SYSCALL_FILE_OPEN,
-        [0x4000, 4, FILE_OPEN_READ, 0, 0, 0],
-    );
+    let valid_open = SyscallRequest::new(SYSCALL_FILE_OPEN, [0x4000, 4, FILE_OPEN_READ, 0, 0, 0]);
     let invalid_open = SyscallRequest::new(
         SYSCALL_FILE_OPEN,
         [0x4000, 4, FILE_OPEN_TRUNCATE | FILE_OPEN_READ, 0, 0, 0],

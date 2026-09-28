@@ -168,6 +168,25 @@ pub enum FatWriteError {
     ChainTooShort,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FatMutationError {
+    Read(FatReadError),
+    UnsupportedValue,
+    NoFreeCluster,
+}
+
+impl From<FatReadError> for FatMutationError {
+    fn from(error: FatReadError) -> Self {
+        Self::Read(error)
+    }
+}
+
+impl From<BlockError> for FatMutationError {
+    fn from(error: BlockError) -> Self {
+        Self::Read(FatReadError::Device(error))
+    }
+}
+
 impl From<FatReadError> for FatWriteError {
     fn from(error: FatReadError) -> Self {
         Self::Read(error)
@@ -347,6 +366,88 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
             return Err(FatFileError::ChainTooShort);
         }
         Ok(written)
+    }
+
+    pub fn find_free_cluster(
+        &mut self,
+        start_cluster: u32,
+        sector_buffer: &mut [u8],
+    ) -> Result<u32, FatMutationError> {
+        self.validate_sector_buffer(sector_buffer)?;
+        if matches!(self.boot.kind, FatKind::Fat12) {
+            return Err(FatReadError::UnsupportedFat12.into());
+        }
+
+        let first = start_cluster.max(2);
+        let last = self
+            .boot
+            .data_cluster_count
+            .checked_add(1)
+            .ok_or(FatReadError::ArithmeticOverflow)?;
+
+        for cluster in first..=last {
+            if matches!(self.read_entry(cluster, sector_buffer)?, FatEntry::Free) {
+                return Ok(cluster);
+            }
+        }
+
+        Err(FatMutationError::NoFreeCluster)
+    }
+
+    pub fn write_fat_entry(
+        &mut self,
+        cluster: u32,
+        value: FatEntry,
+        sector_buffer: &mut [u8],
+    ) -> Result<(), FatMutationError> {
+        self.validate_cluster(cluster)?;
+        self.validate_sector_buffer(sector_buffer)?;
+        if let FatEntry::Data(next_cluster) = value {
+            self.validate_cluster(next_cluster)?;
+        }
+        let raw_value = encode_fat_entry(self.boot.kind, value)?;
+        let entry_size = self.entry_size()?;
+        let bytes_per_sector = u64::from(self.boot.bytes_per_sector);
+        let entry_offset = u64::from(cluster)
+            .checked_mul(entry_size)
+            .ok_or(FatReadError::ArithmeticOverflow)?;
+        let sector_inside_fat = entry_offset / bytes_per_sector;
+        let byte_offset = usize::try_from(entry_offset % bytes_per_sector)
+            .map_err(|_| FatReadError::ArithmeticOverflow)?;
+
+        for fat_index in 0..u64::from(self.boot.fat_count) {
+            let fat_base = u64::from(self.boot.reserved_sectors)
+                .checked_add(
+                    fat_index
+                        .checked_mul(u64::from(self.boot.fat_size_sectors))
+                        .ok_or(FatReadError::ArithmeticOverflow)?,
+                )
+                .ok_or(FatReadError::ArithmeticOverflow)?;
+            let sector = fat_base
+                .checked_add(sector_inside_fat)
+                .ok_or(FatReadError::ArithmeticOverflow)?;
+
+            self.device.read_blocks(sector, sector_buffer)?;
+            match self.boot.kind {
+                FatKind::Fat12 => return Err(FatReadError::UnsupportedFat12.into()),
+                FatKind::Fat16 => {
+                    let raw = u16::try_from(raw_value)
+                        .map_err(|_| FatMutationError::UnsupportedValue)?;
+                    sector_buffer[byte_offset..byte_offset + 2]
+                        .copy_from_slice(&raw.to_le_bytes());
+                }
+                FatKind::Fat32 => {
+                    let existing = read_u32(sector_buffer, byte_offset);
+                    let raw = (existing & 0xf000_0000) | (raw_value & 0x0fff_ffff);
+                    sector_buffer[byte_offset..byte_offset + 4]
+                        .copy_from_slice(&raw.to_le_bytes());
+                }
+            }
+            self.device.write_blocks(sector, sector_buffer)?;
+        }
+
+        self.device.flush()?;
+        Ok(())
     }
 
     pub fn write_file_in_place(
@@ -823,6 +924,23 @@ const fn classify_entry(kind: FatKind, raw: u32) -> FatEntry {
     }
 }
 
+fn encode_fat_entry(kind: FatKind, value: FatEntry) -> Result<u32, FatMutationError> {
+    match (kind, value) {
+        (FatKind::Fat12, _) => Err(FatReadError::UnsupportedFat12.into()),
+        (FatKind::Fat16, FatEntry::Free) => Ok(0),
+        (FatKind::Fat16, FatEntry::Data(next)) if next <= 0xffef => Ok(next),
+        (FatKind::Fat16, FatEntry::Bad) => Ok(0xfff7),
+        (FatKind::Fat16, FatEntry::EndOfChain) => Ok(0xffff),
+        (FatKind::Fat32, FatEntry::Free) => Ok(0),
+        (FatKind::Fat32, FatEntry::Data(next)) if next <= 0x0fff_ffef => Ok(next),
+        (FatKind::Fat32, FatEntry::Bad) => Ok(0x0fff_fff7),
+        (FatKind::Fat32, FatEntry::EndOfChain) => Ok(0x0fff_ffff),
+        (_, FatEntry::Reserved(_)) | (_, FatEntry::Data(_)) => {
+            Err(FatMutationError::UnsupportedValue)
+        }
+    }
+}
+
 const fn classify_fat16_entry(raw: u32) -> FatEntry {
     match raw {
         0 => FatEntry::Free,
@@ -1207,6 +1325,87 @@ mod tests {
             ),
             Err(FatDirectoryError::LongNameBufferTooSmall)
         );
+    }
+
+    #[test]
+    fn finds_first_free_cluster_at_or_after_requested_start() {
+        let boot = FatBootSector {
+            kind: FatKind::Fat32,
+            bytes_per_sector: 512,
+            sectors_per_cluster: 1,
+            reserved_sectors: 1,
+            fat_count: 1,
+            root_entry_count: 0,
+            total_sectors: 6,
+            fat_size_sectors: 1,
+            first_data_sector: 2,
+            data_cluster_count: 4,
+            root_cluster: Some(2),
+        };
+        let mut device = phoenix_block::MemoryBlockDevice::<512, 6>::new();
+        let mut fat_sector = [0_u8; 512];
+        fat_sector[8..12].copy_from_slice(&3_u32.to_le_bytes());
+        fat_sector[12..16].copy_from_slice(&0x0fff_fff8_u32.to_le_bytes());
+        device.write_blocks(1, &fat_sector).unwrap();
+
+        let mut reader = FatTableReader::new(&mut device, boot).unwrap();
+        let mut sector_buffer = [0_u8; 512];
+
+        assert_eq!(reader.find_free_cluster(2, &mut sector_buffer), Ok(4));
+        assert_eq!(reader.find_free_cluster(5, &mut sector_buffer), Ok(5));
+    }
+
+    #[test]
+    fn fat_entry_write_rejects_invalid_targets_and_reserved_values() {
+        let mut device = phoenix_block::MemoryBlockDevice::<512, 4>::new();
+        let mut reader = FatTableReader::new(&mut device, fat32_boot()).unwrap();
+        let mut sector_buffer = [0_u8; 512];
+
+        assert_eq!(
+            reader.write_fat_entry(2, FatEntry::Data(1), &mut sector_buffer),
+            Err(FatMutationError::Read(FatReadError::ClusterOutOfRange))
+        );
+        assert_eq!(
+            reader.write_fat_entry(2, FatEntry::Reserved(7), &mut sector_buffer),
+            Err(FatMutationError::UnsupportedValue)
+        );
+    }
+
+    #[test]
+    fn writes_fat32_entry_to_all_tables_and_preserves_reserved_bits() {
+        let boot = FatBootSector {
+            kind: FatKind::Fat32,
+            bytes_per_sector: 512,
+            sectors_per_cluster: 1,
+            reserved_sectors: 1,
+            fat_count: 2,
+            root_entry_count: 0,
+            total_sectors: 7,
+            fat_size_sectors: 1,
+            first_data_sector: 3,
+            data_cluster_count: 4,
+            root_cluster: Some(2),
+        };
+        let mut device = phoenix_block::MemoryBlockDevice::<512, 7>::new();
+
+        let mut first_fat = [0_u8; 512];
+        first_fat[8..12].copy_from_slice(&0xf000_0000_u32.to_le_bytes());
+        device.write_blocks(1, &first_fat).unwrap();
+
+        let mut second_fat = [0_u8; 512];
+        second_fat[8..12].copy_from_slice(&0xa000_0000_u32.to_le_bytes());
+        device.write_blocks(2, &second_fat).unwrap();
+
+        let mut reader = FatTableReader::new(&mut device, boot).unwrap();
+        let mut sector_buffer = [0_u8; 512];
+        reader
+            .write_fat_entry(2, FatEntry::Data(3), &mut sector_buffer)
+            .unwrap();
+
+        reader.device.read_blocks(1, &mut first_fat).unwrap();
+        reader.device.read_blocks(2, &mut second_fat).unwrap();
+        assert_eq!(read_u32(&first_fat, 8), 0xf000_0003);
+        assert_eq!(read_u32(&second_fat, 8), 0xa000_0003);
     }
 
     #[test]

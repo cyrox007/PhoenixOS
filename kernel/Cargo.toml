@@ -16,6 +16,7 @@ phoenix-memory = { path = "../crates/boot-memory" }
 phoenix-process = { path = "../crates/process-model" }
 phoenix-process-manager = { path = "../crates/process-manager" }
 phoenix-scheduler = { path = "../crates/scheduler" }
+phoenix-service-manager = { path = "../crates/service-manager" }
 phoenix-syscall-abi = { path = "../crates/syscall-abi" }
 phoenix-vm = { path = "../crates/virtual-memory" }
 uart_16550 = "0.8.0"

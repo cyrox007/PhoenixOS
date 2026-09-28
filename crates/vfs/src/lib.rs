@@ -25,16 +25,112 @@ pub enum VfsError {
 pub struct NodeId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileSystemId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VfsNode {
+    pub filesystem: FileSystemId,
+    pub node: NodeId,
+}
+
+impl VfsNode {
+    pub const fn new(filesystem: FileSystemId, node: NodeId) -> Self {
+        Self { filesystem, node }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MountPoint {
+    pub location: VfsNode,
+    pub root: VfsNode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MountError {
+    TableFull,
+    AlreadyMounted,
+    NotMounted,
+}
+
+pub struct MountTable<const CAPACITY: usize> {
+    root: VfsNode,
+    mounts: [Option<MountPoint>; CAPACITY],
+    count: usize,
+}
+
+impl<const CAPACITY: usize> MountTable<CAPACITY> {
+    pub const fn new(root: VfsNode) -> Self {
+        Self {
+            root,
+            mounts: [None; CAPACITY],
+            count: 0,
+        }
+    }
+
+    pub const fn root(&self) -> VfsNode {
+        self.root
+    }
+
+    pub const fn len(&self) -> usize {
+        self.count
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn mount(&mut self, location: VfsNode, root: VfsNode) -> Result<(), MountError> {
+        if self
+            .mounts
+            .iter()
+            .flatten()
+            .any(|point| point.location == location)
+        {
+            return Err(MountError::AlreadyMounted);
+        }
+
+        let Some(slot) = self.mounts.iter_mut().find(|slot| slot.is_none()) else {
+            return Err(MountError::TableFull);
+        };
+        *slot = Some(MountPoint { location, root });
+        self.count += 1;
+        Ok(())
+    }
+
+    pub fn unmount(&mut self, location: VfsNode) -> Result<MountPoint, MountError> {
+        let Some(slot) = self
+            .mounts
+            .iter_mut()
+            .find(|slot| slot.is_some_and(|point| point.location == location))
+        else {
+            return Err(MountError::NotMounted);
+        };
+        let point = slot.take().ok_or(MountError::NotMounted)?;
+        self.count -= 1;
+        Ok(point)
+    }
+
+    pub fn cross_mount(&self, node: VfsNode) -> VfsNode {
+        self.mounts
+            .iter()
+            .flatten()
+            .find(|point| point.location == node)
+            .map(|point| point.root)
+            .unwrap_or(node)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NodeMetadata {
     pub kind: NodeKind,
     pub length: u64,
 }
 
-/// Filesystem-independent node operations used by the VFS and file descriptors.
+/// Независимые от конкретной файловой системы операции с узлами для ВФС и дескрипторов.
 ///
-/// Paths are intentionally kept outside this contract. Mount traversal can resolve a
-/// path component-by-component and then retain the returned `NodeId` in an open file
-/// description without coupling callers to a concrete filesystem implementation.
+/// Пути намеренно остаются вне этого контракта. Слой монтирования может разрешать путь
+/// по одному компоненту, а затем сохранять полученный `NodeId` в открытом описании
+/// файла без привязки вызывающего кода к конкретной реализации файловой системы.
 pub trait FileSystem {
     fn root_node(&self) -> Result<NodeId, VfsError>;
     fn metadata(&self, node: NodeId) -> Result<NodeMetadata, VfsError>;
@@ -374,12 +470,11 @@ impl Name {
     }
 
     fn new(value: &[u8]) -> Result<Self, VfsError> {
-        if value.is_empty() || value.len() > NAME_CAPACITY || value.contains(&b'/') {
-            return Err(if value.len() > NAME_CAPACITY {
-                VfsError::NameTooLong
-            } else {
-                VfsError::InvalidPath
-            });
+        if value.len() > NAME_CAPACITY {
+            return Err(VfsError::NameTooLong);
+        }
+        if value.is_empty() || value.contains(&b'/') {
+            return Err(VfsError::InvalidPath);
         }
 
         let mut name = Self::root();
@@ -654,6 +749,67 @@ fn split_parent(path: &str) -> Result<(&str, &str), VfsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mount_table_keeps_filesystem_identity_and_crosses_mount() {
+        let system_root = VfsNode::new(FileSystemId(1), NodeId(0));
+        let media_directory = VfsNode::new(FileSystemId(1), NodeId(7));
+        let media_root = VfsNode::new(FileSystemId(2), NodeId(0));
+        let same_local_node = VfsNode::new(FileSystemId(3), NodeId(0));
+        let mut mounts = MountTable::<2>::new(system_root);
+
+        assert_eq!(mounts.root(), system_root);
+        assert_eq!(mounts.cross_mount(media_directory), media_directory);
+
+        mounts.mount(media_directory, media_root).unwrap();
+
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts.cross_mount(media_directory), media_root);
+        assert_eq!(mounts.cross_mount(same_local_node), same_local_node);
+        assert_ne!(media_root, same_local_node);
+    }
+
+    #[test]
+    fn mount_table_rejects_duplicate_and_capacity_overflow() {
+        let root = VfsNode::new(FileSystemId(1), NodeId(0));
+        let first_location = VfsNode::new(FileSystemId(1), NodeId(1));
+        let second_location = VfsNode::new(FileSystemId(1), NodeId(2));
+        let mounted_root = VfsNode::new(FileSystemId(2), NodeId(0));
+        let mut mounts = MountTable::<1>::new(root);
+
+        mounts.mount(first_location, mounted_root).unwrap();
+        assert_eq!(
+            mounts.mount(first_location, VfsNode::new(FileSystemId(3), NodeId(0))),
+            Err(MountError::AlreadyMounted)
+        );
+        assert_eq!(
+            mounts.mount(second_location, VfsNode::new(FileSystemId(4), NodeId(0))),
+            Err(MountError::TableFull)
+        );
+    }
+
+    #[test]
+    fn unmount_restores_underlying_node() {
+        let root = VfsNode::new(FileSystemId(1), NodeId(0));
+        let location = VfsNode::new(FileSystemId(1), NodeId(4));
+        let mounted_root = VfsNode::new(FileSystemId(2), NodeId(0));
+        let mut mounts = MountTable::<1>::new(root);
+
+        mounts.mount(location, mounted_root).unwrap();
+        assert_eq!(mounts.cross_mount(location), mounted_root);
+
+        let removed = mounts.unmount(location).unwrap();
+        assert_eq!(
+            removed,
+            MountPoint {
+                location,
+                root: mounted_root,
+            }
+        );
+        assert!(mounts.is_empty());
+        assert_eq!(mounts.cross_mount(location), location);
+        assert_eq!(mounts.unmount(location), Err(MountError::NotMounted));
+    }
 
     #[test]
     fn creates_hierarchy_and_reads_file() {

@@ -175,6 +175,9 @@ pub enum FatMutationError {
     UnsupportedValue,
     NoFreeCluster,
     PlanBufferTooSmall,
+    EmptyChainPlan,
+    DuplicateCluster(u32),
+    ClusterNotFree(u32),
 }
 
 impl From<FatReadError> for FatMutationError {
@@ -372,6 +375,37 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
             return Err(FatFileError::ChainTooShort);
         }
         Ok(written)
+    }
+
+    pub fn commit_planned_chain(
+        &mut self,
+        clusters: &[u32],
+        sector_buffer: &mut [u8],
+    ) -> Result<(), FatMutationError> {
+        self.validate_sector_buffer(sector_buffer)?;
+        if clusters.is_empty() {
+            return Err(FatMutationError::EmptyChainPlan);
+        }
+
+        for (index, cluster) in clusters.iter().copied().enumerate() {
+            self.validate_cluster(cluster)?;
+            if clusters[..index].contains(&cluster) {
+                return Err(FatMutationError::DuplicateCluster(cluster));
+            }
+            if !matches!(self.read_entry(cluster, sector_buffer)?, FatEntry::Free) {
+                return Err(FatMutationError::ClusterNotFree(cluster));
+            }
+        }
+
+        for index in (0..clusters.len()).rev() {
+            let value = match clusters.get(index + 1) {
+                Some(next) => FatEntry::Data(*next),
+                None => FatEntry::EndOfChain,
+            };
+            self.write_fat_entry(clusters[index], value, sector_buffer)?;
+        }
+
+        Ok(())
     }
 
     pub fn plan_free_clusters(
@@ -1387,6 +1421,92 @@ mod tests {
                 |_, _| true,
             ),
             Err(FatDirectoryError::LongNameBufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn commits_planned_chain_from_tail_to_head() {
+        let boot = FatBootSector {
+            kind: FatKind::Fat32,
+            bytes_per_sector: 512,
+            sectors_per_cluster: 1,
+            reserved_sectors: 1,
+            fat_count: 1,
+            root_entry_count: 0,
+            total_sectors: 8,
+            fat_size_sectors: 1,
+            first_data_sector: 2,
+            data_cluster_count: 6,
+            root_cluster: Some(2),
+        };
+        let mut device = phoenix_block::MemoryBlockDevice::<512, 8>::new();
+        let mut reader = FatTableReader::new(&mut device, boot).unwrap();
+        let mut sector_buffer = [0_u8; 512];
+
+        reader
+            .commit_planned_chain(&[4, 5, 6], &mut sector_buffer)
+            .unwrap();
+
+        assert_eq!(
+            reader.read_entry(4, &mut sector_buffer),
+            Ok(FatEntry::Data(5))
+        );
+        assert_eq!(
+            reader.read_entry(5, &mut sector_buffer),
+            Ok(FatEntry::Data(6))
+        );
+        assert_eq!(
+            reader.read_entry(6, &mut sector_buffer),
+            Ok(FatEntry::EndOfChain)
+        );
+    }
+
+    #[test]
+    fn chain_commit_validates_entire_plan_before_writing() {
+        let boot = FatBootSector {
+            kind: FatKind::Fat32,
+            bytes_per_sector: 512,
+            sectors_per_cluster: 1,
+            reserved_sectors: 1,
+            fat_count: 1,
+            root_entry_count: 0,
+            total_sectors: 8,
+            fat_size_sectors: 1,
+            first_data_sector: 2,
+            data_cluster_count: 6,
+            root_cluster: Some(2),
+        };
+        let mut device = phoenix_block::MemoryBlockDevice::<512, 8>::new();
+        let mut fat_sector = [0_u8; 512];
+        fat_sector[20..24].copy_from_slice(&0x0fff_fff8_u32.to_le_bytes());
+        device.write_blocks(1, &fat_sector).unwrap();
+
+        let mut reader = FatTableReader::new(&mut device, boot).unwrap();
+        let mut sector_buffer = [0_u8; 512];
+
+        assert_eq!(
+            reader.commit_planned_chain(&[4, 5, 6], &mut sector_buffer),
+            Err(FatMutationError::ClusterNotFree(5))
+        );
+        assert_eq!(reader.read_entry(4, &mut sector_buffer), Ok(FatEntry::Free));
+        assert_eq!(reader.read_entry(6, &mut sector_buffer), Ok(FatEntry::Free));
+
+        assert_eq!(
+            reader.commit_planned_chain(&[4, 4], &mut sector_buffer),
+            Err(FatMutationError::DuplicateCluster(4))
+        );
+        assert_eq!(reader.read_entry(4, &mut sector_buffer), Ok(FatEntry::Free));
+    }
+
+    #[test]
+    fn chain_commit_rejects_empty_plan() {
+        let mut device = phoenix_block::MemoryBlockDevice::<512, 4>::new();
+        let mut reader = FatTableReader::new(&mut device, fat32_boot()).unwrap();
+        let mut sector_buffer = [0_u8; 512];
+
+        assert_eq!(
+            reader.commit_planned_chain(&[], &mut sector_buffer),
+            Err(FatMutationError::EmptyChainPlan)
         );
     }
 

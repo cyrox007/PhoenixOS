@@ -100,18 +100,12 @@ pub fn file_read(
     usize::try_from(value).map_err(|_| SyscallError { status: u64::MAX })
 }
 
-pub fn file_write(
-    descriptor: PackedFileDescriptor,
-    buffer: &[u8],
-) -> Result<usize, SyscallError> {
+pub fn file_write(descriptor: PackedFileDescriptor, buffer: &[u8]) -> Result<usize, SyscallError> {
     let value = invoke(build_file_write_request(descriptor, buffer))?;
     usize::try_from(value).map_err(|_| SyscallError { status: u64::MAX })
 }
 
-pub fn file_seek(
-    descriptor: PackedFileDescriptor,
-    from: SeekFrom,
-) -> Result<u64, SyscallError> {
+pub fn file_seek(descriptor: PackedFileDescriptor, from: SeekFrom) -> Result<u64, SyscallError> {
     invoke(build_file_seek_request(descriptor, from))
 }
 
@@ -147,10 +141,7 @@ fn build_file_open_request(path: &str, options: OpenOptions) -> SyscallRequest {
     })
 }
 
-fn build_file_read_request(
-    descriptor: PackedFileDescriptor,
-    buffer: &mut [u8],
-) -> SyscallRequest {
+fn build_file_read_request(descriptor: PackedFileDescriptor, buffer: &mut [u8]) -> SyscallRequest {
     SyscallRequest::file_read(FileIoArguments {
         descriptor,
         buffer_address: buffer.as_mut_ptr() as u64,
@@ -166,10 +157,7 @@ fn build_file_write_request(descriptor: PackedFileDescriptor, buffer: &[u8]) -> 
     })
 }
 
-fn build_file_seek_request(
-    descriptor: PackedFileDescriptor,
-    from: SeekFrom,
-) -> SyscallRequest {
+fn build_file_seek_request(descriptor: PackedFileDescriptor, from: SeekFrom) -> SyscallRequest {
     let (offset, origin) = match from {
         SeekFrom::Start(offset) => (offset, FILE_SEEK_START),
         SeekFrom::Current(offset) => (offset, FILE_SEEK_CURRENT),

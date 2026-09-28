@@ -179,6 +179,7 @@ pub enum FatWriteError {
     WriteBeyondFile,
     MissingFirstCluster,
     ChainTooShort,
+    PreparedChainChanged(u32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -650,6 +651,75 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
 
         self.device.flush()?;
         Ok(())
+    }
+
+    pub fn write_prepared_chain(
+        &mut self,
+        clusters: &[u32],
+        sector_buffer: &mut [u8],
+        source: &[u8],
+    ) -> Result<usize, FatWriteError> {
+        self.validate_sector_buffer(sector_buffer)?;
+        u32::try_from(source.len()).map_err(|_| FatWriteError::SourceTooLarge)?;
+
+        if source.is_empty() {
+            return Ok(0);
+        }
+        if clusters.is_empty() {
+            return Err(FatWriteError::ChainTooShort);
+        }
+
+        let bytes_per_sector = usize::from(self.boot.bytes_per_sector);
+        let sectors_per_cluster = usize::from(self.boot.sectors_per_cluster);
+        let bytes_per_cluster = bytes_per_sector
+            .checked_mul(sectors_per_cluster)
+            .ok_or(FatReadError::ArithmeticOverflow)?;
+        let capacity = clusters
+            .len()
+            .checked_mul(bytes_per_cluster)
+            .ok_or(FatReadError::ArithmeticOverflow)?;
+        if source.len() > capacity {
+            return Err(FatWriteError::ChainTooShort);
+        }
+
+        for (index, cluster) in clusters.iter().copied().enumerate() {
+            self.validate_cluster(cluster)?;
+
+            let expected = match clusters.get(index + 1) {
+                Some(next_cluster) => {
+                    self.validate_cluster(*next_cluster)?;
+                    FatEntry::Data(*next_cluster)
+                }
+                None => FatEntry::EndOfChain,
+            };
+            if self.read_entry(cluster, sector_buffer)? != expected {
+                return Err(FatWriteError::PreparedChainChanged(cluster));
+            }
+        }
+
+        let mut written = 0_usize;
+        for cluster in clusters {
+            let first_sector = self.cluster_first_sector(*cluster)?;
+
+            for offset in 0..sectors_per_cluster {
+                sector_buffer.fill(0);
+
+                let remaining = source.len() - written;
+                let copied = remaining.min(bytes_per_sector);
+                if copied != 0 {
+                    sector_buffer[..copied].copy_from_slice(&source[written..written + copied]);
+                    written += copied;
+                }
+
+                let sector = first_sector
+                    .checked_add(offset as u64)
+                    .ok_or(FatReadError::ArithmeticOverflow)?;
+                self.device.write_blocks(sector, sector_buffer)?;
+            }
+        }
+
+        self.device.flush()?;
+        Ok(written)
     }
 
     pub fn write_file_in_place(
@@ -2146,6 +2216,122 @@ mod tests {
         reader.device.read_blocks(2, &mut second_fat).unwrap();
         assert_eq!(read_u32(&first_fat, 8), 0xf000_0003);
         assert_eq!(read_u32(&second_fat, 8), 0xa000_0003);
+    }
+
+    #[test]
+    fn writes_prepared_chain_and_zeros_unused_tail() {
+        let boot = FatBootSector {
+            kind: FatKind::Fat32,
+            bytes_per_sector: 512,
+            sectors_per_cluster: 1,
+            reserved_sectors: 1,
+            fat_count: 1,
+            root_entry_count: 0,
+            total_sectors: 5,
+            fat_size_sectors: 1,
+            first_data_sector: 2,
+            data_cluster_count: 3,
+            root_cluster: Some(2),
+        };
+        let mut device = phoenix_block::MemoryBlockDevice::<512, 5>::new();
+
+        let mut fat_sector = [0_u8; 512];
+        fat_sector[8..12].copy_from_slice(&3_u32.to_le_bytes());
+        fat_sector[12..16].copy_from_slice(&0x0fff_fff8_u32.to_le_bytes());
+        device.write_blocks(1, &fat_sector).unwrap();
+        device.write_blocks(2, &[0xaa_u8; 512]).unwrap();
+        device.write_blocks(3, &[0xbb_u8; 512]).unwrap();
+
+        let mut reader = FatTableReader::new(&mut device, boot).unwrap();
+        let mut sector_buffer = [0_u8; 512];
+        let source = [b'X'; 520];
+
+        assert_eq!(
+            reader.write_prepared_chain(&[2, 3], &mut sector_buffer, &source),
+            Ok(source.len())
+        );
+
+        reader.device.read_blocks(2, &mut sector_buffer).unwrap();
+        assert!(sector_buffer.iter().all(|byte| *byte == b'X'));
+
+        reader.device.read_blocks(3, &mut sector_buffer).unwrap();
+        assert!(sector_buffer[..8].iter().all(|byte| *byte == b'X'));
+        assert!(sector_buffer[8..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn prepared_chain_write_rejects_changed_chain_before_data() {
+        let boot = FatBootSector {
+            kind: FatKind::Fat32,
+            bytes_per_sector: 512,
+            sectors_per_cluster: 1,
+            reserved_sectors: 1,
+            fat_count: 1,
+            root_entry_count: 0,
+            total_sectors: 6,
+            fat_size_sectors: 1,
+            first_data_sector: 2,
+            data_cluster_count: 4,
+            root_cluster: Some(2),
+        };
+        let mut device = phoenix_block::MemoryBlockDevice::<512, 6>::new();
+
+        let mut fat_sector = [0_u8; 512];
+        fat_sector[8..12].copy_from_slice(&4_u32.to_le_bytes());
+        fat_sector[12..16].copy_from_slice(&0x0fff_fff8_u32.to_le_bytes());
+        fat_sector[16..20].copy_from_slice(&0x0fff_fff8_u32.to_le_bytes());
+        device.write_blocks(1, &fat_sector).unwrap();
+        device.write_blocks(2, &[b'A'; 512]).unwrap();
+        device.write_blocks(3, &[b'B'; 512]).unwrap();
+
+        let mut reader = FatTableReader::new(&mut device, boot).unwrap();
+        let mut sector_buffer = [0_u8; 512];
+
+        assert_eq!(
+            reader.write_prepared_chain(&[2, 3], &mut sector_buffer, b"new data"),
+            Err(FatWriteError::PreparedChainChanged(2))
+        );
+
+        reader.device.read_blocks(2, &mut sector_buffer).unwrap();
+        assert!(sector_buffer.iter().all(|byte| *byte == b'A'));
+
+        reader.device.read_blocks(3, &mut sector_buffer).unwrap();
+        assert!(sector_buffer.iter().all(|byte| *byte == b'B'));
+    }
+
+    #[test]
+    fn prepared_chain_write_rejects_insufficient_capacity() {
+        let boot = FatBootSector {
+            kind: FatKind::Fat32,
+            bytes_per_sector: 512,
+            sectors_per_cluster: 1,
+            reserved_sectors: 1,
+            fat_count: 1,
+            root_entry_count: 0,
+            total_sectors: 4,
+            fat_size_sectors: 1,
+            first_data_sector: 2,
+            data_cluster_count: 2,
+            root_cluster: Some(2),
+        };
+        let mut device = phoenix_block::MemoryBlockDevice::<512, 4>::new();
+
+        let mut fat_sector = [0_u8; 512];
+        fat_sector[8..12].copy_from_slice(&0x0fff_fff8_u32.to_le_bytes());
+        device.write_blocks(1, &fat_sector).unwrap();
+        device.write_blocks(2, &[b'A'; 512]).unwrap();
+
+        let mut reader = FatTableReader::new(&mut device, boot).unwrap();
+        let mut sector_buffer = [0_u8; 512];
+        let source = [b'X'; 513];
+
+        assert_eq!(
+            reader.write_prepared_chain(&[2], &mut sector_buffer, &source),
+            Err(FatWriteError::ChainTooShort)
+        );
+
+        reader.device.read_blocks(2, &mut sector_buffer).unwrap();
+        assert!(sector_buffer.iter().all(|byte| *byte == b'A'));
     }
 
     #[test]

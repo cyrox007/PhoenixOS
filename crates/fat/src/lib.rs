@@ -683,19 +683,11 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
                     .boot
                     .root_cluster
                     .ok_or(FatDirectoryError::MissingRootCluster)?;
-                self.find_cluster_directory_entry(
-                    start_cluster,
-                    short_name,
-                    chain,
-                    sector_buffer,
-                )
+                self.find_cluster_directory_entry(start_cluster, short_name, chain, sector_buffer)
             }
-            FatDirectory::Cluster(start_cluster) => self.find_cluster_directory_entry(
-                start_cluster,
-                short_name,
-                chain,
-                sector_buffer,
-            ),
+            FatDirectory::Cluster(start_cluster) => {
+                self.find_cluster_directory_entry(start_cluster, short_name, chain, sector_buffer)
+            }
         }
     }
 
@@ -811,12 +803,8 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
                 .ok_or(FatReadError::ArithmeticOverflow)?;
             self.device.read_blocks(sector, sector_buffer)?;
 
-            match find_directory_entry_in_sector(
-                self.boot.kind,
-                sector,
-                sector_buffer,
-                short_name,
-            ) {
+            match find_directory_entry_in_sector(self.boot.kind, sector, sector_buffer, short_name)
+            {
                 DirectorySearchResult::Found(entry) => return Ok(Some(entry)),
                 DirectorySearchResult::End => return Ok(None),
                 DirectorySearchResult::Continue => {}

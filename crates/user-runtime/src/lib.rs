@@ -82,7 +82,7 @@ impl OpenOptions {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SeekFrom {
-    Start(u64),
+    Start(i64),
     Current(i64),
     End(i64),
 }
@@ -171,7 +171,7 @@ fn build_file_seek_request(
     from: SeekFrom,
 ) -> SyscallRequest {
     let (offset, origin) = match from {
-        SeekFrom::Start(offset) => (offset as i64, FILE_SEEK_START),
+        SeekFrom::Start(offset) => (offset, FILE_SEEK_START),
         SeekFrom::Current(offset) => (offset, FILE_SEEK_CURRENT),
         SeekFrom::End(offset) => (offset, FILE_SEEK_END),
     };

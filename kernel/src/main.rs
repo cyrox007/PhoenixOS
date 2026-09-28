@@ -1619,8 +1619,8 @@ fn user_mode_syscall_self_test(
     let file_path = b"/syscall";
     let file_path_address = USER_MODE_TEST_STACK_ADDRESS + 0x180;
     let file_input = b"phoenix-file-io";
-    let file_input_address = USER_MODE_TEST_STACK_ADDRESS + 0x200;
-    let file_output_address = USER_MODE_TEST_STACK_ADDRESS + 0x240;
+    let file_input_address = USER_MODE_TEST_STACK_ADDRESS + 0x400;
+    let file_output_address = USER_MODE_TEST_STACK_ADDRESS + 0x440;
     space
         .write_user_bytes(VirtAddr::new(file_path_address), file_path)
         .expect("не удалось подготовить путь файловой syscall-проверки");

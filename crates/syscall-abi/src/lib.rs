@@ -506,7 +506,8 @@ mod tests {
                 path_address: 0x4000,
                 path_length: 9,
                 flags: FILE_OPEN_READ | FILE_OPEN_WRITE,
-            }).arguments,
+            })
+            .arguments,
             [0x4000, 9, 3, 0, 0, 0]
         );
         assert_eq!(
@@ -514,7 +515,8 @@ mod tests {
                 descriptor,
                 buffer_address: 0x5000,
                 buffer_length: 32,
-            }).arguments,
+            })
+            .arguments,
             [descriptor.raw(), 0x5000, 32, 0, 0, 0]
         );
         assert_eq!(
@@ -522,7 +524,8 @@ mod tests {
                 descriptor,
                 offset: -4,
                 origin: FILE_SEEK_END,
-            }).arguments,
+            })
+            .arguments,
             [descriptor.raw(), (-4_i64) as u64, FILE_SEEK_END, 0, 0, 0]
         );
         assert_eq!(

@@ -254,8 +254,7 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
             return Err(FatFileError::NotRegularFile);
         }
 
-        let file_size =
-            usize::try_from(entry.file_size).map_err(|_| FatFileError::FileTooLarge)?;
+        let file_size = usize::try_from(entry.file_size).map_err(|_| FatFileError::FileTooLarge)?;
         if destination.len() < file_size {
             return Err(FatFileError::DestinationTooSmall);
         }
@@ -763,12 +762,7 @@ mod tests {
             file_size: 2,
         };
         assert_eq!(
-            reader.read_file(
-                non_empty,
-                &mut chain,
-                &mut sector_buffer,
-                &mut [0_u8; 1],
-            ),
+            reader.read_file(non_empty, &mut chain, &mut sector_buffer, &mut [0_u8; 1],),
             Err(FatFileError::DestinationTooSmall)
         );
 

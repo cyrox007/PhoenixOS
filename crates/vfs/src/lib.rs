@@ -72,6 +72,224 @@ pub fn resolve_path<F: FileSystem + ?Sized>(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessMode {
+    ReadOnly,
+    WriteOnly,
+    ReadWrite,
+}
+
+impl AccessMode {
+    const fn can_read(self) -> bool {
+        matches!(self, Self::ReadOnly | Self::ReadWrite)
+    }
+
+    const fn can_write(self) -> bool {
+        matches!(self, Self::WriteOnly | Self::ReadWrite)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct FileDescriptor {
+    pub slot: u32,
+    pub generation: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DescriptorError {
+    BadDescriptor,
+    PermissionDenied,
+    TableFull,
+    OffsetOverflow,
+    Vfs(VfsError),
+}
+
+impl From<VfsError> for DescriptorError {
+    fn from(error: VfsError) -> Self {
+        Self::Vfs(error)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OpenFile {
+    node: NodeId,
+    position: u64,
+    access: AccessMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DescriptorSlot {
+    generation: u32,
+    file: Option<OpenFile>,
+}
+
+impl DescriptorSlot {
+    const EMPTY: Self = Self {
+        generation: 1,
+        file: None,
+    };
+}
+
+/// Per-process descriptor table over filesystem-independent node identifiers.
+pub struct DescriptorTable<const CAPACITY: usize> {
+    slots: [DescriptorSlot; CAPACITY],
+    count: usize,
+}
+
+impl<const CAPACITY: usize> DescriptorTable<CAPACITY> {
+    pub const fn new() -> Self {
+        Self {
+            slots: [DescriptorSlot::EMPTY; CAPACITY],
+            count: 0,
+        }
+    }
+
+    pub const fn len(&self) -> usize {
+        self.count
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn open<F: FileSystem + ?Sized>(
+        &mut self,
+        filesystem: &F,
+        node: NodeId,
+        access: AccessMode,
+    ) -> Result<FileDescriptor, DescriptorError> {
+        if filesystem.metadata(node)?.kind != NodeKind::File {
+            return Err(DescriptorError::Vfs(VfsError::IsDirectory));
+        }
+        let Some((index, slot)) = self
+            .slots
+            .iter_mut()
+            .enumerate()
+            .find(|(_, slot)| slot.file.is_none())
+        else {
+            return Err(DescriptorError::TableFull);
+        };
+        slot.file = Some(OpenFile {
+            node,
+            position: 0,
+            access,
+        });
+        self.count += 1;
+        Ok(FileDescriptor {
+            slot: index as u32,
+            generation: slot.generation,
+        })
+    }
+
+    pub fn close(&mut self, descriptor: FileDescriptor) -> Result<(), DescriptorError> {
+        let slot = self.slot_mut(descriptor)?;
+        slot.file = None;
+        slot.generation = next_generation(slot.generation);
+        self.count -= 1;
+        Ok(())
+    }
+
+    pub fn position(&self, descriptor: FileDescriptor) -> Result<u64, DescriptorError> {
+        Ok(self.file(descriptor)?.position)
+    }
+
+    pub fn set_position(
+        &mut self,
+        descriptor: FileDescriptor,
+        position: u64,
+    ) -> Result<(), DescriptorError> {
+        self.file_mut(descriptor)?.position = position;
+        Ok(())
+    }
+
+    pub fn read<F: FileSystem + ?Sized>(
+        &mut self,
+        filesystem: &F,
+        descriptor: FileDescriptor,
+        output: &mut [u8],
+    ) -> Result<usize, DescriptorError> {
+        let file = self.file_mut(descriptor)?;
+        if !file.access.can_read() {
+            return Err(DescriptorError::PermissionDenied);
+        }
+        let read = filesystem.read_node(file.node, file.position, output)?;
+        file.position = file
+            .position
+            .checked_add(read as u64)
+            .ok_or(DescriptorError::OffsetOverflow)?;
+        Ok(read)
+    }
+
+    pub fn write<F: FileSystem + ?Sized>(
+        &mut self,
+        filesystem: &mut F,
+        descriptor: FileDescriptor,
+        data: &[u8],
+    ) -> Result<usize, DescriptorError> {
+        let file = self.file_mut(descriptor)?;
+        if !file.access.can_write() {
+            return Err(DescriptorError::PermissionDenied);
+        }
+        let written = filesystem.write_node(file.node, file.position, data)?;
+        file.position = file
+            .position
+            .checked_add(written as u64)
+            .ok_or(DescriptorError::OffsetOverflow)?;
+        Ok(written)
+    }
+
+    fn slot(&self, descriptor: FileDescriptor) -> Result<&DescriptorSlot, DescriptorError> {
+        let slot = self
+            .slots
+            .get(descriptor.slot as usize)
+            .ok_or(DescriptorError::BadDescriptor)?;
+        if slot.generation != descriptor.generation || slot.file.is_none() {
+            return Err(DescriptorError::BadDescriptor);
+        }
+        Ok(slot)
+    }
+
+    fn slot_mut(
+        &mut self,
+        descriptor: FileDescriptor,
+    ) -> Result<&mut DescriptorSlot, DescriptorError> {
+        let slot = self
+            .slots
+            .get_mut(descriptor.slot as usize)
+            .ok_or(DescriptorError::BadDescriptor)?;
+        if slot.generation != descriptor.generation || slot.file.is_none() {
+            return Err(DescriptorError::BadDescriptor);
+        }
+        Ok(slot)
+    }
+
+    fn file(&self, descriptor: FileDescriptor) -> Result<&OpenFile, DescriptorError> {
+        self.slot(descriptor)?
+            .file
+            .as_ref()
+            .ok_or(DescriptorError::BadDescriptor)
+    }
+
+    fn file_mut(&mut self, descriptor: FileDescriptor) -> Result<&mut OpenFile, DescriptorError> {
+        self.slot_mut(descriptor)?
+            .file
+            .as_mut()
+            .ok_or(DescriptorError::BadDescriptor)
+    }
+}
+
+impl<const CAPACITY: usize> Default for DescriptorTable<CAPACITY> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+const fn next_generation(generation: u32) -> u32 {
+    let next = generation.wrapping_add(1);
+    if next == 0 { 1 } else { next }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Name {
     bytes: [u8; NAME_CAPACITY],
     len: u8,
@@ -435,6 +653,62 @@ mod tests {
         assert_eq!(
             FileSystem::write_node(&mut fs, file, u64::MAX, b"x"),
             Err(VfsError::InvalidOffset)
+        );
+    }
+
+    #[test]
+    fn descriptors_track_independent_positions_and_permissions() {
+        let mut fs = MemoryFileSystem::<3, 16>::new();
+        let file = fs.create_file("/data").unwrap();
+        let mut descriptors = DescriptorTable::<3>::new();
+        let writer = descriptors.open(&fs, file, AccessMode::WriteOnly).unwrap();
+        let reader = descriptors.open(&fs, file, AccessMode::ReadOnly).unwrap();
+
+        assert_eq!(descriptors.write(&mut fs, writer, b"phoenix").unwrap(), 7);
+        assert_eq!(descriptors.position(writer), Ok(7));
+        assert_eq!(
+            descriptors.write(&mut fs, reader, b"x"),
+            Err(DescriptorError::PermissionDenied)
+        );
+
+        let mut first = [0_u8; 3];
+        assert_eq!(descriptors.read(&fs, reader, &mut first).unwrap(), 3);
+        assert_eq!(&first, b"pho");
+        assert_eq!(descriptors.position(reader), Ok(3));
+        assert_eq!(descriptors.position(writer), Ok(7));
+    }
+
+    #[test]
+    fn closed_descriptor_cannot_alias_reused_slot() {
+        let mut fs = MemoryFileSystem::<3, 8>::new();
+        let first_node = fs.create_file("/a").unwrap();
+        let second_node = fs.create_file("/b").unwrap();
+        let mut descriptors = DescriptorTable::<1>::new();
+        let stale = descriptors
+            .open(&fs, first_node, AccessMode::ReadOnly)
+            .unwrap();
+        descriptors.close(stale).unwrap();
+        let current = descriptors
+            .open(&fs, second_node, AccessMode::ReadOnly)
+            .unwrap();
+
+        assert_eq!(stale.slot, current.slot);
+        assert_ne!(stale.generation, current.generation);
+        assert_eq!(
+            descriptors.set_position(stale, 1),
+            Err(DescriptorError::BadDescriptor)
+        );
+    }
+
+    #[test]
+    fn descriptor_table_rejects_directories_and_overflow() {
+        let fs = MemoryFileSystem::<1, 8>::new();
+        let root = fs.resolve("/").unwrap();
+        let mut descriptors = DescriptorTable::<0>::new();
+
+        assert_eq!(
+            descriptors.open(&fs, root, AccessMode::ReadOnly),
+            Err(DescriptorError::Vfs(VfsError::IsDirectory))
         );
     }
 }

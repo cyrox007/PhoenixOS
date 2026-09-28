@@ -128,7 +128,10 @@ mod tests {
             open_write_confirmed: true,
             ..PROTECTED
         };
-        assert_eq!(authorize_write(MediaProtectionMode::Open, confirmed), Ok(()));
+        assert_eq!(
+            authorize_write(MediaProtectionMode::Open, confirmed),
+            Ok(())
+        );
 
         let protection_disabled = MediaAccessContext {
             protection_active: false,

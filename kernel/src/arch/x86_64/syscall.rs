@@ -64,9 +64,9 @@ pub const PROCESS_CAPABILITY_CAPACITY: usize = 64;
 pub const ENDPOINT_REGISTRY_CAPACITY: usize = 8;
 pub const ENDPOINT_QUEUE_CAPACITY: usize = 4;
 pub const PROCESS_CAPABILITY_REGISTRY_CAPACITY: usize = 8;
-pub const FILESYSTEM_NODE_CAPACITY: usize = 32;
-pub const FILE_CAPACITY: usize = 4096;
-pub const FILE_DESCRIPTOR_CAPACITY: usize = 32;
+pub const FILESYSTEM_NODE_CAPACITY: usize = 8;
+pub const FILE_CAPACITY: usize = 512;
+pub const FILE_DESCRIPTOR_CAPACITY: usize = 16;
 
 pub type KernelFileSystem = MemoryFileSystem<FILESYSTEM_NODE_CAPACITY, FILE_CAPACITY>;
 pub type KernelDescriptorTable = DescriptorTable<FILE_DESCRIPTOR_CAPACITY>;

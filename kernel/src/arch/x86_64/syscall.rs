@@ -12,7 +12,8 @@ use phoenix_syscall_abi::{
     FILE_SEEK_END, FILE_SEEK_START, IpcReceiveArguments, IpcReceiveMetadata, IpcSendArguments,
     NO_TRANSFERRED_CAPABILITY, PackedCapabilityHandle, PackedFileDescriptor, SYSCALL_FILE_CLOSE,
     SYSCALL_FILE_OPEN, SYSCALL_FILE_READ, SYSCALL_FILE_SEEK, SYSCALL_FILE_WRITE,
-    SYSCALL_IPC_RECEIVE, SYSCALL_IPC_SEND, SYSCALL_PROCESS_EXIT, SyscallRequest, SyscallReturn,
+    SYSCALL_IPC_RECEIVE, SYSCALL_IPC_SEND, SYSCALL_PROCESS_EXIT, SYSCALL_STATUS_BAD_ARGUMENTS,
+    SYSCALL_STATUS_OPERATION_NOT_READY, SYSCALL_STATUS_UNKNOWN_CALL, SyscallRequest, SyscallReturn,
     SyscallStatus,
 };
 use phoenix_vfs::{
@@ -54,9 +55,6 @@ const SELF_TEST_ARGUMENTS: [u64; 6] = [
 const SELF_TEST_RESULT: u64 = 0x5359_5343_414c_4c21;
 pub const USER_SELF_TEST_SUCCESS: u64 = 0x5553_4552_5f4f_4b21;
 const USER_SELF_TEST_FAILURE: u64 = 0x5553_4552_5f42_4144;
-const STATUS_UNKNOWN_CALL: u32 = 1;
-const STATUS_BAD_ARGUMENTS: u32 = 2;
-const STATUS_OPERATION_NOT_READY: u32 = 3;
 const FILE_PATH_CAPACITY: usize = 256;
 const IPC_INLINE_WORD_CAPACITY: u64 = 6;
 const ENTRY_STACK_SIZE: u64 = 64 * 1024;
@@ -1018,11 +1016,11 @@ fn dispatch(request: SyscallRequest) -> SyscallReturn {
         SYSCALL_FILE_SEEK => return dispatch_file_seek(request),
         SYSCALL_FILE_CLOSE => return dispatch_file_close(request),
         SELF_TEST_NUMBER => {}
-        _ => return syscall_failure(STATUS_UNKNOWN_CALL),
+        _ => return syscall_failure(SYSCALL_STATUS_UNKNOWN_CALL),
     }
 
     if request.arguments != SELF_TEST_ARGUMENTS {
-        return syscall_failure(STATUS_BAD_ARGUMENTS);
+        return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS);
     }
 
     SyscallReturn::success(SELF_TEST_RESULT)
@@ -1037,12 +1035,12 @@ fn dispatch_file_open(request: SyscallRequest) -> SyscallReturn {
         || flags & (FILE_OPEN_READ | FILE_OPEN_WRITE) == 0
         || flags & FILE_OPEN_TRUNCATE != 0 && flags & FILE_OPEN_WRITE == 0
     {
-        return syscall_failure(STATUS_BAD_ARGUMENTS);
+        return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS);
     }
 
     if phoenix_vm::UserBuffer::for_array(request.arguments[0], request.arguments[1], 1, 1).is_err()
     {
-        return syscall_failure(STATUS_BAD_ARGUMENTS);
+        return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS);
     }
     let mut path_bytes = [0_u8; FILE_PATH_CAPACITY];
     let path = match with_current_process_address_space(|space| {
@@ -1054,8 +1052,8 @@ fn dispatch_file_open(request: SyscallRequest) -> SyscallReturn {
         )
     }) {
         Some(Ok(path)) => path,
-        Some(Err(_)) => return syscall_failure(STATUS_BAD_ARGUMENTS),
-        None => return syscall_failure(STATUS_OPERATION_NOT_READY),
+        Some(Err(_)) => return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS),
+        None => return syscall_failure(SYSCALL_STATUS_OPERATION_NOT_READY),
     };
 
     let Some(result) = with_current_file_context(
@@ -1078,30 +1076,30 @@ fn dispatch_file_open(request: SyscallRequest) -> SyscallReturn {
             descriptors.open(filesystem, node, access)
         },
     ) else {
-        return syscall_failure(STATUS_OPERATION_NOT_READY);
+        return syscall_failure(SYSCALL_STATUS_OPERATION_NOT_READY);
     };
 
     match result {
         Ok(descriptor) => SyscallReturn::success(
             PackedFileDescriptor::new(descriptor.slot, descriptor.generation).raw(),
         ),
-        Err(_) => syscall_failure(STATUS_BAD_ARGUMENTS),
+        Err(_) => syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS),
     }
 }
 
 fn dispatch_file_io(request: SyscallRequest) -> SyscallReturn {
     if request.arguments[3..].iter().any(|argument| *argument != 0) {
-        return syscall_failure(STATUS_BAD_ARGUMENTS);
+        return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS);
     }
     if phoenix_vm::UserBuffer::for_array(request.arguments[1], request.arguments[2], 1, 1).is_err()
     {
-        return syscall_failure(STATUS_BAD_ARGUMENTS);
+        return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS);
     }
     let Ok(length) = usize::try_from(request.arguments[2]) else {
-        return syscall_failure(STATUS_BAD_ARGUMENTS);
+        return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS);
     };
     if length > FILE_CAPACITY {
-        return syscall_failure(STATUS_BAD_ARGUMENTS);
+        return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS);
     }
     let descriptor = unpack_file_descriptor(request.arguments[0]);
     let mut buffer = [0_u8; FILE_CAPACITY];
@@ -1117,15 +1115,15 @@ fn dispatch_file_io(request: SyscallRequest) -> SyscallReturn {
         });
         let data = match copied {
             Some(Ok(data)) => data,
-            Some(Err(_)) => return syscall_failure(STATUS_BAD_ARGUMENTS),
-            None => return syscall_failure(STATUS_OPERATION_NOT_READY),
+            Some(Err(_)) => return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS),
+            None => return syscall_failure(SYSCALL_STATUS_OPERATION_NOT_READY),
         };
         return match with_current_file_context(|filesystem, descriptors| {
             descriptors.write(filesystem, descriptor, data)
         }) {
             Some(Ok(written)) => SyscallReturn::success(written as u64),
-            Some(Err(_)) => syscall_failure(STATUS_BAD_ARGUMENTS),
-            None => syscall_failure(STATUS_OPERATION_NOT_READY),
+            Some(Err(_)) => syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS),
+            None => syscall_failure(SYSCALL_STATUS_OPERATION_NOT_READY),
         };
     }
 
@@ -1133,15 +1131,15 @@ fn dispatch_file_io(request: SyscallRequest) -> SyscallReturn {
         file_user_memory::validate_user_buffer(space, request.arguments[1], request.arguments[2])
     }) {
         Some(Ok(())) => {}
-        Some(Err(_)) => return syscall_failure(STATUS_BAD_ARGUMENTS),
-        None => return syscall_failure(STATUS_OPERATION_NOT_READY),
+        Some(Err(_)) => return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS),
+        None => return syscall_failure(SYSCALL_STATUS_OPERATION_NOT_READY),
     }
     let read = match with_current_file_context(|filesystem, descriptors| {
         descriptors.read(filesystem, descriptor, &mut buffer[..length])
     }) {
         Some(Ok(read)) => read,
-        Some(Err(_)) => return syscall_failure(STATUS_BAD_ARGUMENTS),
-        None => return syscall_failure(STATUS_OPERATION_NOT_READY),
+        Some(Err(_)) => return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS),
+        None => return syscall_failure(SYSCALL_STATUS_OPERATION_NOT_READY),
     };
     match with_current_process_address_space(|space| {
         file_user_memory::copy_to_user(
@@ -1152,8 +1150,8 @@ fn dispatch_file_io(request: SyscallRequest) -> SyscallReturn {
         )
     }) {
         Some(Ok(())) => SyscallReturn::success(read as u64),
-        Some(Err(_)) => syscall_failure(STATUS_BAD_ARGUMENTS),
-        None => syscall_failure(STATUS_OPERATION_NOT_READY),
+        Some(Err(_)) => syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS),
+        None => syscall_failure(SYSCALL_STATUS_OPERATION_NOT_READY),
     }
 }
 
@@ -1164,7 +1162,7 @@ fn dispatch_file_seek(request: SyscallRequest) -> SyscallReturn {
             FILE_SEEK_START | FILE_SEEK_CURRENT | FILE_SEEK_END
         )
     {
-        return syscall_failure(STATUS_BAD_ARGUMENTS);
+        return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS);
     }
     let descriptor = unpack_file_descriptor(request.arguments[0]);
     let origin = match request.arguments[2] {
@@ -1177,20 +1175,20 @@ fn dispatch_file_seek(request: SyscallRequest) -> SyscallReturn {
         descriptors.seek(filesystem, descriptor, request.arguments[1] as i64, origin)
     }) {
         Some(Ok(position)) => SyscallReturn::success(position),
-        Some(Err(_)) => syscall_failure(STATUS_BAD_ARGUMENTS),
-        None => syscall_failure(STATUS_OPERATION_NOT_READY),
+        Some(Err(_)) => syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS),
+        None => syscall_failure(SYSCALL_STATUS_OPERATION_NOT_READY),
     }
 }
 
 fn dispatch_file_close(request: SyscallRequest) -> SyscallReturn {
     if request.arguments[1..].iter().any(|argument| *argument != 0) {
-        return syscall_failure(STATUS_BAD_ARGUMENTS);
+        return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS);
     }
     let descriptor = unpack_file_descriptor(request.arguments[0]);
     match with_current_file_context(|_, descriptors| descriptors.close(descriptor)) {
         Some(Ok(())) => SyscallReturn::success(0),
-        Some(Err(_)) => syscall_failure(STATUS_BAD_ARGUMENTS),
-        None => syscall_failure(STATUS_OPERATION_NOT_READY),
+        Some(Err(_)) => syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS),
+        None => syscall_failure(SYSCALL_STATUS_OPERATION_NOT_READY),
     }
 }
 
@@ -1262,15 +1260,15 @@ pub fn file_dispatch_self_test() -> bool {
     let invalid_seek = SyscallRequest::new(SYSCALL_FILE_SEEK, [1, 0, 3, 0, 0, 0]);
     let reserved_close = SyscallRequest::new(SYSCALL_FILE_CLOSE, [1, 1, 0, 0, 0, 0]);
 
-    dispatch(valid_open).status.raw() == u64::from(STATUS_OPERATION_NOT_READY)
-        && dispatch(invalid_open).status.raw() == u64::from(STATUS_BAD_ARGUMENTS)
-        && dispatch(invalid_seek).status.raw() == u64::from(STATUS_BAD_ARGUMENTS)
-        && dispatch(reserved_close).status.raw() == u64::from(STATUS_BAD_ARGUMENTS)
+    dispatch(valid_open).status.raw() == u64::from(SYSCALL_STATUS_OPERATION_NOT_READY)
+        && dispatch(invalid_open).status.raw() == u64::from(SYSCALL_STATUS_BAD_ARGUMENTS)
+        && dispatch(invalid_seek).status.raw() == u64::from(SYSCALL_STATUS_BAD_ARGUMENTS)
+        && dispatch(reserved_close).status.raw() == u64::from(SYSCALL_STATUS_BAD_ARGUMENTS)
 }
 
 fn dispatch_process_exit(request: SyscallRequest) -> SyscallReturn {
     if request.arguments[1..].iter().any(|argument| *argument != 0) {
-        return syscall_failure(STATUS_BAD_ARGUMENTS);
+        return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS);
     }
 
     USER_PROCESS_EXIT_STATUS.store(request.arguments[0], Ordering::Release);
@@ -1286,29 +1284,29 @@ fn dispatch_ipc_send(request: SyscallRequest) -> SyscallReturn {
     let reserved = request.arguments[5];
 
     if flags != 0 || reserved != 0 || word_count > IPC_INLINE_WORD_CAPACITY {
-        return syscall_failure(STATUS_BAD_ARGUMENTS);
+        return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS);
     }
 
     if phoenix_vm::UserBuffer::for_array(words_address, word_count, 8, 8).is_err() {
-        return syscall_failure(STATUS_BAD_ARGUMENTS);
+        return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS);
     }
 
     let words = match with_current_process_address_space(|space| {
         ipc_user_memory::copy_send_words(space, arguments)
     }) {
         Some(Ok(words)) => words,
-        Some(Err(_)) => return syscall_failure(STATUS_BAD_ARGUMENTS),
-        None => return syscall_failure(STATUS_OPERATION_NOT_READY),
+        Some(Err(_)) => return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS),
+        None => return syscall_failure(SYSCALL_STATUS_OPERATION_NOT_READY),
     };
     let endpoint_id = match resolve_current_endpoint(arguments.endpoint, Rights::WRITE) {
         Ok(endpoint_id) => endpoint_id,
         Err(EndpointCapabilityError::ContextNotInstalled) => {
-            return syscall_failure(STATUS_OPERATION_NOT_READY);
+            return syscall_failure(SYSCALL_STATUS_OPERATION_NOT_READY);
         }
-        Err(_) => return syscall_failure(STATUS_BAD_ARGUMENTS),
+        Err(_) => return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS),
     };
     let Some(sender) = current_process_id() else {
-        return syscall_failure(STATUS_OPERATION_NOT_READY);
+        return syscall_failure(SYSCALL_STATUS_OPERATION_NOT_READY);
     };
 
     let Some(result) = with_current_endpoint_registry(|registry| {
@@ -1342,7 +1340,7 @@ fn dispatch_ipc_send(request: SyscallRequest) -> SyscallReturn {
 
         transfer
     }) else {
-        return syscall_failure(STATUS_OPERATION_NOT_READY);
+        return syscall_failure(SYSCALL_STATUS_OPERATION_NOT_READY);
     };
 
     endpoint_operation_result(result)
@@ -1357,24 +1355,24 @@ fn dispatch_ipc_receive(request: SyscallRequest) -> SyscallReturn {
     let reserved = request.arguments[5];
 
     if flags != 0 || reserved != 0 {
-        return syscall_failure(STATUS_BAD_ARGUMENTS);
+        return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS);
     }
 
     if phoenix_vm::UserBuffer::for_array(words_address, word_capacity, 8, 8).is_err()
         || phoenix_vm::UserBuffer::for_array(metadata_address, 3, 8, 8).is_err()
     {
-        return syscall_failure(STATUS_BAD_ARGUMENTS);
+        return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS);
     }
 
     let endpoint_id = match resolve_current_endpoint(arguments.endpoint, Rights::READ) {
         Ok(endpoint_id) => endpoint_id,
         Err(EndpointCapabilityError::ContextNotInstalled) => {
-            return syscall_failure(STATUS_OPERATION_NOT_READY);
+            return syscall_failure(SYSCALL_STATUS_OPERATION_NOT_READY);
         }
-        Err(_) => return syscall_failure(STATUS_BAD_ARGUMENTS),
+        Err(_) => return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS),
     };
     let Some(receiver) = current_process_id() else {
-        return syscall_failure(STATUS_OPERATION_NOT_READY);
+        return syscall_failure(SYSCALL_STATUS_OPERATION_NOT_READY);
     };
 
     let Some(result) = with_current_endpoint_registry(|registry| {
@@ -1399,7 +1397,7 @@ fn dispatch_ipc_receive(request: SyscallRequest) -> SyscallReturn {
         debug_assert_eq!(received, message);
         Ok::<_, EndpointOperationError>(message.len())
     }) else {
-        return syscall_failure(STATUS_OPERATION_NOT_READY);
+        return syscall_failure(SYSCALL_STATUS_OPERATION_NOT_READY);
     };
 
     endpoint_operation_result(result)
@@ -1416,7 +1414,7 @@ fn endpoint_operation_result(result: Result<usize, EndpointOperationError>) -> S
         | Err(EndpointOperationError::ProcessRegistry(ProcessCapabilityRegistryError::NotFound))
         | Err(EndpointOperationError::MissingEndpointOwner)
         | Err(EndpointOperationError::ContextNotInstalled) => {
-            syscall_failure(STATUS_OPERATION_NOT_READY)
+            syscall_failure(SYSCALL_STATUS_OPERATION_NOT_READY)
         }
         Err(EndpointOperationError::Registry(_))
         | Err(EndpointOperationError::ProcessRegistry(_))
@@ -1424,7 +1422,9 @@ fn endpoint_operation_result(result: Result<usize, EndpointOperationError>) -> S
         | Err(EndpointOperationError::SameProcessTransfer)
         | Err(EndpointOperationError::WrongEndpointReceiver)
         | Err(EndpointOperationError::Transport(IpcError::TooManyWords))
-        | Err(EndpointOperationError::UserMemory(_)) => syscall_failure(STATUS_BAD_ARGUMENTS),
+        | Err(EndpointOperationError::UserMemory(_)) => {
+            syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS)
+        }
     }
 }
 
@@ -1470,11 +1470,11 @@ pub fn ipc_endpoint_operations_self_test(
 
     send_result.is_success()
         && send_result.value == send.word_count
-        && unmapped_result.status.raw() == u64::from(STATUS_BAD_ARGUMENTS)
-        && denied_result.status.raw() == u64::from(STATUS_BAD_ARGUMENTS)
+        && unmapped_result.status.raw() == u64::from(SYSCALL_STATUS_BAD_ARGUMENTS)
+        && denied_result.status.raw() == u64::from(SYSCALL_STATUS_BAD_ARGUMENTS)
         && receive_result.is_success()
         && receive_result.value == send.word_count
-        && empty_result.status.raw() == u64::from(STATUS_OPERATION_NOT_READY)
+        && empty_result.status.raw() == u64::from(SYSCALL_STATUS_OPERATION_NOT_READY)
         && resolved == Ok(expected_endpoint)
 }
 
@@ -1506,9 +1506,9 @@ pub fn ipc_dispatch_self_test() -> bool {
     });
     let invalid_send_result = dispatch(invalid_send);
 
-    send_result.status.raw() == u64::from(STATUS_OPERATION_NOT_READY)
-        && receive_result.status.raw() == u64::from(STATUS_OPERATION_NOT_READY)
-        && invalid_send_result.status.raw() == u64::from(STATUS_BAD_ARGUMENTS)
+    send_result.status.raw() == u64::from(SYSCALL_STATUS_OPERATION_NOT_READY)
+        && receive_result.status.raw() == u64::from(SYSCALL_STATUS_OPERATION_NOT_READY)
+        && invalid_send_result.status.raw() == u64::from(SYSCALL_STATUS_BAD_ARGUMENTS)
 }
 
 pub fn process_exit_dispatch_self_test() -> bool {
@@ -1522,7 +1522,7 @@ pub fn process_exit_dispatch_self_test() -> bool {
     valid_result.is_success()
         && USER_PROCESS_EXITED.load(Ordering::Acquire)
         && USER_PROCESS_EXIT_STATUS.load(Ordering::Acquire) == status
-        && invalid_result.status.raw() == u64::from(STATUS_BAD_ARGUMENTS)
+        && invalid_result.status.raw() == u64::from(SYSCALL_STATUS_BAD_ARGUMENTS)
 }
 
 fn syscall_failure(code: u32) -> SyscallReturn {

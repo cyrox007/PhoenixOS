@@ -341,14 +341,13 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
 
         let mut state = LongNameState::new();
         match directory {
-            FatDirectory::Root if matches!(self.boot.kind, FatKind::Fat16) => {
-                self.read_fat16_root_directory_with_names(
+            FatDirectory::Root if matches!(self.boot.kind, FatKind::Fat16) => self
+                .read_fat16_root_directory_with_names(
                     sector_buffer,
                     long_name_buffer,
                     &mut state,
                     &mut visitor,
-                )
-            }
+                ),
             FatDirectory::Root => {
                 let start_cluster = self
                     .boot
@@ -976,12 +975,7 @@ mod tests {
         }
     }
 
-    fn write_long_name_slot(
-        slot: &mut [u8],
-        sequence: u8,
-        checksum: u8,
-        name: &[u16],
-    ) {
+    fn write_long_name_slot(slot: &mut [u8], sequence: u8, checksum: u8, name: &[u16]) {
         slot.fill(0xff);
         slot[0] = sequence;
         slot[11] = 0x0f;
@@ -1011,9 +1005,8 @@ mod tests {
         let short_name = *b"PHOENI~1TXT";
         let checksum = short_name_checksum(&short_name);
         let name: [u16; 21] = [
-            0x0050, 0x0068, 0x006f, 0x0065, 0x006e, 0x0069, 0x0078,
-            0x0020, 0x004c, 0x006f, 0x006e, 0x0067, 0x0020, 0x0046,
-            0x0069, 0x006c, 0x0065, 0x002e, 0x0074, 0x0078, 0x0074,
+            0x0050, 0x0068, 0x006f, 0x0065, 0x006e, 0x0069, 0x0078, 0x0020, 0x004c, 0x006f, 0x006e,
+            0x0067, 0x0020, 0x0046, 0x0069, 0x006c, 0x0065, 0x002e, 0x0074, 0x0078, 0x0074,
         ];
 
         let mut first_sector = [0xe5_u8; 512];
@@ -1061,8 +1054,7 @@ mod tests {
         let mut device = phoenix_block::MemoryBlockDevice::<512, 80>::new();
         let short_name = *b"README~1TXT";
         let name = [
-            0x0052_u16, 0x0065, 0x0061, 0x0064, 0x006d, 0x0065, 0x002e,
-            0x0074, 0x0078, 0x0074,
+            0x0052_u16, 0x0065, 0x0061, 0x0064, 0x006d, 0x0065, 0x002e, 0x0074, 0x0078, 0x0074,
         ];
         let mut sector = [0_u8; 512];
         write_long_name_slot(&mut sector[..32], 0x41, 0x55, &name);

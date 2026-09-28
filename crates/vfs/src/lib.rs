@@ -115,24 +115,30 @@ struct OpenFile {
     node: NodeId,
     position: u64,
     access: AccessMode,
+    references: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DescriptorSlot {
     generation: u32,
-    file: Option<OpenFile>,
+    open_file: Option<u32>,
 }
 
 impl DescriptorSlot {
     const EMPTY: Self = Self {
         generation: 1,
-        file: None,
+        open_file: None,
     };
 }
 
-/// Per-process descriptor table over filesystem-independent node identifiers.
+/// Таблица дескрипторов процесса с разделяемыми открытыми описаниями файлов.
+///
+/// Дублированные дескрипторы ссылаются на одно открытое описание и поэтому
+/// совместно изменяют текущую позицию. Независимые вызовы `open` создают
+/// разные описания даже для одного узла.
 pub struct DescriptorTable<const CAPACITY: usize> {
     slots: [DescriptorSlot; CAPACITY],
+    open_files: [Option<OpenFile>; CAPACITY],
     count: usize,
 }
 
@@ -140,6 +146,7 @@ impl<const CAPACITY: usize> DescriptorTable<CAPACITY> {
     pub const fn new() -> Self {
         Self {
             slots: [DescriptorSlot::EMPTY; CAPACITY],
+            open_files: [None; CAPACITY],
             count: 0,
         }
     }
@@ -161,31 +168,53 @@ impl<const CAPACITY: usize> DescriptorTable<CAPACITY> {
         if filesystem.metadata(node)?.kind != NodeKind::File {
             return Err(DescriptorError::Vfs(VfsError::IsDirectory));
         }
-        let Some((index, slot)) = self
-            .slots
-            .iter_mut()
-            .enumerate()
-            .find(|(_, slot)| slot.file.is_none())
-        else {
-            return Err(DescriptorError::TableFull);
-        };
-        slot.file = Some(OpenFile {
+
+        let descriptor_index = self.free_descriptor_slot()?;
+        let open_file_index = self.free_open_file_slot()?;
+        self.open_files[open_file_index] = Some(OpenFile {
             node,
             position: 0,
             access,
+            references: 1,
         });
-        self.count += 1;
-        Ok(FileDescriptor {
-            slot: index as u32,
-            generation: slot.generation,
-        })
+        self.install_descriptor(descriptor_index, open_file_index);
+        Ok(self.descriptor(descriptor_index))
+    }
+
+    pub fn duplicate(
+        &mut self,
+        descriptor: FileDescriptor,
+    ) -> Result<FileDescriptor, DescriptorError> {
+        let open_file_index = self.open_file_index(descriptor)?;
+        let descriptor_index = self.free_descriptor_slot()?;
+        let file = self.open_files[open_file_index]
+            .as_mut()
+            .ok_or(DescriptorError::BadDescriptor)?;
+        file.references = file
+            .references
+            .checked_add(1)
+            .ok_or(DescriptorError::TableFull)?;
+        self.install_descriptor(descriptor_index, open_file_index);
+        Ok(self.descriptor(descriptor_index))
     }
 
     pub fn close(&mut self, descriptor: FileDescriptor) -> Result<(), DescriptorError> {
-        let slot = self.slot_mut(descriptor)?;
-        slot.file = None;
+        let open_file_index = self.open_file_index(descriptor)?;
+        let slot = self
+            .slots
+            .get_mut(descriptor.slot as usize)
+            .ok_or(DescriptorError::BadDescriptor)?;
+        slot.open_file = None;
         slot.generation = next_generation(slot.generation);
         self.count -= 1;
+
+        let file = self.open_files[open_file_index]
+            .as_mut()
+            .ok_or(DescriptorError::BadDescriptor)?;
+        file.references -= 1;
+        if file.references == 0 {
+            self.open_files[open_file_index] = None;
+        }
         Ok(())
     }
 
@@ -238,41 +267,55 @@ impl<const CAPACITY: usize> DescriptorTable<CAPACITY> {
         Ok(written)
     }
 
-    fn slot(&self, descriptor: FileDescriptor) -> Result<&DescriptorSlot, DescriptorError> {
+    fn free_descriptor_slot(&self) -> Result<usize, DescriptorError> {
+        self.slots
+            .iter()
+            .position(|slot| slot.open_file.is_none())
+            .ok_or(DescriptorError::TableFull)
+    }
+
+    fn free_open_file_slot(&self) -> Result<usize, DescriptorError> {
+        self.open_files
+            .iter()
+            .position(Option::is_none)
+            .ok_or(DescriptorError::TableFull)
+    }
+
+    fn install_descriptor(&mut self, descriptor_index: usize, open_file_index: usize) {
+        self.slots[descriptor_index].open_file = Some(open_file_index as u32);
+        self.count += 1;
+    }
+
+    fn descriptor(&self, index: usize) -> FileDescriptor {
+        FileDescriptor {
+            slot: index as u32,
+            generation: self.slots[index].generation,
+        }
+    }
+
+    fn open_file_index(&self, descriptor: FileDescriptor) -> Result<usize, DescriptorError> {
         let slot = self
             .slots
             .get(descriptor.slot as usize)
             .ok_or(DescriptorError::BadDescriptor)?;
-        if slot.generation != descriptor.generation || slot.file.is_none() {
+        if slot.generation != descriptor.generation {
             return Err(DescriptorError::BadDescriptor);
         }
-        Ok(slot)
-    }
-
-    fn slot_mut(
-        &mut self,
-        descriptor: FileDescriptor,
-    ) -> Result<&mut DescriptorSlot, DescriptorError> {
-        let slot = self
-            .slots
-            .get_mut(descriptor.slot as usize)
-            .ok_or(DescriptorError::BadDescriptor)?;
-        if slot.generation != descriptor.generation || slot.file.is_none() {
-            return Err(DescriptorError::BadDescriptor);
-        }
-        Ok(slot)
+        slot.open_file
+            .map(|index| index as usize)
+            .ok_or(DescriptorError::BadDescriptor)
     }
 
     fn file(&self, descriptor: FileDescriptor) -> Result<&OpenFile, DescriptorError> {
-        self.slot(descriptor)?
-            .file
+        let index = self.open_file_index(descriptor)?;
+        self.open_files[index]
             .as_ref()
             .ok_or(DescriptorError::BadDescriptor)
     }
 
     fn file_mut(&mut self, descriptor: FileDescriptor) -> Result<&mut OpenFile, DescriptorError> {
-        self.slot_mut(descriptor)?
-            .file
+        let index = self.open_file_index(descriptor)?;
+        self.open_files[index]
             .as_mut()
             .ok_or(DescriptorError::BadDescriptor)
     }
@@ -676,6 +719,28 @@ mod tests {
         assert_eq!(&first, b"pho");
         assert_eq!(descriptors.position(reader), Ok(3));
         assert_eq!(descriptors.position(writer), Ok(7));
+    }
+
+    #[test]
+    fn duplicated_descriptors_share_position_until_last_close() {
+        let mut fs = MemoryFileSystem::<2, 16>::new();
+        let file = fs.create_file("/shared").unwrap();
+        fs.write("/shared", b"phoenix").unwrap();
+        let mut descriptors = DescriptorTable::<3>::new();
+        let first = descriptors.open(&fs, file, AccessMode::ReadOnly).unwrap();
+        let duplicate = descriptors.duplicate(first).unwrap();
+
+        let mut prefix = [0_u8; 3];
+        assert_eq!(descriptors.read(&fs, first, &mut prefix).unwrap(), 3);
+        assert_eq!(&prefix, b"pho");
+        assert_eq!(descriptors.position(duplicate), Ok(3));
+
+        descriptors.close(first).unwrap();
+        let mut suffix = [0_u8; 4];
+        assert_eq!(descriptors.read(&fs, duplicate, &mut suffix).unwrap(), 4);
+        assert_eq!(&suffix, b"enix");
+        descriptors.close(duplicate).unwrap();
+        assert!(descriptors.is_empty());
     }
 
     #[test]

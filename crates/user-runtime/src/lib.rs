@@ -180,9 +180,7 @@ pub extern "C" fn phoenix_file_seek(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn phoenix_file_close(
-    descriptor: PackedFileDescriptor,
-) -> RuntimeCallResult {
+pub extern "C" fn phoenix_file_close(descriptor: PackedFileDescriptor) -> RuntimeCallResult {
     invoke_raw(SyscallRequest::file_close(descriptor))
 }
 
@@ -340,16 +338,20 @@ mod tests {
     fn c_result_has_stable_layout() {
         assert_eq!(core::mem::size_of::<RuntimeCallResult>(), 16);
         assert_eq!(core::mem::align_of::<RuntimeCallResult>(), 8);
-        assert!(RuntimeCallResult {
-            value: 7,
-            status: 0,
-        }
-        .is_success());
-        assert!(!RuntimeCallResult {
-            value: 0,
-            status: 2,
-        }
-        .is_success());
+        assert!(
+            RuntimeCallResult {
+                value: 7,
+                status: 0,
+            }
+            .is_success()
+        );
+        assert!(
+            !RuntimeCallResult {
+                value: 0,
+                status: 2,
+            }
+            .is_success()
+        );
     }
 
     #[test]

@@ -898,22 +898,25 @@ pub fn user_return_selectors_valid(state: SyscallMsrState) -> bool {
     let user_data = super::gdt::user_data_selector_raw();
     let selector_base = (state.star >> 48) as u16;
 
-    if user_code & 0b11 != 0b11 || user_data & 0b11 != 0b11 {
+    if selector_base & 0b11 != 0b11 || user_code & 0b11 != 0b11 || user_data & 0b11 != 0b11 {
         return false;
     }
 
-    let expected_data = selector_base.wrapping_add(8) | 0b11;
-    let expected_code = selector_base.wrapping_add(16) | 0b11;
+    let expected_data = selector_base.wrapping_add(8);
+    let expected_code = selector_base.wrapping_add(16);
 
     user_data == expected_data && user_code == expected_code
 }
 
 fn user_return_selector_base() -> Option<u16> {
-    let user_code = super::gdt::user_code_selector_raw() & !0b11;
-    let user_data = super::gdt::user_data_selector_raw() & !0b11;
-    let base = user_code.checked_sub(16)?;
+    let user_code = super::gdt::user_code_selector_raw();
+    let user_data = super::gdt::user_data_selector_raw();
+    if user_code & 0b11 != 0b11 || user_data & 0b11 != 0b11 {
+        return None;
+    }
 
-    if base.checked_add(8)? != user_data {
+    let base = user_code.checked_sub(16)?;
+    if base & 0b11 != 0b11 || base.checked_add(8)? != user_data {
         return None;
     }
 

@@ -936,7 +936,6 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
     {
         self.validate_sector_buffer(sector_buffer)?;
 
-
         match directory {
             FatDirectory::Root => self.read_cluster_directory(
                 self.boot.root_cluster,
@@ -1172,7 +1171,6 @@ const fn valid_bytes_per_sector(value: u16) -> bool {
 const fn valid_sectors_per_cluster(value: u8) -> bool {
     value != 0 && value <= 128 && value.is_power_of_two()
 }
-
 
 fn encode_fat32_entry(value: FatEntry) -> Result<u32, FatMutationError> {
     match value {
@@ -1511,7 +1509,6 @@ mod tests {
         assert_eq!(located.location.offset, 0);
     }
 
-
     #[test]
     fn reads_long_name_across_root_directory_sector_boundary() {
         let mut device = phoenix_block::MemoryBlockDevice::<512, 8>::new();
@@ -1566,7 +1563,6 @@ mod tests {
         assert_eq!(actual_length, name.len());
         assert_eq!(actual_name, name);
     }
-
 
     #[test]
     fn invalid_long_name_checksum_falls_back_to_short_name() {
@@ -2084,7 +2080,6 @@ mod tests {
         assert_eq!(output, source);
     }
 
-
     #[test]
     fn writes_fat32_entry_to_all_tables_and_preserves_reserved_bits() {
         let boot = FatBootSector {
@@ -2556,7 +2551,6 @@ mod tests {
             Err(FatReadError::BufferSize)
         );
     }
-
 
     #[test]
     fn rejects_fat16_geometry_as_unsupported() {

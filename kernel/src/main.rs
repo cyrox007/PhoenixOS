@@ -888,19 +888,14 @@ fn hardware_scheduler_preemption_self_test() {
 
 fn init_apic_timer(
     out: &mut serial::Com1,
-    page_table: &mut ActivePageTable,
-    frames: &mut SystemFrameAllocator<SYSTEM_MEMORY_RANGE_CAPACITY>,
+    _page_table: &mut ActivePageTable,
+    _frames: &mut SystemFrameAllocator<SYSTEM_MEMORY_RANGE_CAPACITY>,
 ) {
-    let mode = match arch::x86_64::apic::init_periodic_timer(page_table, frames) {
-        Ok(mode) => mode,
-        Err(error) => panic!("не удалось инициализировать локальный APIC: {error:?}"),
-    };
+    if let Err(error) = arch::x86_64::apic::init_periodic_timer() {
+        panic!("x2APIC обязателен для поддерживаемого аппаратного профиля: {error:?}");
+    }
 
-    serial::line(
-        out,
-        "INFO",
-        format_args!("local APIC: mode={}", mode.name()),
-    );
+    serial::line(out, "INFO", format_args!("local APIC: mode=x2APIC"));
 
     let mut preemption_stack = alloc::vec![0u8; PREEMPTION_TEST_STACK_SIZE].into_boxed_slice();
     let preemption_frame = arch::x86_64::exceptions::prepare_kernel_timer_frame(

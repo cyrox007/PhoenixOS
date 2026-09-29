@@ -898,10 +898,7 @@ pub fn user_return_selectors_valid(state: SyscallMsrState) -> bool {
     let user_data = super::gdt::user_data_selector_raw();
     let selector_base = (state.star >> 48) as u16;
 
-    if selector_base & 0b11 != 0b11
-        || user_code & 0b11 != 0b11
-        || user_data & 0b11 != 0b11
-    {
+    if selector_base & 0b11 != 0b11 || user_code & 0b11 != 0b11 || user_data & 0b11 != 0b11 {
         return false;
     }
 

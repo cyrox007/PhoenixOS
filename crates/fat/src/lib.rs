@@ -320,7 +320,6 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
         Ok(Self { device, boot })
     }
 
-
     pub fn read_entry(
         &mut self,
         cluster: u32,
@@ -463,8 +462,7 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
         self.device
             .read_blocks(located.location.sector, sector_buffer)?;
         let raw_entry = &sector_buffer[offset..end];
-        let ParsedDirectorySlot::Entry(current) = parse_directory_slot(raw_entry)
-        else {
+        let ParsedDirectorySlot::Entry(current) = parse_directory_slot(raw_entry) else {
             return Err(FatMutationError::DirectoryEntryChanged);
         };
         if current != located.entry {
@@ -877,14 +875,12 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
         self.validate_sector_buffer(sector_buffer)?;
 
         match directory {
-            FatDirectory::Root => {
-                self.find_cluster_directory_entry(
-                    self.boot.root_cluster,
-                    short_name,
-                    chain,
-                    sector_buffer,
-                )
-            }
+            FatDirectory::Root => self.find_cluster_directory_entry(
+                self.boot.root_cluster,
+                short_name,
+                chain,
+                sector_buffer,
+            ),
             FatDirectory::Cluster(start_cluster) => {
                 self.find_cluster_directory_entry(start_cluster, short_name, chain, sector_buffer)
             }
@@ -909,16 +905,14 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
 
         let mut state = LongNameState::new();
         match directory {
-            FatDirectory::Root => {
-                self.read_cluster_directory_with_names(
-                    self.boot.root_cluster,
-                    chain,
-                    sector_buffer,
-                    long_name_buffer,
-                    &mut state,
-                    &mut visitor,
-                )
-            }
+            FatDirectory::Root => self.read_cluster_directory_with_names(
+                self.boot.root_cluster,
+                chain,
+                sector_buffer,
+                long_name_buffer,
+                &mut state,
+                &mut visitor,
+            ),
             FatDirectory::Cluster(start_cluster) => self.read_cluster_directory_with_names(
                 start_cluster,
                 chain,
@@ -944,20 +938,17 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
 
 
         match directory {
-            FatDirectory::Root => {
-                self.read_cluster_directory(
-                    self.boot.root_cluster,
-                    chain,
-                    sector_buffer,
-                    &mut visitor,
-                )
-            }
+            FatDirectory::Root => self.read_cluster_directory(
+                self.boot.root_cluster,
+                chain,
+                sector_buffer,
+                &mut visitor,
+            ),
             FatDirectory::Cluster(start_cluster) => {
                 self.read_cluster_directory(start_cluster, chain, sector_buffer, &mut visitor)
             }
         }
     }
-
 
     fn find_cluster_directory_entry(
         &mut self,
@@ -977,11 +968,7 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
                     .ok_or(FatReadError::ArithmeticOverflow)?;
                 self.device.read_blocks(sector, sector_buffer)?;
 
-                match find_directory_entry_in_sector(
-                    sector,
-                    sector_buffer,
-                    short_name,
-                ) {
+                match find_directory_entry_in_sector(sector, sector_buffer, short_name) {
                     DirectorySearchResult::Found(entry) => return Ok(Some(entry)),
                     DirectorySearchResult::End => return Ok(None),
                     DirectorySearchResult::Continue => {}
@@ -991,7 +978,6 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
 
         Ok(None)
     }
-
 
     fn read_cluster_directory_with_names<F>(
         &mut self,
@@ -1028,7 +1014,6 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
 
         Ok(())
     }
-
 
     fn read_cluster_directory<F>(
         &mut self,
@@ -1187,7 +1172,6 @@ const fn valid_bytes_per_sector(value: u16) -> bool {
 const fn valid_sectors_per_cluster(value: u8) -> bool {
     value != 0 && value <= 128 && value.is_power_of_two()
 }
-
 
 
 fn encode_fat32_entry(value: FatEntry) -> Result<u32, FatMutationError> {
@@ -1425,7 +1409,6 @@ mod tests {
         sector
     }
 
-
     fn fat32_boot() -> FatBootSector {
         FatBootSector {
             kind: FatKind::Fat32,
@@ -1480,7 +1463,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn finds_fat32_root_directory_entry_with_location() {
         let boot = FatBootSector {
@@ -1528,7 +1510,6 @@ mod tests {
         assert_eq!(located.location.sector, 2);
         assert_eq!(located.location.offset, 0);
     }
-
 
 
     #[test]
@@ -1585,7 +1566,6 @@ mod tests {
         assert_eq!(actual_length, name.len());
         assert_eq!(actual_name, name);
     }
-
 
 
     #[test]
@@ -2105,7 +2085,6 @@ mod tests {
     }
 
 
-
     #[test]
     fn writes_fat32_entry_to_all_tables_and_preserves_reserved_bits() {
         let boot = FatBootSector {
@@ -2451,7 +2430,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn reads_fat32_root_directory_through_cluster_chain() {
         let boot = FatBootSector {
@@ -2549,7 +2527,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn reads_fat32_data_cluster_and_masks_high_bits() {
         let mut device = phoenix_block::MemoryBlockDevice::<512, 4>::new();
@@ -2579,7 +2556,6 @@ mod tests {
             Err(FatReadError::BufferSize)
         );
     }
-
 
 
     #[test]

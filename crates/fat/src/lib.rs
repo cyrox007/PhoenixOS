@@ -2584,7 +2584,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_signature_and_invalid_geometry() {
+    fn rejects_missing_signature_and_non_fat32_geometry() {
         let mut sector = base_sector();
         sector[510] = 0;
         assert_eq!(
@@ -2598,7 +2598,7 @@ mod tests {
         sector[22..24].copy_from_slice(&20_u16.to_le_bytes());
         assert_eq!(
             FatBootSector::parse(&sector),
-            Err(FatError::InvalidGeometry)
+            Err(FatError::UnsupportedFatVariant)
         );
     }
 

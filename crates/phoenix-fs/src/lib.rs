@@ -29,6 +29,10 @@ pub enum PhoenixFsError {
     ChecksumMismatch,
     ArithmeticOverflow,
     ConflictingGeneration(u64),
+    GenerationSequence,
+    VolumeIdentityChanged,
+    VolumeGeometryChanged,
+    FeatureSetChanged,
     NoValidSuperblock,
     Device(BlockError),
 }
@@ -37,6 +41,34 @@ impl From<BlockError> for PhoenixFsError {
     fn from(error: BlockError) -> Self {
         Self::Device(error)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SuperblockSlot {
+    First,
+    Second,
+}
+
+impl SuperblockSlot {
+    pub const fn filesystem_block(self) -> u64 {
+        match self {
+            Self::First => 0,
+            Self::Second => 1,
+        }
+    }
+
+    pub const fn other(self) -> Self {
+        match self {
+            Self::First => Self::Second,
+            Self::Second => Self::First,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActiveSuperblock {
+    pub superblock: Superblock,
+    pub slot: SuperblockSlot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,19 +207,75 @@ pub fn read_active_superblock<D: BlockDevice>(
     device: &mut D,
     first_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
     second_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
-) -> Result<Superblock, PhoenixFsError> {
+) -> Result<ActiveSuperblock, PhoenixFsError> {
     let total_blocks = filesystem_block_count(device)?;
     let first = read_superblock_copy(device, 0, total_blocks, first_buffer);
     let second = read_superblock_copy(device, 1, total_blocks, second_buffer);
 
     match (first, second) {
-        (Ok(left), Ok(right)) if left.generation > right.generation => Ok(left),
-        (Ok(left), Ok(right)) if right.generation > left.generation => Ok(right),
-        (Ok(left), Ok(right)) if left == right => Ok(left),
+        (Ok(left), Ok(right)) if left.generation > right.generation => Ok(ActiveSuperblock {
+            superblock: left,
+            slot: SuperblockSlot::First,
+        }),
+        (Ok(left), Ok(right)) if right.generation > left.generation => Ok(ActiveSuperblock {
+            superblock: right,
+            slot: SuperblockSlot::Second,
+        }),
+        (Ok(left), Ok(right)) if left == right => Ok(ActiveSuperblock {
+            superblock: left,
+            slot: SuperblockSlot::First,
+        }),
         (Ok(left), Ok(_)) => Err(PhoenixFsError::ConflictingGeneration(left.generation)),
-        (Ok(valid), Err(_)) | (Err(_), Ok(valid)) => Ok(valid),
+        (Ok(valid), Err(_)) => Ok(ActiveSuperblock {
+            superblock: valid,
+            slot: SuperblockSlot::First,
+        }),
+        (Err(_), Ok(valid)) => Ok(ActiveSuperblock {
+            superblock: valid,
+            slot: SuperblockSlot::Second,
+        }),
         (Err(_), Err(_)) => Err(PhoenixFsError::NoValidSuperblock),
     }
+}
+
+pub fn commit_next_superblock<D: BlockDevice>(
+    device: &mut D,
+    current: ActiveSuperblock,
+    next: Superblock,
+    buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<ActiveSuperblock, PhoenixFsError> {
+    let expected_generation = current
+        .superblock
+        .generation
+        .checked_add(1)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    if next.generation != expected_generation {
+        return Err(PhoenixFsError::GenerationSequence);
+    }
+    if next.volume_id != current.superblock.volume_id {
+        return Err(PhoenixFsError::VolumeIdentityChanged);
+    }
+    if next.total_blocks != current.superblock.total_blocks {
+        return Err(PhoenixFsError::VolumeGeometryChanged);
+    }
+    if next.incompatible_features != current.superblock.incompatible_features {
+        return Err(PhoenixFsError::FeatureSetChanged);
+    }
+
+    let total_blocks = filesystem_block_count(device)?;
+    if next.total_blocks != total_blocks {
+        return Err(PhoenixFsError::InvalidVolumeGeometry);
+    }
+
+    next.encode(buffer)?;
+    let slot = current.slot.other();
+    write_filesystem_block(device, slot.filesystem_block(), buffer)?;
+    device.flush()?;
+
+    Ok(ActiveSuperblock {
+        superblock: next,
+        slot,
+    })
 }
 
 fn read_superblock_copy<D: BlockDevice>(
@@ -222,6 +310,27 @@ fn read_filesystem_block<D: BlockDevice>(
         .ok_or(PhoenixFsError::ArithmeticOverflow)?;
 
     device.read_blocks(first_device_block, destination)?;
+    Ok(())
+}
+
+fn write_filesystem_block<D: BlockDevice>(
+    device: &mut D,
+    filesystem_block: u64,
+    source: &[u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<(), PhoenixFsError> {
+    let geometry = device.geometry();
+    if geometry.block_size == 0 || !FILESYSTEM_BLOCK_SIZE.is_multiple_of(geometry.block_size) {
+        return Err(PhoenixFsError::UnsupportedDeviceBlockSize);
+    }
+
+    let device_blocks = FILESYSTEM_BLOCK_SIZE / geometry.block_size;
+    let device_blocks =
+        u64::try_from(device_blocks).map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
+    let first_device_block = filesystem_block
+        .checked_mul(device_blocks)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+
+    device.write_blocks(first_device_block, source)?;
     Ok(())
 }
 
@@ -320,7 +429,10 @@ mod tests {
         let mut second_read = [0_u8; FILESYSTEM_BLOCK_SIZE];
         assert_eq!(
             read_active_superblock(&mut device, &mut first_read, &mut second_read),
-            Ok(newer)
+            Ok(ActiveSuperblock {
+                superblock: newer,
+                slot: SuperblockSlot::Second,
+            })
         );
     }
 
@@ -342,7 +454,10 @@ mod tests {
         let mut second_read = [0_u8; FILESYSTEM_BLOCK_SIZE];
         assert_eq!(
             read_active_superblock(&mut device, &mut first_read, &mut second_read),
-            Ok(older)
+            Ok(ActiveSuperblock {
+                superblock: older,
+                slot: SuperblockSlot::First,
+            })
         );
     }
 
@@ -367,6 +482,57 @@ mod tests {
             read_active_superblock(&mut device, &mut first_read, &mut second_read),
             Err(PhoenixFsError::ConflictingGeneration(3))
         );
+    }
+
+    #[test]
+    fn commits_next_generation_to_inactive_copy_and_flushes() {
+        let mut device = MemoryBlockDevice::<512, 64>::new();
+        let current_superblock = Superblock::new(11, 8, VOLUME_ID).unwrap();
+        let next_superblock = Superblock::new(12, 8, VOLUME_ID).unwrap();
+        let mut encoded = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        current_superblock.encode(&mut encoded).unwrap();
+        device.write_blocks(0, &encoded).unwrap();
+        device.flush().unwrap();
+
+        let current = ActiveSuperblock {
+            superblock: current_superblock,
+            slot: SuperblockSlot::First,
+        };
+        let committed =
+            commit_next_superblock(&mut device, current, next_superblock, &mut encoded).unwrap();
+
+        assert_eq!(
+            committed,
+            ActiveSuperblock {
+                superblock: next_superblock,
+                slot: SuperblockSlot::Second,
+            }
+        );
+        assert!(!device.is_dirty());
+
+        let mut first_read = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut second_read = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        assert_eq!(
+            read_active_superblock(&mut device, &mut first_read, &mut second_read),
+            Ok(committed)
+        );
+    }
+
+    #[test]
+    fn rejects_skipped_generation_before_writing() {
+        let mut device = MemoryBlockDevice::<512, 64>::new();
+        let current = ActiveSuperblock {
+            superblock: Superblock::new(2, 8, VOLUME_ID).unwrap(),
+            slot: SuperblockSlot::First,
+        };
+        let skipped = Superblock::new(4, 8, VOLUME_ID).unwrap();
+        let mut buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+
+        assert_eq!(
+            commit_next_superblock(&mut device, current, skipped, &mut buffer),
+            Err(PhoenixFsError::GenerationSequence)
+        );
+        assert!(!device.is_dirty());
     }
 
     #[test]

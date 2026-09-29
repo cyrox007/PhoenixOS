@@ -17,8 +17,9 @@ use phoenix_syscall_abi::{
     SyscallStatus,
 };
 use phoenix_vfs::{
-    AccessMode, DescriptorError, DescriptorTable, FileDescriptor, FileSystem, MemoryFileSystem,
-    SeekOrigin, VfsError, resolve_path,
+    AccessMode, DescriptorError, DescriptorTable, FileDescriptor, FileSystemId, FileSystemRegistry,
+    MemoryFileSystem, MountTable, NodeKind, SeekOrigin, VfsError, VfsNode, create_mounted_node,
+    resolve_mounted_path,
 };
 
 use crate::file_user_memory;
@@ -65,8 +66,14 @@ pub const PROCESS_CAPABILITY_REGISTRY_CAPACITY: usize = 8;
 pub const FILESYSTEM_NODE_CAPACITY: usize = 8;
 pub const FILE_CAPACITY: usize = 512;
 pub const FILE_DESCRIPTOR_CAPACITY: usize = 16;
+pub const FILESYSTEM_REGISTRY_CAPACITY: usize = 4;
+pub const FILESYSTEM_MOUNT_CAPACITY: usize = 4;
+pub const ROOT_FILESYSTEM_ID: FileSystemId = FileSystemId(1);
 
 pub type KernelFileSystem = MemoryFileSystem<FILESYSTEM_NODE_CAPACITY, FILE_CAPACITY>;
+pub type KernelFileSystemRegistry<'a> =
+    FileSystemRegistry<'a, FILESYSTEM_REGISTRY_CAPACITY>;
+pub type KernelMountTable = MountTable<FILESYSTEM_MOUNT_CAPACITY>;
 pub type KernelDescriptorTable = DescriptorTable<FILE_DESCRIPTOR_CAPACITY>;
 
 pub type KernelEndpointRegistry =
@@ -159,11 +166,13 @@ static CURRENT_PROCESS_ADDRESS_SPACE: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_PROCESS_CAPABILITIES: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_ENDPOINT_REGISTRY: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_PROCESS_CAPABILITY_REGISTRY: AtomicUsize = AtomicUsize::new(0);
-static CURRENT_FILESYSTEM: AtomicUsize = AtomicUsize::new(0);
+static CURRENT_FILESYSTEM_REGISTRY: AtomicUsize = AtomicUsize::new(0);
+static CURRENT_MOUNT_TABLE: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_FILE_DESCRIPTORS: AtomicUsize = AtomicUsize::new(0);
 
 pub struct CurrentFileContextGuard {
-    filesystem: usize,
+    filesystems: usize,
+    mounts: usize,
     descriptors: usize,
 }
 
@@ -175,8 +184,14 @@ impl Drop for CurrentFileContextGuard {
             Ordering::AcqRel,
             Ordering::Acquire,
         );
-        let _ = CURRENT_FILESYSTEM.compare_exchange(
-            self.filesystem,
+        let _ = CURRENT_MOUNT_TABLE.compare_exchange(
+            self.mounts,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        let _ = CURRENT_FILESYSTEM_REGISTRY.compare_exchange(
+            self.filesystems,
             0,
             Ordering::AcqRel,
             Ordering::Acquire,
@@ -342,49 +357,71 @@ pub unsafe fn install_current_process_context(
         })
 }
 
-/// Installs the filesystem and descriptor table used by the current process.
+/// Устанавливает многотомный файловый контекст текущего процесса.
 ///
 /// # Safety
 ///
-/// Both objects must remain alive and exclusively owned until the guard is dropped.
-/// The early implementation is single-CPU; callers must keep interrupts disabled
-/// while user code can enter the dispatcher.
-pub unsafe fn install_current_file_context(
-    filesystem: &mut KernelFileSystem,
+/// Реестр файловых систем, таблица монтирования, таблица дескрипторов и все файловые
+/// системы, на которые ссылается реестр, должны оставаться живыми и не использоваться
+/// вне диспетчера до снятия guard. Ранняя реализация однопроцессорная; пока пользовательский
+/// код может войти в диспетчер, прерывания должны оставаться отключёнными.
+pub unsafe fn install_current_file_context<'a>(
+    filesystems: &mut KernelFileSystemRegistry<'a>,
+    mounts: &mut KernelMountTable,
     descriptors: &mut KernelDescriptorTable,
 ) -> Option<CurrentFileContextGuard> {
-    let filesystem = filesystem as *mut KernelFileSystem as usize;
+    let filesystems = filesystems as *mut KernelFileSystemRegistry<'a> as usize;
+    let mounts = mounts as *mut KernelMountTable as usize;
     let descriptors = descriptors as *mut KernelDescriptorTable as usize;
-    if CURRENT_FILESYSTEM
-        .compare_exchange(0, filesystem, Ordering::AcqRel, Ordering::Acquire)
+
+    if CURRENT_FILESYSTEM_REGISTRY
+        .compare_exchange(0, filesystems, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
         return None;
     }
+    if CURRENT_MOUNT_TABLE
+        .compare_exchange(0, mounts, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        CURRENT_FILESYSTEM_REGISTRY.store(0, Ordering::Release);
+        return None;
+    }
+
     CURRENT_FILE_DESCRIPTORS
         .compare_exchange(0, descriptors, Ordering::AcqRel, Ordering::Acquire)
         .ok()
         .map(|_| CurrentFileContextGuard {
-            filesystem,
+            filesystems,
+            mounts,
             descriptors,
         })
         .or_else(|| {
-            CURRENT_FILESYSTEM.store(0, Ordering::Release);
+            CURRENT_MOUNT_TABLE.store(0, Ordering::Release);
+            CURRENT_FILESYSTEM_REGISTRY.store(0, Ordering::Release);
             None
         })
 }
 
 fn with_current_file_context<T>(
-    operation: impl FnOnce(&mut KernelFileSystem, &mut KernelDescriptorTable) -> T,
+    operation: impl FnOnce(
+        &mut KernelFileSystemRegistry<'static>,
+        &mut KernelMountTable,
+        &mut KernelDescriptorTable,
+    ) -> T,
 ) -> Option<T> {
-    let filesystem = CURRENT_FILESYSTEM.load(Ordering::Acquire);
+    let filesystems = CURRENT_FILESYSTEM_REGISTRY.load(Ordering::Acquire);
+    let mounts = CURRENT_MOUNT_TABLE.load(Ordering::Acquire);
     let descriptors = CURRENT_FILE_DESCRIPTORS.load(Ordering::Acquire);
-    if filesystem == 0 || descriptors == 0 {
+    if filesystems == 0 || mounts == 0 || descriptors == 0 {
         return None;
     }
-    let filesystem = unsafe { &mut *(filesystem as *mut KernelFileSystem) };
+
+    let filesystems =
+        unsafe { &mut *(filesystems as *mut KernelFileSystemRegistry<'static>) };
+    let mounts = unsafe { &mut *(mounts as *mut KernelMountTable) };
     let descriptors = unsafe { &mut *(descriptors as *mut KernelDescriptorTable) };
-    Some(operation(filesystem, descriptors))
+    Some(operation(filesystems, mounts, descriptors))
 }
 
 fn with_current_process_address_space<T>(
@@ -1057,23 +1094,23 @@ fn dispatch_file_open(request: SyscallRequest) -> SyscallReturn {
     };
 
     let Some(result) = with_current_file_context(
-        |filesystem, descriptors| -> Result<FileDescriptor, DescriptorError> {
-            let node = match resolve_path(filesystem, path) {
+        |filesystems, mounts, descriptors| -> Result<FileDescriptor, DescriptorError> {
+            let node = match resolve_mounted_path(filesystems, mounts, path) {
                 Ok(node) => node,
                 Err(VfsError::NotFound) if flags & FILE_OPEN_CREATE != 0 => {
-                    filesystem.create_file(path)?
+                    create_mounted_node(filesystems, mounts, path, NodeKind::File)?
                 }
                 Err(error) => return Err(error.into()),
             };
             if flags & FILE_OPEN_TRUNCATE != 0 {
-                filesystem.truncate_node(node, 0)?;
+                filesystems.truncate_node(node, 0)?;
             }
             let access = match flags & (FILE_OPEN_READ | FILE_OPEN_WRITE) {
                 FILE_OPEN_READ => AccessMode::ReadOnly,
                 FILE_OPEN_WRITE => AccessMode::WriteOnly,
                 _ => AccessMode::ReadWrite,
             };
-            descriptors.open(filesystem, node, access)
+            descriptors.open_vfs(filesystems, node, access)
         },
     ) else {
         return syscall_failure(SYSCALL_STATUS_OPERATION_NOT_READY);
@@ -1118,8 +1155,8 @@ fn dispatch_file_io(request: SyscallRequest) -> SyscallReturn {
             Some(Err(_)) => return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS),
             None => return syscall_failure(SYSCALL_STATUS_OPERATION_NOT_READY),
         };
-        return match with_current_file_context(|filesystem, descriptors| {
-            descriptors.write(filesystem, descriptor, data)
+        return match with_current_file_context(|filesystems, _, descriptors| {
+            descriptors.write_vfs(filesystems, descriptor, data)
         }) {
             Some(Ok(written)) => SyscallReturn::success(written as u64),
             Some(Err(_)) => syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS),
@@ -1134,8 +1171,8 @@ fn dispatch_file_io(request: SyscallRequest) -> SyscallReturn {
         Some(Err(_)) => return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS),
         None => return syscall_failure(SYSCALL_STATUS_OPERATION_NOT_READY),
     }
-    let read = match with_current_file_context(|filesystem, descriptors| {
-        descriptors.read(filesystem, descriptor, &mut buffer[..length])
+    let read = match with_current_file_context(|filesystems, _, descriptors| {
+        descriptors.read_vfs(filesystems, descriptor, &mut buffer[..length])
     }) {
         Some(Ok(read)) => read,
         Some(Err(_)) => return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS),
@@ -1171,8 +1208,8 @@ fn dispatch_file_seek(request: SyscallRequest) -> SyscallReturn {
         FILE_SEEK_END => SeekOrigin::End,
         _ => unreachable!(),
     };
-    match with_current_file_context(|filesystem, descriptors| {
-        descriptors.seek(filesystem, descriptor, request.arguments[1] as i64, origin)
+    match with_current_file_context(|filesystems, _, descriptors| {
+        descriptors.seek_vfs(filesystems, descriptor, request.arguments[1] as i64, origin)
     }) {
         Some(Ok(position)) => SyscallReturn::success(position),
         Some(Err(_)) => syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS),
@@ -1185,7 +1222,7 @@ fn dispatch_file_close(request: SyscallRequest) -> SyscallReturn {
         return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS);
     }
     let descriptor = unpack_file_descriptor(request.arguments[0]);
-    match with_current_file_context(|_, descriptors| descriptors.close(descriptor)) {
+    match with_current_file_context(|_, _, descriptors| descriptors.close(descriptor)) {
         Some(Ok(())) => SyscallReturn::success(0),
         Some(Err(_)) => syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS),
         None => syscall_failure(SYSCALL_STATUS_OPERATION_NOT_READY),

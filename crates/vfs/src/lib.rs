@@ -152,6 +152,17 @@ pub fn resolve_mounted_path<L: NamespaceLookup + ?Sized, const CAPACITY: usize>(
     Ok(mounts.cross_mount(current))
 }
 
+pub fn create_mounted_node<'a, const FILESYSTEMS: usize, const MOUNTS: usize>(
+    filesystems: &mut FileSystemRegistry<'a, FILESYSTEMS>,
+    mounts: &MountTable<MOUNTS>,
+    path: &str,
+    kind: NodeKind,
+) -> Result<VfsNode, FileSystemRegistryError> {
+    let (parent_path, name) = split_parent(path)?;
+    let parent = resolve_mounted_path(filesystems, mounts, parent_path)?;
+    filesystems.create_node(parent, name.as_bytes(), kind)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileSystemRegistryError {
     TableFull,
@@ -1168,6 +1179,42 @@ mod tests {
         assert_eq!(
             resolve_mounted_path(&namespace, &mounts, "/a/../b"),
             Err(VfsError::InvalidPath)
+        );
+    }
+
+    #[test]
+    fn creates_node_in_filesystem_selected_by_mount_path() {
+        let mut system = MemoryFileSystem::<6, 16>::new();
+        let mut media = MemoryFileSystem::<6, 16>::new();
+        let system_root = system.root_node().unwrap();
+        let media_root = media.root_node().unwrap();
+        let media_directory = system
+            .create_node(system_root, b"media", NodeKind::Directory)
+            .unwrap();
+
+        let mut registry = FileSystemRegistry::<2>::new();
+        registry.register(FileSystemId(1), &mut system).unwrap();
+        registry.register(FileSystemId(2), &mut media).unwrap();
+
+        let mut mounts = MountTable::<1>::new(VfsNode::new(FileSystemId(1), system_root));
+        mounts
+            .mount(
+                VfsNode::new(FileSystemId(1), media_directory),
+                VfsNode::new(FileSystemId(2), media_root),
+            )
+            .unwrap();
+
+        let created =
+            create_mounted_node(&mut registry, &mounts, "/media/new.txt", NodeKind::File).unwrap();
+
+        assert_eq!(created.filesystem, FileSystemId(2));
+        assert_eq!(
+            registry.lookup_child(VfsNode::new(FileSystemId(2), media_root), b"new.txt"),
+            Ok(created.node)
+        );
+        assert_eq!(
+            registry.lookup_child(VfsNode::new(FileSystemId(1), system_root), b"new.txt"),
+            Err(FileSystemRegistryError::FileSystem(VfsError::NotFound))
         );
     }
 

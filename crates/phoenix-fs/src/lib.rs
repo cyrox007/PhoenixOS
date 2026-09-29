@@ -560,6 +560,29 @@ mod tests {
     }
 
     #[test]
+    fn next_generation_can_switch_transaction_roots() {
+        let mut device = MemoryBlockDevice::<512, 64>::new();
+        let current_superblock = Superblock::new(20, 8, VOLUME_ID, ROOTS).unwrap();
+        let next_roots = TransactionRoots::new(4, 5);
+        let next_superblock = Superblock::new(21, 8, VOLUME_ID, next_roots).unwrap();
+        let mut buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+
+        current_superblock.encode(&mut buffer).unwrap();
+        device.write_blocks(0, &buffer).unwrap();
+        device.flush().unwrap();
+
+        let current = ActiveSuperblock {
+            superblock: current_superblock,
+            slot: SuperblockSlot::First,
+        };
+        let committed =
+            commit_next_superblock(&mut device, current, next_superblock, &mut buffer).unwrap();
+
+        assert_eq!(committed.superblock.roots, next_roots);
+        assert_eq!(committed.slot, SuperblockSlot::Second);
+    }
+
+    #[test]
     fn rejects_skipped_generation_before_writing() {
         let mut device = MemoryBlockDevice::<512, 64>::new();
         let current = ActiveSuperblock {

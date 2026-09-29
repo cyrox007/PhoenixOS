@@ -1811,7 +1811,11 @@ fn user_mode_syscall_self_test(
         panic!("пользовательский цикл CPL3/SYSCALL/SYSRET завершился ошибкой");
     };
     if exit_status != arch::x86_64::syscall::USER_SELF_TEST_SUCCESS {
-        panic!("пользовательский процесс вернул неожиданный статус");
+        let stage = arch::x86_64::syscall::user_self_test_failure_stage(exit_status)
+            .unwrap_or("неизвестный этап");
+        panic!(
+            "пользовательский процесс вернул неожиданный статус {exit_status:#x}, этап: {stage}"
+        );
     }
     process_manager
         .exit(process.id, exit_status)

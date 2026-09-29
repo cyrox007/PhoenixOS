@@ -1204,13 +1204,8 @@ mod tests {
             )
             .unwrap();
 
-        let created = create_mounted_node(
-            &mut registry,
-            &mounts,
-            "/media/new.txt",
-            NodeKind::File,
-        )
-        .unwrap();
+        let created =
+            create_mounted_node(&mut registry, &mounts, "/media/new.txt", NodeKind::File).unwrap();
 
         assert_eq!(created.filesystem, FileSystemId(2));
         assert_eq!(

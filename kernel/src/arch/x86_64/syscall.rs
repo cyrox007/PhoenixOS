@@ -71,8 +71,7 @@ pub const FILESYSTEM_MOUNT_CAPACITY: usize = 4;
 pub const ROOT_FILESYSTEM_ID: FileSystemId = FileSystemId(1);
 
 pub type KernelFileSystem = MemoryFileSystem<FILESYSTEM_NODE_CAPACITY, FILE_CAPACITY>;
-pub type KernelFileSystemRegistry<'a> =
-    FileSystemRegistry<'a, FILESYSTEM_REGISTRY_CAPACITY>;
+pub type KernelFileSystemRegistry<'a> = FileSystemRegistry<'a, FILESYSTEM_REGISTRY_CAPACITY>;
 pub type KernelMountTable = MountTable<FILESYSTEM_MOUNT_CAPACITY>;
 pub type KernelDescriptorTable = DescriptorTable<FILE_DESCRIPTOR_CAPACITY>;
 
@@ -417,8 +416,7 @@ fn with_current_file_context<T>(
         return None;
     }
 
-    let filesystems =
-        unsafe { &mut *(filesystems as *mut KernelFileSystemRegistry<'static>) };
+    let filesystems = unsafe { &mut *(filesystems as *mut KernelFileSystemRegistry<'static>) };
     let mounts = unsafe { &mut *(mounts as *mut KernelMountTable) };
     let descriptors = unsafe { &mut *(descriptors as *mut KernelDescriptorTable) };
     Some(operation(filesystems, mounts, descriptors))

@@ -1073,7 +1073,6 @@ impl<'a, D: BlockDevice> FatTableReader<'a, D> {
         }
         Ok(())
     }
-
 }
 
 impl FatBootSector {

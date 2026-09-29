@@ -55,7 +55,11 @@ const SELF_TEST_ARGUMENTS: [u64; 6] = [
 ];
 const SELF_TEST_RESULT: u64 = 0x5359_5343_414c_4c21;
 pub const USER_SELF_TEST_SUCCESS: u64 = 0x5553_4552_5f4f_4b21;
-const USER_SELF_TEST_FAILURE: u64 = 0x5553_4552_5f42_4144;
+const USER_SELF_TEST_FAILURE_START_INFO: u64 = 1;
+const USER_SELF_TEST_FAILURE_ARGUMENTS: u64 = 2;
+const USER_SELF_TEST_FAILURE_ENVIRONMENT: u64 = 3;
+const USER_SELF_TEST_FAILURE_SYSCALL: u64 = 4;
+const USER_SELF_TEST_FAILURE_PRIVILEGE: u64 = 5;
 const FILE_PATH_CAPACITY: usize = 256;
 const IPC_INLINE_WORD_CAPACITY: u64 = 6;
 const ENTRY_STACK_SIZE: u64 = 64 * 1024;
@@ -661,6 +665,7 @@ phoenix_user_process_return_from_syscall:
     .global phoenix_user_test_image_start
     .global phoenix_user_test_image_end
 phoenix_user_test_image_start:
+    mov r15, 1
     test rdi, rdi
     je 3f
     cmp dword ptr [rdi + 0], 0
@@ -676,6 +681,7 @@ phoenix_user_test_image_start:
     cmp qword ptr [rdi + 32], 0
     je 3f
 
+    mov r15, 2
     mov r12, [rdi + 16]
     cmp qword ptr [r12 + 8], 12
     jne 3f
@@ -696,6 +702,7 @@ phoenix_user_test_image_start:
     cmp byte ptr [r13 + 10], 0x74
     jne 3f
 
+    mov r15, 3
     mov r12, [rdi + 32]
     cmp qword ptr [r12 + 8], 9
     jne 3f
@@ -706,6 +713,7 @@ phoenix_user_test_image_start:
     cmp byte ptr [r13 + 8], 0x75
     jne 3f
 
+    mov r15, 4
     mov rax, -1
     mov rdi, 0x11
     mov rsi, 0x2233
@@ -721,6 +729,7 @@ phoenix_user_test_image_start:
     cmp rax, rbx
     jne 3f
 
+    mov r15, 5
     mov ax, cs
     and eax, 3
     cmp eax, 3
@@ -735,7 +744,7 @@ phoenix_user_test_image_start:
     jmp 4f
 
 3:
-    mov rdi, 0x555345525f424144
+    mov rdi, r15
 
 4:
     mov rax, 0x102
@@ -996,6 +1005,17 @@ pub fn run_user_mode_self_test(
 ) -> bool {
     run_user_process_with_start_info(instruction_pointer, stack_pointer, start_info_address)
         == Ok(USER_SELF_TEST_SUCCESS)
+}
+
+pub const fn user_self_test_failure_stage(status: u64) -> Option<&'static str> {
+    match status {
+        USER_SELF_TEST_FAILURE_START_INFO => Some("блок запуска"),
+        USER_SELF_TEST_FAILURE_ARGUMENTS => Some("аргументы запуска"),
+        USER_SELF_TEST_FAILURE_ENVIRONMENT => Some("окружение запуска"),
+        USER_SELF_TEST_FAILURE_SYSCALL => Some("системный вызов"),
+        USER_SELF_TEST_FAILURE_PRIVILEGE => Some("уровень привилегий"),
+        _ => None,
+    }
 }
 
 pub fn return_context_self_test() -> bool {

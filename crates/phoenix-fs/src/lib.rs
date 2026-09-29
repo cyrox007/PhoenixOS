@@ -277,7 +277,7 @@ mod tests {
     use super::*;
     use phoenix_block::MemoryBlockDevice;
 
-    const VOLUME_ID: [u8; 16] = *b"phoenix-volume-01";
+    const VOLUME_ID: [u8; 16] = *b"phoenix-volume-1";
 
     #[test]
     fn superblock_round_trip_preserves_identity_and_generation() {

@@ -1634,9 +1634,24 @@ fn user_mode_syscall_self_test(
     filesystem
         .create_file("/syscall")
         .expect("не удалось создать файл syscall-проверки");
+    let root_node = filesystem
+        .resolve("/")
+        .expect("не удалось получить корень файловой syscall-проверки");
+    let mut filesystems = arch::x86_64::syscall::KernelFileSystemRegistry::new();
+    filesystems
+        .register(arch::x86_64::syscall::ROOT_FILESYSTEM_ID, &mut filesystem)
+        .expect("не удалось зарегистрировать корневую файловую систему");
+    let mut mounts = arch::x86_64::syscall::KernelMountTable::new(phoenix_vfs::VfsNode::new(
+        arch::x86_64::syscall::ROOT_FILESYSTEM_ID,
+        root_node,
+    ));
     let mut file_descriptors = arch::x86_64::syscall::KernelDescriptorTable::new();
     let file_context_guard = unsafe {
-        arch::x86_64::syscall::install_current_file_context(&mut filesystem, &mut file_descriptors)
+        arch::x86_64::syscall::install_current_file_context(
+            &mut filesystems,
+            &mut mounts,
+            &mut file_descriptors,
+        )
     }
     .expect("файловый контекст текущего процесса уже установлен");
 
@@ -1774,7 +1789,8 @@ fn user_mode_syscall_self_test(
     let exit_status = x86_64::instructions::interrupts::without_interrupts(|| {
         let file_context_guard = unsafe {
             arch::x86_64::syscall::install_current_file_context(
-                &mut filesystem,
+                &mut filesystems,
+                &mut mounts,
                 &mut file_descriptors,
             )
         }

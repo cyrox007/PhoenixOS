@@ -1316,7 +1316,10 @@ mod tests {
         assert_eq!(first_output, *b"one");
         assert_eq!(second_output, *b"two");
         assert_eq!(descriptors.node_identity(first_descriptor), Ok(first_node));
-        assert_eq!(descriptors.node_identity(second_descriptor), Ok(second_node));
+        assert_eq!(
+            descriptors.node_identity(second_descriptor),
+            Ok(second_node)
+        );
     }
 
     #[test]

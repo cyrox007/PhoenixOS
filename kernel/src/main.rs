@@ -335,7 +335,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!("kernel thread preemptive spawn self-test: OK"),
     );
 
-    init_apic_timer(&mut out, &mut page_table, &mut frames);
+    init_apic_timer(&mut out);
 
     render_boot_banner(boot_info, &mut out);
 
@@ -886,11 +886,7 @@ fn hardware_scheduler_preemption_self_test() {
     }
 }
 
-fn init_apic_timer(
-    out: &mut serial::Com1,
-    _page_table: &mut ActivePageTable,
-    _frames: &mut SystemFrameAllocator<SYSTEM_MEMORY_RANGE_CAPACITY>,
-) {
+fn init_apic_timer(out: &mut serial::Com1) {
     if let Err(error) = arch::x86_64::apic::init_periodic_timer() {
         panic!("x2APIC обязателен для поддерживаемого аппаратного профиля: {error:?}");
     }

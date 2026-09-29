@@ -16,6 +16,7 @@ members = [
     "crates/ipc-model",
     "crates/elf-loader",
     "crates/fat",
+    "crates/phoenix-fs",
     "crates/user-runtime",
     "crates/vfs",
 ]

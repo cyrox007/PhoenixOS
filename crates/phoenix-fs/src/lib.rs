@@ -7,7 +7,7 @@ pub const SUPERBLOCK_COPY_COUNT: u64 = 2;
 pub const FORMAT_VERSION: u32 = 1;
 
 const SUPERBLOCK_MAGIC: [u8; 8] = *b"PHXFS\0\x01\0";
-const SUPERBLOCK_HEADER_SIZE: u32 = 72;
+const SUPERBLOCK_HEADER_SIZE: u32 = 88;
 const CHECKSUM_OFFSET: usize = 64;
 const CHECKSUM_END: usize = 68;
 const SUPPORTED_INCOMPATIBLE_FEATURES: u64 = 0;
@@ -24,6 +24,8 @@ pub enum PhoenixFsError {
     InvalidGeneration,
     InvalidVolumeId,
     InvalidVolumeGeometry,
+    InvalidRootBlock(u64),
+    DuplicateRootBlock(u64),
     UnsupportedFeatures(u64),
     InvalidReservedField,
     ChecksumMismatch,
@@ -72,11 +74,39 @@ pub struct ActiveSuperblock {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransactionRoots {
+    pub object_tree: u64,
+    pub free_space_tree: u64,
+}
+
+impl TransactionRoots {
+    pub const fn new(object_tree: u64, free_space_tree: u64) -> Self {
+        Self {
+            object_tree,
+            free_space_tree,
+        }
+    }
+
+    fn validate(self, total_blocks: u64) -> Result<(), PhoenixFsError> {
+        for block in [self.object_tree, self.free_space_tree] {
+            if block < SUPERBLOCK_COPY_COUNT || block >= total_blocks {
+                return Err(PhoenixFsError::InvalidRootBlock(block));
+            }
+        }
+        if self.object_tree == self.free_space_tree {
+            return Err(PhoenixFsError::DuplicateRootBlock(self.object_tree));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Superblock {
     pub generation: u64,
     pub total_blocks: u64,
     pub volume_id: [u8; 16],
     pub incompatible_features: u64,
+    pub roots: TransactionRoots,
 }
 
 impl Superblock {
@@ -84,12 +114,14 @@ impl Superblock {
         generation: u64,
         total_blocks: u64,
         volume_id: [u8; 16],
+        roots: TransactionRoots,
     ) -> Result<Self, PhoenixFsError> {
         let superblock = Self {
             generation,
             total_blocks,
             volume_id,
             incompatible_features: 0,
+            roots,
         };
         superblock.validate()?;
         Ok(superblock)
@@ -110,6 +142,8 @@ impl Superblock {
         write_u64(destination, 32, self.total_blocks);
         destination[40..56].copy_from_slice(&self.volume_id);
         write_u64(destination, 56, self.incompatible_features);
+        write_u64(destination, 72, self.roots.object_tree);
+        write_u64(destination, 80, self.roots.free_space_tree);
 
         let checksum = superblock_crc32c(destination);
         write_u32(destination, CHECKSUM_OFFSET, checksum);
@@ -151,6 +185,10 @@ impl Superblock {
             total_blocks: read_u64(source, 32),
             volume_id,
             incompatible_features: read_u64(source, 56),
+            roots: TransactionRoots {
+                object_tree: read_u64(source, 72),
+                free_space_tree: read_u64(source, 80),
+            },
         };
         superblock.validate()?;
         Ok(superblock)
@@ -166,6 +204,8 @@ impl Superblock {
         if self.volume_id.iter().all(|byte| *byte == 0) {
             return Err(PhoenixFsError::InvalidVolumeId);
         }
+
+        self.roots.validate(self.total_blocks)?;
 
         let unsupported = self.incompatible_features & !SUPPORTED_INCOMPATIBLE_FEATURES;
         if unsupported != 0 {
@@ -387,10 +427,11 @@ mod tests {
     use phoenix_block::MemoryBlockDevice;
 
     const VOLUME_ID: [u8; 16] = *b"phoenix-volume-1";
+    const ROOTS: TransactionRoots = TransactionRoots::new(2, 3);
 
     #[test]
     fn superblock_round_trip_preserves_identity_and_generation() {
-        let superblock = Superblock::new(7, 128, VOLUME_ID).unwrap();
+        let superblock = Superblock::new(7, 128, VOLUME_ID, ROOTS).unwrap();
         let mut encoded = [0_u8; FILESYSTEM_BLOCK_SIZE];
 
         superblock.encode(&mut encoded).unwrap();
@@ -400,7 +441,7 @@ mod tests {
 
     #[test]
     fn superblock_detects_corrupted_contents() {
-        let superblock = Superblock::new(1, 128, VOLUME_ID).unwrap();
+        let superblock = Superblock::new(1, 128, VOLUME_ID, ROOTS).unwrap();
         let mut encoded = [0_u8; FILESYSTEM_BLOCK_SIZE];
         superblock.encode(&mut encoded).unwrap();
 
@@ -415,8 +456,8 @@ mod tests {
     #[test]
     fn selects_newest_valid_superblock_copy() {
         let mut device = MemoryBlockDevice::<512, 64>::new();
-        let older = Superblock::new(4, 8, VOLUME_ID).unwrap();
-        let newer = Superblock::new(5, 8, VOLUME_ID).unwrap();
+        let older = Superblock::new(4, 8, VOLUME_ID, ROOTS).unwrap();
+        let newer = Superblock::new(5, 8, VOLUME_ID, ROOTS).unwrap();
         let mut first = [0_u8; FILESYSTEM_BLOCK_SIZE];
         let mut second = [0_u8; FILESYSTEM_BLOCK_SIZE];
         older.encode(&mut first).unwrap();
@@ -439,8 +480,8 @@ mod tests {
     #[test]
     fn falls_back_to_older_copy_when_newer_copy_is_corrupted() {
         let mut device = MemoryBlockDevice::<512, 64>::new();
-        let older = Superblock::new(9, 8, VOLUME_ID).unwrap();
-        let newer = Superblock::new(10, 8, VOLUME_ID).unwrap();
+        let older = Superblock::new(9, 8, VOLUME_ID, ROOTS).unwrap();
+        let newer = Superblock::new(10, 8, VOLUME_ID, ROOTS).unwrap();
         let mut first = [0_u8; FILESYSTEM_BLOCK_SIZE];
         let mut second = [0_u8; FILESYSTEM_BLOCK_SIZE];
         older.encode(&mut first).unwrap();
@@ -464,10 +505,10 @@ mod tests {
     #[test]
     fn rejects_equal_generation_with_different_metadata() {
         let mut device = MemoryBlockDevice::<512, 64>::new();
-        let first_superblock = Superblock::new(3, 8, VOLUME_ID).unwrap();
+        let first_superblock = Superblock::new(3, 8, VOLUME_ID, ROOTS).unwrap();
         let mut other_id = VOLUME_ID;
         other_id[0] ^= 1;
-        let second_superblock = Superblock::new(3, 8, other_id).unwrap();
+        let second_superblock = Superblock::new(3, 8, other_id, ROOTS).unwrap();
         let mut first = [0_u8; FILESYSTEM_BLOCK_SIZE];
         let mut second = [0_u8; FILESYSTEM_BLOCK_SIZE];
         first_superblock.encode(&mut first).unwrap();
@@ -487,8 +528,8 @@ mod tests {
     #[test]
     fn commits_next_generation_to_inactive_copy_and_flushes() {
         let mut device = MemoryBlockDevice::<512, 64>::new();
-        let current_superblock = Superblock::new(11, 8, VOLUME_ID).unwrap();
-        let next_superblock = Superblock::new(12, 8, VOLUME_ID).unwrap();
+        let current_superblock = Superblock::new(11, 8, VOLUME_ID, ROOTS).unwrap();
+        let next_superblock = Superblock::new(12, 8, VOLUME_ID, ROOTS).unwrap();
         let mut encoded = [0_u8; FILESYSTEM_BLOCK_SIZE];
         current_superblock.encode(&mut encoded).unwrap();
         device.write_blocks(0, &encoded).unwrap();
@@ -519,13 +560,36 @@ mod tests {
     }
 
     #[test]
+    fn next_generation_can_switch_transaction_roots() {
+        let mut device = MemoryBlockDevice::<512, 64>::new();
+        let current_superblock = Superblock::new(20, 8, VOLUME_ID, ROOTS).unwrap();
+        let next_roots = TransactionRoots::new(4, 5);
+        let next_superblock = Superblock::new(21, 8, VOLUME_ID, next_roots).unwrap();
+        let mut buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+
+        current_superblock.encode(&mut buffer).unwrap();
+        device.write_blocks(0, &buffer).unwrap();
+        device.flush().unwrap();
+
+        let current = ActiveSuperblock {
+            superblock: current_superblock,
+            slot: SuperblockSlot::First,
+        };
+        let committed =
+            commit_next_superblock(&mut device, current, next_superblock, &mut buffer).unwrap();
+
+        assert_eq!(committed.superblock.roots, next_roots);
+        assert_eq!(committed.slot, SuperblockSlot::Second);
+    }
+
+    #[test]
     fn rejects_skipped_generation_before_writing() {
         let mut device = MemoryBlockDevice::<512, 64>::new();
         let current = ActiveSuperblock {
-            superblock: Superblock::new(2, 8, VOLUME_ID).unwrap(),
+            superblock: Superblock::new(2, 8, VOLUME_ID, ROOTS).unwrap(),
             slot: SuperblockSlot::First,
         };
-        let skipped = Superblock::new(4, 8, VOLUME_ID).unwrap();
+        let skipped = Superblock::new(4, 8, VOLUME_ID, ROOTS).unwrap();
         let mut buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
 
         assert_eq!(
@@ -533,6 +597,42 @@ mod tests {
             Err(PhoenixFsError::GenerationSequence)
         );
         assert!(!device.is_dirty());
+    }
+
+    #[test]
+    fn superblock_preserves_transaction_roots() {
+        let roots = TransactionRoots::new(7, 9);
+        let superblock = Superblock::new(6, 128, VOLUME_ID, roots).unwrap();
+        let mut encoded = [0_u8; FILESYSTEM_BLOCK_SIZE];
+
+        superblock.encode(&mut encoded).unwrap();
+
+        assert_eq!(Superblock::decode(&encoded).unwrap().roots, roots);
+    }
+
+    #[test]
+    fn rejects_roots_outside_data_area() {
+        assert_eq!(
+            Superblock::new(
+                1,
+                8,
+                VOLUME_ID,
+                TransactionRoots::new(SuperblockSlot::First.filesystem_block(), 3),
+            ),
+            Err(PhoenixFsError::InvalidRootBlock(0))
+        );
+        assert_eq!(
+            Superblock::new(1, 8, VOLUME_ID, TransactionRoots::new(2, 8)),
+            Err(PhoenixFsError::InvalidRootBlock(8))
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_transaction_roots() {
+        assert_eq!(
+            Superblock::new(1, 8, VOLUME_ID, TransactionRoots::new(4, 4)),
+            Err(PhoenixFsError::DuplicateRootBlock(4))
+        );
     }
 
     #[test]

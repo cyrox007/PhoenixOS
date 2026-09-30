@@ -22,6 +22,7 @@ pub const OBJECT_LEAF_RECORD_HEADER_SIZE: usize = 32;
 pub const OBJECT_INTERNAL_RECORD_SIZE: usize = 32;
 pub const FREE_SPACE_RECORD_SIZE: usize = 16;
 pub const MAX_OBJECT_TREE_DEPTH: usize = 16;
+pub const MAX_OBJECT_TRANSACTION_RETIRED_BLOCKS: usize = MAX_OBJECT_TREE_DEPTH * 2 + 3;
 pub const ROOT_OBJECT_ID: u64 = 1;
 pub const INITIAL_OBJECT_TREE_BLOCK: u64 = 2;
 pub const INITIAL_FREE_SPACE_TREE_BLOCK: u64 = 3;
@@ -1862,7 +1863,7 @@ fn find_object_leaf_record(block: &[u8], target_key: ObjectTreeKey) -> Result<()
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeepRecordUpdateResult {
     pub active: ActiveSuperblock,
-    pub retired_blocks: [u64; MAX_OBJECT_TREE_DEPTH + 2],
+    pub retired_blocks: [u64; MAX_OBJECT_TRANSACTION_RETIRED_BLOCKS],
     pub retired_count: usize,
     pub allocated: FreeSpaceExtent,
 }
@@ -2280,7 +2281,7 @@ fn commit_object_leaf_mutation<D: BlockDevice>(
     )?;
     write_filesystem_block(device, free_space_block, next_free_space)?;
 
-    let mut retired_blocks = [0_u64; MAX_OBJECT_TREE_DEPTH + 2];
+    let mut retired_blocks = [0_u64; MAX_OBJECT_TRANSACTION_RETIRED_BLOCKS];
     retired_blocks[0] = path.leaf_block;
     for index in 0..path.parent_count {
         retired_blocks[index + 1] = path.parents[path.parent_count - index - 1].block_number;
@@ -2960,6 +2961,27 @@ pub fn materialize_object_leaf_copy(
     Ok(next)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectChildRewrite {
+    pub child_index: u32,
+    pub child_block: u64,
+    pub child_first_key: ObjectTreeKey,
+}
+
+impl ObjectChildRewrite {
+    pub const fn new(
+        child_index: u32,
+        child_block: u64,
+        child_first_key: ObjectTreeKey,
+    ) -> Self {
+        Self {
+            child_index,
+            child_block,
+            child_first_key,
+        }
+    }
+}
+
 pub fn materialize_object_internal_after_child_copy(
     current: &[u8],
     destination: &mut [u8],
@@ -2969,15 +2991,49 @@ pub fn materialize_object_internal_after_child_copy(
     new_child_block: u64,
     new_child_first_key: ObjectTreeKey,
 ) -> Result<TreeNodeHeader, PhoenixFsError> {
+    let child_index =
+        u32::try_from(child_index).map_err(|_| PhoenixFsError::InvalidObjectRewriteTarget)?;
+    let rewrite = [ObjectChildRewrite::new(
+        child_index,
+        new_child_block,
+        new_child_first_key,
+    )];
+    materialize_object_internal_after_child_rewrites(
+        current,
+        destination,
+        new_generation,
+        new_block_number,
+        &rewrite,
+    )
+}
+
+pub fn materialize_object_internal_after_child_rewrites(
+    current: &[u8],
+    destination: &mut [u8],
+    new_generation: u64,
+    new_block_number: u64,
+    rewrites: &[ObjectChildRewrite],
+) -> Result<TreeNodeHeader, PhoenixFsError> {
     let current_node = validate_object_internal(current)?;
     validate_rewrite_target(current_node, new_generation, new_block_number)?;
-
-    if child_index >= current_node.item_count as usize {
-        return Err(PhoenixFsError::InvalidObjectRewriteTarget);
+    if rewrites.is_empty() {
+        return Err(PhoenixFsError::InvalidObjectMutationBatch);
     }
-    validate_object_child_block(new_child_block)?;
-    if new_child_block == new_block_number {
-        return Err(PhoenixFsError::InvalidObjectRewriteTarget);
+
+    let mut previous_index = None;
+    for rewrite in rewrites {
+        let child_index = rewrite.child_index as usize;
+        if child_index >= current_node.item_count as usize
+            || previous_index.is_some_and(|previous| previous >= rewrite.child_index)
+        {
+            return Err(PhoenixFsError::InvalidObjectRewriteTarget);
+        }
+        validate_object_child_block(rewrite.child_block)?;
+        if rewrite.child_block == new_block_number {
+            return Err(PhoenixFsError::InvalidObjectRewriteTarget);
+        }
+        rewrite.child_first_key.validate()?;
+        previous_index = Some(rewrite.child_index);
     }
 
     destination.fill(0);
@@ -2988,15 +3044,18 @@ pub fn materialize_object_internal_after_child_copy(
         .ok_or(PhoenixFsError::ArithmeticOverflow)?;
     destination[start..end].copy_from_slice(&current[start..end]);
 
-    let record_offset = start
-        .checked_add(
-            child_index
-                .checked_mul(OBJECT_INTERNAL_RECORD_SIZE)
-                .ok_or(PhoenixFsError::ArithmeticOverflow)?,
-        )
-        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
-    ObjectInternalRecord::new(new_child_first_key, new_child_block)?
-        .encode(&mut destination[record_offset..record_offset + OBJECT_INTERNAL_RECORD_SIZE])?;
+    for rewrite in rewrites {
+        let record_offset = start
+            .checked_add(
+                (rewrite.child_index as usize)
+                    .checked_mul(OBJECT_INTERNAL_RECORD_SIZE)
+                    .ok_or(PhoenixFsError::ArithmeticOverflow)?,
+            )
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+        ObjectInternalRecord::new(rewrite.child_first_key, rewrite.child_block)?.encode(
+            &mut destination[record_offset..record_offset + OBJECT_INTERNAL_RECORD_SIZE],
+        )?;
+    }
 
     let next = TreeNodeHeader::new(
         MetadataKind::ObjectTree,

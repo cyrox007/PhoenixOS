@@ -3687,20 +3687,25 @@ fn commit_nonroot_leaf_split_insertions<D: BlockDevice>(
             .checked_add(1)
             .ok_or(PhoenixFsError::ArithmeticOverflow)?;
 
+        let source_left_block = left_child_block;
+        let source_left_key = left_key;
+        let source_right_block = right_child_block;
+        let source_right_key = right_key;
+
         let left_parent = materialize_object_internal_child_split_side(
             &parent_source,
             object_copy_buffer,
             generation,
             left_parent_block,
             step.child_index as usize,
-            left_child_block,
-            left_key,
-            right_child_block,
-            right_key,
+            source_left_block,
+            source_left_key,
+            source_right_block,
+            source_right_key,
             0,
             split_at,
         )?;
-        left_key = first_object_node_key(object_copy_buffer, left_parent)?;
+        let next_left_key = first_object_node_key(object_copy_buffer, left_parent)?;
         write_filesystem_block(device, left_parent_block, object_copy_buffer)?;
 
         let right_parent = materialize_object_internal_child_split_side(
@@ -3709,22 +3714,25 @@ fn commit_nonroot_leaf_split_insertions<D: BlockDevice>(
             generation,
             right_parent_block,
             step.child_index as usize,
-            left_child_block,
-            left_key,
-            right_child_block,
-            right_key,
+            source_left_block,
+            source_left_key,
+            source_right_block,
+            source_right_key,
             split_at,
             total_records,
         )?;
-        right_key = first_object_node_key(object_copy_buffer, right_parent)?;
+        let next_right_key = first_object_node_key(object_copy_buffer, right_parent)?;
         write_filesystem_block(device, right_parent_block, object_copy_buffer)?;
 
         left_child_block = left_parent_block;
+        left_key = next_left_key;
         right_child_block = right_parent_block;
+        right_key = next_right_key;
         top_split_level = Some(parent.level);
     }
 
     let root = if let Some((parent_position, block, key)) = first_single_parent {
+        let mut parent_read_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
         copy_object_parent_range(
             device,
             current,
@@ -3735,7 +3743,7 @@ fn commit_nonroot_leaf_split_insertions<D: BlockDevice>(
             key,
             generation,
             &mut next_block,
-            &mut [0_u8; FILESYSTEM_BLOCK_SIZE],
+            &mut parent_read_buffer,
             object_copy_buffer,
         )?
     } else {
@@ -6541,6 +6549,113 @@ mod tests {
             ),
             Err(PhoenixFsError::ObjectNotEmpty)
         );
+    }
+
+    #[test]
+    fn recursive_split_raises_new_root_when_parent_is_full() {
+        let mut device = MemoryBlockDevice::<512, 4096>::new();
+        let current = ActiveSuperblock {
+            superblock: Superblock::new(5, 512, VOLUME_ID, TransactionRoots::new(8, 9)).unwrap(),
+            slot: SuperblockSlot::First,
+        };
+
+        let mut root = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let root_start = TreeNodeHeader::entries_offset();
+        for index in 0..126_usize {
+            let key = ObjectTreeKey::new((index + 1) as u64, ObjectRecordKind::Metadata, 0);
+            let child_block = 100 + index as u64;
+            ObjectInternalRecord::new(key, child_block)
+                .unwrap()
+                .encode(
+                    &mut root[root_start + index * OBJECT_INTERNAL_RECORD_SIZE
+                        ..root_start + (index + 1) * OBJECT_INTERNAL_RECORD_SIZE],
+                )
+                .unwrap();
+        }
+        TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            5,
+            8,
+            1,
+            126,
+            (126 * OBJECT_INTERNAL_RECORD_SIZE) as u32,
+        )
+        .unwrap()
+        .seal(&mut root)
+        .unwrap();
+
+        let target_leaf_block = 225_u64;
+        let mut leaf = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let leaf_start = TreeNodeHeader::entries_offset();
+        let mut cursor = leaf_start;
+        let payload = [0x44_u8; 192];
+        for object_id in 126..=143_u64 {
+            let key = ObjectTreeKey::new(object_id, ObjectRecordKind::Metadata, 0);
+            let record = ObjectLeafRecordHeader::new(key, payload.len() as u32).unwrap();
+            cursor += record
+                .encode_with_value(&mut leaf[cursor..], &payload)
+                .unwrap();
+        }
+        TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            4,
+            target_leaf_block,
+            0,
+            18,
+            (cursor - leaf_start) as u32,
+        )
+        .unwrap()
+        .seal(&mut leaf)
+        .unwrap();
+
+        let mut free_root = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        write_free_space_extent(&mut free_root, 0, FreeSpaceExtent::new(300, 120)).unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::FreeSpaceTree,
+            5,
+            9,
+            0,
+            1,
+            FREE_SPACE_RECORD_SIZE as u32,
+        )
+        .unwrap()
+        .seal(&mut free_root)
+        .unwrap();
+
+        write_filesystem_block(&mut device, 8, &root).unwrap();
+        write_filesystem_block(&mut device, target_leaf_block, &leaf).unwrap();
+        write_filesystem_block(&mut device, 9, &free_root).unwrap();
+
+        let inserted_key = ObjectTreeKey::new(144, ObjectRecordKind::Metadata, 0);
+        let mut object_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut object_copy = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut current_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut next_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut superblock_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+
+        let result = commit_object_record_insert(
+            &mut device,
+            current,
+            inserted_key,
+            &payload,
+            &mut object_buffer,
+            &mut object_copy,
+            &mut current_free,
+            &mut next_free,
+            &mut superblock_buffer,
+        )
+        .unwrap();
+
+        let mut new_root = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        read_filesystem_block(
+            &mut device,
+            result.active.superblock.roots.object_tree,
+            &mut new_root,
+        )
+        .unwrap();
+        let root_node = validate_object_internal(&new_root).unwrap();
+        assert_eq!(root_node.level, 2);
+        assert_eq!(root_node.item_count, 2);
     }
 
     #[test]

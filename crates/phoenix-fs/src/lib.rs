@@ -4514,7 +4514,6 @@ fn map_phoenix_fs_to_vfs(error: PhoenixFsError) -> VfsError {
         PhoenixFsError::InvalidDirectoryName => VfsError::InvalidPath,
         PhoenixFsError::ObjectRecordAlreadyExists => VfsError::AlreadyExists,
         PhoenixFsError::ParentNotDirectory => VfsError::NotDirectory,
-        PhoenixFsError::ObjectNotEmpty => VfsError::IsDirectory,
         PhoenixFsError::BufferSize | PhoenixFsError::NoFreeSpace => VfsError::NoSpace,
         _ => VfsError::Storage,
     }

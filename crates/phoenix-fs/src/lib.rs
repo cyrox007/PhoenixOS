@@ -871,7 +871,7 @@ pub fn materialize_free_space_leaf_after_allocation(
     if destination.len() != FILESYSTEM_BLOCK_SIZE {
         return Err(PhoenixFsError::BufferSize);
     }
-    if new_generation != current_node.metadata.generation + 1 {
+    if new_generation <= current_node.metadata.generation {
         return Err(PhoenixFsError::GenerationSequence);
     }
     if !plan.allocated.contains(new_block_number)? {

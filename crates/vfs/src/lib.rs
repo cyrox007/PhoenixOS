@@ -154,6 +154,16 @@ pub fn resolve_mounted_path<L: NamespaceLookup + ?Sized, const CAPACITY: usize>(
     Ok(mounts.cross_mount(current))
 }
 
+pub fn remove_mounted_node<'a, const FILESYSTEMS: usize, const MOUNTS: usize>(
+    filesystems: &mut FileSystemRegistry<'a, FILESYSTEMS>,
+    mounts: &MountTable<MOUNTS>,
+    path: &str,
+) -> Result<(), FileSystemRegistryError> {
+    let (parent_path, name) = split_parent(path)?;
+    let parent = resolve_mounted_path(filesystems, mounts, parent_path)?;
+    filesystems.remove_node(parent, name.as_bytes())
+}
+
 pub fn create_mounted_node<'a, const FILESYSTEMS: usize, const MOUNTS: usize>(
     filesystems: &mut FileSystemRegistry<'a, FILESYSTEMS>,
     mounts: &MountTable<MOUNTS>,
@@ -247,6 +257,16 @@ impl<'a, const CAPACITY: usize> FileSystemRegistry<'a, CAPACITY> {
             .filesystem_mut(filesystem)?
             .create_node(parent.node, name, kind)?;
         Ok(VfsNode::new(filesystem, node))
+    }
+
+    pub fn remove_node(
+        &mut self,
+        parent: VfsNode,
+        name: &[u8],
+    ) -> Result<(), FileSystemRegistryError> {
+        self.filesystem_mut(parent.filesystem)?
+            .remove_node(parent.node, name)?;
+        Ok(())
     }
 
     pub fn read_node(
@@ -343,6 +363,9 @@ pub trait FileSystem {
         name: &[u8],
         kind: NodeKind,
     ) -> Result<NodeId, VfsError>;
+    fn remove_node(&mut self, _parent: NodeId, _name: &[u8]) -> Result<(), VfsError> {
+        Err(VfsError::ReadOnly)
+    }
     fn read_node(&self, node: NodeId, offset: u64, output: &mut [u8]) -> Result<usize, VfsError>;
     fn write_node(&mut self, node: NodeId, offset: u64, data: &[u8]) -> Result<usize, VfsError>;
     fn truncate_node(&mut self, node: NodeId, length: u64) -> Result<(), VfsError>;

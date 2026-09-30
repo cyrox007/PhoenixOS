@@ -18,6 +18,7 @@ const TREE_NODE_HEADER_SIZE: u32 = 64;
 const TREE_NODE_PREFIX_SIZE: u32 = TREE_NODE_HEADER_SIZE - METADATA_HEADER_SIZE;
 pub const OBJECT_LEAF_RECORD_HEADER_SIZE: usize = 32;
 const OBJECT_LEAF_RECORD_ALIGNMENT: usize = 8;
+pub const OBJECT_INTERNAL_RECORD_SIZE: usize = 40;
 const SUPPORTED_INCOMPATIBLE_FEATURES: u64 = 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +49,12 @@ pub enum PhoenixFsError {
     InvalidObjectRecordFlags(u32),
     InvalidObjectRecordSize,
     InvalidObjectLeafNode,
+    InvalidObjectInternalNode,
+    InvalidChildBlock(u64),
+    InvalidChildGeneration(u64),
+    InvalidChildLevel,
+    ChildIdentityMismatch,
+    ObjectKeyOutsideNode,
     ObjectRecordsOutOfOrder,
     UnsupportedFeatures(u64),
     InvalidReservedField,
@@ -528,6 +535,189 @@ pub fn validate_object_leaf(block: &[u8]) -> Result<TreeNodeHeader, PhoenixFsErr
     Ok(node)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectInternalRecord {
+    pub upper_bound: ObjectTreeKey,
+    pub child_block: u64,
+    pub child_generation: u64,
+}
+
+impl ObjectInternalRecord {
+    pub fn new(
+        upper_bound: ObjectTreeKey,
+        child_block: u64,
+        child_generation: u64,
+    ) -> Result<Self, PhoenixFsError> {
+        let record = Self {
+            upper_bound,
+            child_block,
+            child_generation,
+        };
+        record.validate()?;
+        Ok(record)
+    }
+
+    pub fn encode(&self, destination: &mut [u8]) -> Result<(), PhoenixFsError> {
+        self.validate()?;
+        if destination.len() < OBJECT_INTERNAL_RECORD_SIZE {
+            return Err(PhoenixFsError::BufferSize);
+        }
+
+        destination[..OBJECT_INTERNAL_RECORD_SIZE].fill(0);
+        write_u64(destination, 0, self.upper_bound.object_id);
+        write_u32(destination, 8, self.upper_bound.kind as u32);
+        write_u64(destination, 16, self.upper_bound.offset);
+        write_u64(destination, 24, self.child_block);
+        write_u64(destination, 32, self.child_generation);
+        Ok(())
+    }
+
+    pub fn decode(source: &[u8]) -> Result<Self, PhoenixFsError> {
+        if source.len() < OBJECT_INTERNAL_RECORD_SIZE {
+            return Err(PhoenixFsError::InvalidObjectRecordSize);
+        }
+        if read_u32(source, 12) != 0 {
+            return Err(PhoenixFsError::InvalidReservedField);
+        }
+
+        let record = Self {
+            upper_bound: ObjectTreeKey {
+                object_id: read_u64(source, 0),
+                kind: ObjectRecordKind::from_raw(read_u32(source, 8))?,
+                offset: read_u64(source, 16),
+            },
+            child_block: read_u64(source, 24),
+            child_generation: read_u64(source, 32),
+        };
+        record.validate()?;
+        Ok(record)
+    }
+
+    fn validate(&self) -> Result<(), PhoenixFsError> {
+        self.upper_bound.validate()?;
+        if self.child_block < SUPERBLOCK_COPY_COUNT {
+            return Err(PhoenixFsError::InvalidChildBlock(self.child_block));
+        }
+        if self.child_generation == 0 {
+            return Err(PhoenixFsError::InvalidChildGeneration(
+                self.child_generation,
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub fn validate_object_internal(
+    block: &[u8],
+    total_blocks: u64,
+) -> Result<TreeNodeHeader, PhoenixFsError> {
+    let node = TreeNodeHeader::decode(block)?;
+    if node.metadata.kind != MetadataKind::ObjectTree || node.level == 0 {
+        return Err(PhoenixFsError::InvalidObjectInternalNode);
+    }
+
+    let expected_bytes = usize::try_from(node.item_count)
+        .ok()
+        .and_then(|count| count.checked_mul(OBJECT_INTERNAL_RECORD_SIZE))
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    if expected_bytes != node.entries_bytes as usize {
+        return Err(PhoenixFsError::InvalidTreeNodePayloadSize(
+            node.entries_bytes,
+        ));
+    }
+
+    let start = TreeNodeHeader::entries_offset();
+    let end = start
+        .checked_add(expected_bytes)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    if end > block.len() {
+        return Err(PhoenixFsError::InvalidTreeNodePayloadSize(
+            node.entries_bytes,
+        ));
+    }
+
+    let mut previous: Option<ObjectTreeKey> = None;
+    let mut cursor = start;
+    while cursor < end {
+        let record = ObjectInternalRecord::decode(&block[cursor..end])?;
+        if record.child_block >= total_blocks {
+            return Err(PhoenixFsError::InvalidChildBlock(record.child_block));
+        }
+        if record.child_generation > node.metadata.generation {
+            return Err(PhoenixFsError::InvalidChildGeneration(
+                record.child_generation,
+            ));
+        }
+        if previous.is_some_and(|key| key >= record.upper_bound) {
+            return Err(PhoenixFsError::ObjectRecordsOutOfOrder);
+        }
+
+        previous = Some(record.upper_bound);
+        cursor += OBJECT_INTERNAL_RECORD_SIZE;
+    }
+
+    Ok(node)
+}
+
+pub fn select_object_child(
+    block: &[u8],
+    total_blocks: u64,
+    key: ObjectTreeKey,
+) -> Result<ObjectInternalRecord, PhoenixFsError> {
+    key.validate()?;
+    let node = validate_object_internal(block, total_blocks)?;
+    let start = TreeNodeHeader::entries_offset();
+    let end = start + node.entries_bytes as usize;
+    let mut cursor = start;
+
+    while cursor < end {
+        let record = ObjectInternalRecord::decode(&block[cursor..end])?;
+        if key <= record.upper_bound {
+            return Ok(record);
+        }
+        cursor += OBJECT_INTERNAL_RECORD_SIZE;
+    }
+
+    Err(PhoenixFsError::ObjectKeyOutsideNode)
+}
+
+pub fn read_object_child<D: BlockDevice>(
+    device: &mut D,
+    parent: TreeNodeHeader,
+    reference: ObjectInternalRecord,
+    total_blocks: u64,
+    buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<TreeNodeHeader, PhoenixFsError> {
+    if parent.metadata.kind != MetadataKind::ObjectTree || parent.level == 0 {
+        return Err(PhoenixFsError::InvalidObjectInternalNode);
+    }
+    if reference.child_block >= total_blocks {
+        return Err(PhoenixFsError::InvalidChildBlock(reference.child_block));
+    }
+    if reference.child_generation > parent.metadata.generation {
+        return Err(PhoenixFsError::InvalidChildGeneration(
+            reference.child_generation,
+        ));
+    }
+
+    read_filesystem_block(device, reference.child_block, buffer)?;
+    let child = TreeNodeHeader::decode(buffer)?;
+
+    if child.metadata.kind != MetadataKind::ObjectTree {
+        return Err(PhoenixFsError::ChildIdentityMismatch);
+    }
+    if child.metadata.block_number != reference.child_block
+        || child.metadata.generation != reference.child_generation
+    {
+        return Err(PhoenixFsError::ChildIdentityMismatch);
+    }
+    if child.level.checked_add(1) != Some(parent.level) {
+        return Err(PhoenixFsError::InvalidChildLevel);
+    }
+
+    Ok(child)
+}
+
 fn align_up(value: usize, alignment: usize) -> Result<usize, PhoenixFsError> {
     let mask = alignment
         .checked_sub(1)
@@ -950,6 +1140,124 @@ mod tests {
         assert_eq!(
             TreeNodeHeader::new(MetadataKind::ObjectTree, 2, 4, 0, 1, 0),
             Err(PhoenixFsError::InvalidTreeNodeItemCount)
+        );
+    }
+
+    #[test]
+    fn object_internal_record_round_trip_preserves_child_identity() {
+        let record = ObjectInternalRecord::new(
+            ObjectTreeKey::new(12, ObjectRecordKind::Extent, 8192),
+            7,
+            4,
+        )
+        .unwrap();
+        let mut encoded = [0_u8; OBJECT_INTERNAL_RECORD_SIZE];
+
+        record.encode(&mut encoded).unwrap();
+
+        assert_eq!(ObjectInternalRecord::decode(&encoded), Ok(record));
+    }
+
+    #[test]
+    fn object_internal_selects_first_matching_upper_bound() {
+        let first = ObjectInternalRecord::new(
+            ObjectTreeKey::new(10, ObjectRecordKind::Extent, 4096),
+            4,
+            2,
+        )
+        .unwrap();
+        let second = ObjectInternalRecord::new(
+            ObjectTreeKey::new(20, ObjectRecordKind::Extent, 4096),
+            5,
+            2,
+        )
+        .unwrap();
+        let mut block = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let start = TreeNodeHeader::entries_offset();
+        first
+            .encode(&mut block[start..start + OBJECT_INTERNAL_RECORD_SIZE])
+            .unwrap();
+        second
+            .encode(
+                &mut block[start + OBJECT_INTERNAL_RECORD_SIZE
+                    ..start + OBJECT_INTERNAL_RECORD_SIZE * 2],
+            )
+            .unwrap();
+
+        let node = TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            3,
+            6,
+            1,
+            2,
+            (OBJECT_INTERNAL_RECORD_SIZE * 2) as u32,
+        )
+        .unwrap();
+        node.seal(&mut block).unwrap();
+
+        let target = ObjectTreeKey::new(15, ObjectRecordKind::Metadata, 0);
+        assert_eq!(select_object_child(&block, 8, target), Ok(second));
+    }
+
+    #[test]
+    fn object_internal_rejects_future_child_generation() {
+        let record = ObjectInternalRecord::new(
+            ObjectTreeKey::new(10, ObjectRecordKind::Metadata, 0),
+            4,
+            9,
+        )
+        .unwrap();
+        let mut block = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let start = TreeNodeHeader::entries_offset();
+        record
+            .encode(&mut block[start..start + OBJECT_INTERNAL_RECORD_SIZE])
+            .unwrap();
+
+        let node = TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            8,
+            6,
+            1,
+            1,
+            OBJECT_INTERNAL_RECORD_SIZE as u32,
+        )
+        .unwrap();
+        node.seal(&mut block).unwrap();
+
+        assert_eq!(
+            validate_object_internal(&block, 8),
+            Err(PhoenixFsError::InvalidChildGeneration(9))
+        );
+    }
+
+    #[test]
+    fn read_object_child_verifies_block_generation_and_level() {
+        let mut device = MemoryBlockDevice::<512, 96>::new();
+        let child_node = TreeNodeHeader::new(MetadataKind::ObjectTree, 4, 5, 0, 0, 0).unwrap();
+        let mut child_block = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        child_node.seal(&mut child_block).unwrap();
+        device.write_blocks(5 * 8, &child_block).unwrap();
+
+        let parent = TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            5,
+            6,
+            1,
+            1,
+            OBJECT_INTERNAL_RECORD_SIZE as u32,
+        )
+        .unwrap();
+        let reference = ObjectInternalRecord::new(
+            ObjectTreeKey::new(99, ObjectRecordKind::Extent, u64::MAX),
+            5,
+            4,
+        )
+        .unwrap();
+        let mut read_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+
+        assert_eq!(
+            read_object_child(&mut device, parent, reference, 12, &mut read_buffer),
+            Ok(child_node)
         );
     }
 

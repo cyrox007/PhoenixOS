@@ -69,6 +69,9 @@ pub enum PhoenixFsError {
     InvalidRetiredBlock(u64),
     DuplicateRetiredBlock(u64),
     RetiredBlockStillReferenced(u64),
+    ObjectRecordNotFound,
+    InvalidReclaimedBlock(u64),
+    ReclaimedBlockAlreadyFree(u64),
     UnsupportedFeatures(u64),
     InvalidReservedField,
     ChecksumMismatch,
@@ -961,6 +964,351 @@ fn write_free_space_extent(
     extent.encode(&mut block[offset..end])
 }
 
+pub fn materialize_object_leaf_with_replaced_value(
+    current: &[u8],
+    destination: &mut [u8],
+    target_key: ObjectTreeKey,
+    new_value: &[u8],
+    new_generation: u64,
+    new_block_number: u64,
+) -> Result<TreeNodeHeader, PhoenixFsError> {
+    let current_node = validate_object_leaf(current)?;
+    validate_rewrite_target(current_node, new_generation, new_block_number)?;
+    target_key.validate()?;
+
+    let entries_start = TreeNodeHeader::entries_offset();
+    let entries_end = entries_start
+        .checked_add(current_node.entries_bytes as usize)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let value_bytes =
+        u32::try_from(new_value.len()).map_err(|_| PhoenixFsError::InvalidObjectRecordSize)?;
+
+    destination.fill(0);
+    let mut source_cursor = entries_start;
+    let mut destination_cursor = entries_start;
+    let mut replaced = false;
+
+    for _ in 0..current_node.item_count {
+        let (record, old_value, source_size) =
+            ObjectLeafRecordHeader::decode_with_value(&current[source_cursor..entries_end])?;
+        let value = if record.key == target_key {
+            replaced = true;
+            new_value
+        } else {
+            old_value
+        };
+        let bytes = if record.key == target_key {
+            value_bytes
+        } else {
+            record.value_bytes
+        };
+        let next_record = ObjectLeafRecordHeader::new(record.key, bytes)?;
+        let encoded_size = next_record.encoded_size()?;
+        let destination_end = destination_cursor
+            .checked_add(encoded_size)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+        if destination_end > destination.len() {
+            return Err(PhoenixFsError::BufferSize);
+        }
+
+        next_record
+            .encode_with_value(&mut destination[destination_cursor..destination_end], value)?;
+        source_cursor = source_cursor
+            .checked_add(source_size)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+        destination_cursor = destination_end;
+    }
+
+    if !replaced {
+        return Err(PhoenixFsError::ObjectRecordNotFound);
+    }
+
+    let entries_bytes = destination_cursor
+        .checked_sub(entries_start)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let entries_bytes =
+        u32::try_from(entries_bytes).map_err(|_| PhoenixFsError::InvalidObjectRecordSize)?;
+    let next = TreeNodeHeader::new(
+        MetadataKind::ObjectTree,
+        new_generation,
+        new_block_number,
+        0,
+        current_node.item_count,
+        entries_bytes,
+    )?;
+    next.seal(destination)?;
+    validate_object_leaf(destination)?;
+    Ok(next)
+}
+
+pub fn materialize_free_space_leaf_with_reclaimed_blocks(
+    current: &[u8],
+    destination: &mut [u8],
+    total_blocks: u64,
+    new_generation: u64,
+    new_block_number: u64,
+    reclaimed_blocks: &[u64],
+) -> Result<TreeNodeHeader, PhoenixFsError> {
+    let current_node = validate_free_space_leaf(current, total_blocks)?;
+    if destination.len() != FILESYSTEM_BLOCK_SIZE {
+        return Err(PhoenixFsError::BufferSize);
+    }
+    if new_generation <= current_node.metadata.generation {
+        return Err(PhoenixFsError::GenerationSequence);
+    }
+    if new_block_number < SUPERBLOCK_COPY_COUNT || new_block_number >= total_blocks {
+        return Err(PhoenixFsError::InvalidMetadataBlock(new_block_number));
+    }
+
+    validate_reclaimed_input(reclaimed_blocks, total_blocks, new_block_number)?;
+
+    destination.fill(0);
+    let entries_start = TreeNodeHeader::entries_offset();
+    let entries_bytes = current_node.entries_bytes as usize;
+    let entries_end = entries_start
+        .checked_add(entries_bytes)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    destination[entries_start..entries_end].copy_from_slice(&current[entries_start..entries_end]);
+
+    let mut item_count = current_node.item_count as usize;
+    for block in reclaimed_blocks.iter().copied() {
+        insert_reclaimed_block(destination, &mut item_count, block)?;
+    }
+
+    let entries_bytes = item_count
+        .checked_mul(FREE_SPACE_RECORD_SIZE)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let next = TreeNodeHeader::new(
+        MetadataKind::FreeSpaceTree,
+        new_generation,
+        new_block_number,
+        0,
+        item_count as u32,
+        entries_bytes as u32,
+    )?;
+    next.seal(destination)?;
+    validate_free_space_leaf(destination, total_blocks)?;
+    Ok(next)
+}
+
+fn validate_reclaimed_input(
+    reclaimed_blocks: &[u64],
+    total_blocks: u64,
+    new_block_number: u64,
+) -> Result<(), PhoenixFsError> {
+    let mut previous = None;
+    for block in reclaimed_blocks.iter().copied() {
+        if block < SUPERBLOCK_COPY_COUNT || block >= total_blocks || block == new_block_number {
+            return Err(PhoenixFsError::InvalidReclaimedBlock(block));
+        }
+        if previous.is_some_and(|value| value >= block) {
+            return Err(PhoenixFsError::InvalidReclaimedBlock(block));
+        }
+        previous = Some(block);
+    }
+    Ok(())
+}
+
+fn insert_reclaimed_block(
+    block: &mut [u8],
+    item_count: &mut usize,
+    reclaimed: u64,
+) -> Result<(), PhoenixFsError> {
+    let mut index = 0_usize;
+    while index < *item_count {
+        let extent = free_space_extent_at(block, index)?;
+        let end = extent.end_block_exclusive()?;
+        if reclaimed >= extent.start_block && reclaimed < end {
+            return Err(PhoenixFsError::ReclaimedBlockAlreadyFree(reclaimed));
+        }
+        if reclaimed < extent.start_block {
+            break;
+        }
+        index += 1;
+    }
+
+    let previous = if index == 0 {
+        None
+    } else {
+        Some(free_space_extent_at(block, index - 1)?)
+    };
+    let next = if index == *item_count {
+        None
+    } else {
+        Some(free_space_extent_at(block, index)?)
+    };
+
+    let joins_previous = match previous {
+        Some(extent) => extent.end_block_exclusive()? == reclaimed,
+        None => false,
+    };
+    let joins_next = next
+        .map(|extent| reclaimed.checked_add(1) == Some(extent.start_block))
+        .unwrap_or(false);
+
+    if joins_previous && joins_next {
+        let previous = previous.ok_or(PhoenixFsError::InvalidFreeSpaceRange)?;
+        let next = next.ok_or(PhoenixFsError::InvalidFreeSpaceRange)?;
+        let next_end = next.end_block_exclusive()?;
+        let merged_count = next_end
+            .checked_sub(previous.start_block)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+        let merged = FreeSpaceExtent::new(previous.start_block, merged_count);
+        write_free_space_extent(block, index - 1, merged)?;
+        remove_free_space_extent(block, item_count, index)?;
+        return Ok(());
+    }
+
+    if joins_previous {
+        let previous = previous.ok_or(PhoenixFsError::InvalidFreeSpaceRange)?;
+        let block_count = previous
+            .block_count
+            .checked_add(1)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+        let merged = FreeSpaceExtent::new(previous.start_block, block_count);
+        return write_free_space_extent(block, index - 1, merged);
+    }
+
+    if joins_next {
+        let next = next.ok_or(PhoenixFsError::InvalidFreeSpaceRange)?;
+        let block_count = next
+            .block_count
+            .checked_add(1)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+        let merged = FreeSpaceExtent::new(reclaimed, block_count);
+        return write_free_space_extent(block, index, merged);
+    }
+
+    insert_free_space_extent(block, item_count, index, FreeSpaceExtent::new(reclaimed, 1))
+}
+
+fn insert_free_space_extent(
+    block: &mut [u8],
+    item_count: &mut usize,
+    index: usize,
+    extent: FreeSpaceExtent,
+) -> Result<(), PhoenixFsError> {
+    let start = TreeNodeHeader::entries_offset();
+    let used_bytes = item_count
+        .checked_mul(FREE_SPACE_RECORD_SIZE)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let new_used_bytes = used_bytes
+        .checked_add(FREE_SPACE_RECORD_SIZE)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    if start + new_used_bytes > block.len() {
+        return Err(PhoenixFsError::BufferSize);
+    }
+
+    let insert_offset = start + index * FREE_SPACE_RECORD_SIZE;
+    let used_end = start + used_bytes;
+    block.copy_within(
+        insert_offset..used_end,
+        insert_offset + FREE_SPACE_RECORD_SIZE,
+    );
+    *item_count += 1;
+    write_free_space_extent(block, index, extent)
+}
+
+fn remove_free_space_extent(
+    block: &mut [u8],
+    item_count: &mut usize,
+    index: usize,
+) -> Result<(), PhoenixFsError> {
+    if index >= *item_count {
+        return Err(PhoenixFsError::InvalidFreeSpaceRecordSize);
+    }
+
+    let start = TreeNodeHeader::entries_offset();
+    let remove_offset = start + index * FREE_SPACE_RECORD_SIZE;
+    let used_end = start + *item_count * FREE_SPACE_RECORD_SIZE;
+    let next_offset = remove_offset + FREE_SPACE_RECORD_SIZE;
+    block.copy_within(next_offset..used_end, remove_offset);
+    block[used_end - FREE_SPACE_RECORD_SIZE..used_end].fill(0);
+    *item_count -= 1;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RootLeafUpdateResult {
+    pub active: ActiveSuperblock,
+    pub retired_blocks: [u64; 2],
+    pub allocated: FreeSpaceExtent,
+}
+
+pub fn commit_root_leaf_record_update<D: BlockDevice>(
+    device: &mut D,
+    current: ActiveSuperblock,
+    target_key: ObjectTreeKey,
+    new_value: &[u8],
+    current_object: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    current_free_space: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    next_object: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    next_free_space: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    superblock_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<RootLeafUpdateResult, PhoenixFsError> {
+    let total_blocks = current.superblock.total_blocks;
+    read_filesystem_block(device, current.superblock.roots.object_tree, current_object)?;
+    read_filesystem_block(
+        device,
+        current.superblock.roots.free_space_tree,
+        current_free_space,
+    )?;
+
+    let object_node = validate_object_leaf(current_object)?;
+    let free_node = validate_free_space_leaf(current_free_space, total_blocks)?;
+    if object_node.metadata.block_number != current.superblock.roots.object_tree {
+        return Err(PhoenixFsError::InvalidTransactionRoots);
+    }
+    if free_node.metadata.block_number != current.superblock.roots.free_space_tree {
+        return Err(PhoenixFsError::InvalidTransactionRoots);
+    }
+
+    let generation = current
+        .superblock
+        .generation
+        .checked_add(1)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let allocation = plan_cow_allocation(current_free_space, total_blocks, 2)?;
+    let object_block = allocation.allocated.start_block;
+    let free_space_block = object_block
+        .checked_add(1)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+
+    materialize_object_leaf_with_replaced_value(
+        current_object,
+        next_object,
+        target_key,
+        new_value,
+        generation,
+        object_block,
+    )?;
+    materialize_free_space_leaf_after_allocation(
+        current_free_space,
+        next_free_space,
+        total_blocks,
+        generation,
+        free_space_block,
+        allocation,
+    )?;
+
+    write_filesystem_block(device, object_block, next_object)?;
+    write_filesystem_block(device, free_space_block, next_free_space)?;
+
+    let retired_blocks = [
+        current.superblock.roots.object_tree,
+        current.superblock.roots.free_space_tree,
+    ];
+    let roots = TransactionRoots::new(object_block, free_space_block);
+    let plan = TransactionCommitPlan::new(current, roots, &retired_blocks)?;
+    let committed = commit_transaction(device, current, plan, superblock_buffer)?;
+
+    Ok(RootLeafUpdateResult {
+        active: committed.active,
+        retired_blocks,
+        allocated: allocation.allocated,
+    })
+}
+
 pub fn materialize_object_leaf_copy(
     current: &[u8],
     destination: &mut [u8],
@@ -1562,6 +1910,196 @@ mod tests {
     }
 
     #[test]
+    fn object_leaf_replacement_changes_only_target_value() {
+        let first_key = ObjectTreeKey::new(1, ObjectRecordKind::Metadata, 0);
+        let second_key = ObjectTreeKey::new(2, ObjectRecordKind::Metadata, 0);
+        let first = ObjectLeafRecordHeader::new(first_key, 3).unwrap();
+        let second = ObjectLeafRecordHeader::new(second_key, 3).unwrap();
+        let mut current = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let start = TreeNodeHeader::entries_offset();
+        let mut cursor = start;
+        cursor += first
+            .encode_with_value(&mut current[cursor..], b"one")
+            .unwrap();
+        cursor += second
+            .encode_with_value(&mut current[cursor..], b"two")
+            .unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            4,
+            8,
+            0,
+            2,
+            (cursor - start) as u32,
+        )
+        .unwrap()
+        .seal(&mut current)
+        .unwrap();
+
+        let mut next = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        materialize_object_leaf_with_replaced_value(
+            &current, &mut next, second_key, b"updated", 6, 20,
+        )
+        .unwrap();
+
+        let (_, first_value, first_size) =
+            ObjectLeafRecordHeader::decode_with_value(&next[start..]).unwrap();
+        let (_, second_value, _) =
+            ObjectLeafRecordHeader::decode_with_value(&next[start + first_size..]).unwrap();
+
+        assert_eq!(first_value, b"one");
+        assert_eq!(second_value, b"updated");
+    }
+
+    #[test]
+    fn reclaimed_blocks_merge_adjacent_free_ranges() {
+        let mut current = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        write_free_space_extent(&mut current, 0, FreeSpaceExtent::new(10, 2)).unwrap();
+        write_free_space_extent(&mut current, 1, FreeSpaceExtent::new(14, 2)).unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::FreeSpaceTree,
+            6,
+            7,
+            0,
+            2,
+            (2 * FREE_SPACE_RECORD_SIZE) as u32,
+        )
+        .unwrap()
+        .seal(&mut current)
+        .unwrap();
+
+        let mut next = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        materialize_free_space_leaf_with_reclaimed_blocks(
+            &current,
+            &mut next,
+            64,
+            8,
+            30,
+            &[12, 13],
+        )
+        .unwrap();
+
+        let node = validate_free_space_leaf(&next, 64).unwrap();
+        assert_eq!(node.item_count, 1);
+        assert_eq!(
+            free_space_extent_at(&next, 0).unwrap(),
+            FreeSpaceExtent::new(10, 6)
+        );
+    }
+
+    #[test]
+    fn reclaimed_block_cannot_already_be_free() {
+        let mut current = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        write_free_space_extent(&mut current, 0, FreeSpaceExtent::new(10, 4)).unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::FreeSpaceTree,
+            6,
+            7,
+            0,
+            1,
+            FREE_SPACE_RECORD_SIZE as u32,
+        )
+        .unwrap()
+        .seal(&mut current)
+        .unwrap();
+
+        let mut next = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        assert_eq!(
+            materialize_free_space_leaf_with_reclaimed_blocks(
+                &current,
+                &mut next,
+                64,
+                8,
+                30,
+                &[12],
+            ),
+            Err(PhoenixFsError::ReclaimedBlockAlreadyFree(12))
+        );
+    }
+
+    #[test]
+    fn root_leaf_update_commits_new_roots_and_preserves_old_blocks() {
+        let mut device = MemoryBlockDevice::<512, 512>::new();
+        let current = ActiveSuperblock {
+            superblock: Superblock::new(5, 64, VOLUME_ID, TransactionRoots::new(8, 9)).unwrap(),
+            slot: SuperblockSlot::First,
+        };
+        let key = ObjectTreeKey::new(7, ObjectRecordKind::Metadata, 0);
+
+        let mut object_root = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let start = TreeNodeHeader::entries_offset();
+        let record = ObjectLeafRecordHeader::new(key, 3).unwrap();
+        let object_bytes = record
+            .encode_with_value(&mut object_root[start..], b"old")
+            .unwrap();
+        TreeNodeHeader::new(MetadataKind::ObjectTree, 3, 8, 0, 1, object_bytes as u32)
+            .unwrap()
+            .seal(&mut object_root)
+            .unwrap();
+
+        let mut free_root = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        write_free_space_extent(&mut free_root, 0, FreeSpaceExtent::new(20, 10)).unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::FreeSpaceTree,
+            5,
+            9,
+            0,
+            1,
+            FREE_SPACE_RECORD_SIZE as u32,
+        )
+        .unwrap()
+        .seal(&mut free_root)
+        .unwrap();
+
+        write_filesystem_block(&mut device, 8, &object_root).unwrap();
+        write_filesystem_block(&mut device, 9, &free_root).unwrap();
+
+        let old_object = object_root;
+        let mut current_object = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut current_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut next_object = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut next_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut superblock_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+
+        let result = commit_root_leaf_record_update(
+            &mut device,
+            current,
+            key,
+            b"new-value",
+            &mut current_object,
+            &mut current_free,
+            &mut next_object,
+            &mut next_free,
+            &mut superblock_buffer,
+        )
+        .unwrap();
+
+        assert_eq!(result.active.superblock.generation, 6);
+        assert_eq!(
+            result.active.superblock.roots,
+            TransactionRoots::new(20, 21)
+        );
+        assert_eq!(result.retired_blocks, [8, 9]);
+
+        let mut persisted_object = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        read_filesystem_block(&mut device, 20, &mut persisted_object).unwrap();
+        let (_, value, _) =
+            ObjectLeafRecordHeader::decode_with_value(&persisted_object[start..]).unwrap();
+        assert_eq!(value, b"new-value");
+
+        let mut persisted_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        read_filesystem_block(&mut device, 21, &mut persisted_free).unwrap();
+        assert_eq!(
+            free_space_extent_at(&persisted_free, 0).unwrap(),
+            FreeSpaceExtent::new(22, 8)
+        );
+
+        let mut unchanged_old_object = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        read_filesystem_block(&mut device, 8, &mut unchanged_old_object).unwrap();
+        assert_eq!(unchanged_old_object, old_object);
+    }
+
+    #[test]
     fn object_leaf_copy_moves_node_to_next_generation() {
         let key = ObjectTreeKey::new(4, ObjectRecordKind::Metadata, 0);
         let record = ObjectLeafRecordHeader::new(key, 3).unwrap();
@@ -1581,26 +2119,6 @@ mod tests {
         assert_eq!(node.metadata.generation, 6);
         assert_eq!(node.metadata.block_number, 20);
         assert_eq!(&next[start..start + size], &current[start..start + size]);
-    }
-
-    #[test]
-    fn object_leaf_copy_accepts_older_shared_generation() {
-        let key = ObjectTreeKey::new(4, ObjectRecordKind::Metadata, 0);
-        let record = ObjectLeafRecordHeader::new(key, 1).unwrap();
-        let mut current = [0_u8; FILESYSTEM_BLOCK_SIZE];
-        let start = TreeNodeHeader::entries_offset();
-        let size = record
-            .encode_with_value(&mut current[start..], b"x")
-            .unwrap();
-        TreeNodeHeader::new(MetadataKind::ObjectTree, 2, 8, 0, 1, size as u32)
-            .unwrap()
-            .seal(&mut current)
-            .unwrap();
-
-        let mut next = [0_u8; FILESYSTEM_BLOCK_SIZE];
-        let node = materialize_object_leaf_copy(&current, &mut next, 6, 20).unwrap();
-
-        assert_eq!(node.metadata.generation, 6);
     }
 
     #[test]
@@ -1779,6 +2297,31 @@ mod tests {
             free_space_extent_at(&next, 0).unwrap(),
             FreeSpaceExtent::new(13, 7)
         );
+    }
+
+    #[test]
+    fn free_space_copy_accepts_older_shared_generation() {
+        let mut current = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        write_free_space_extent(&mut current, 0, FreeSpaceExtent::new(10, 8)).unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::FreeSpaceTree,
+            2,
+            7,
+            0,
+            1,
+            FREE_SPACE_RECORD_SIZE as u32,
+        )
+        .unwrap()
+        .seal(&mut current)
+        .unwrap();
+
+        let plan = plan_cow_allocation(&current, 64, 2).unwrap();
+        let mut next = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let node =
+            materialize_free_space_leaf_after_allocation(&current, &mut next, 64, 6, 10, plan)
+                .unwrap();
+
+        assert_eq!(node.metadata.generation, 6);
     }
 
     #[test]

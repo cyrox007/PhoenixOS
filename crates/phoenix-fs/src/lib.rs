@@ -1047,12 +1047,7 @@ fn validate_rewrite_target(
     new_generation: u64,
     new_block_number: u64,
 ) -> Result<(), PhoenixFsError> {
-    let expected_generation = current
-        .metadata
-        .generation
-        .checked_add(1)
-        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
-    if new_generation != expected_generation {
+    if new_generation <= current.metadata.generation {
         return Err(PhoenixFsError::GenerationSequence);
     }
     if new_block_number < SUPERBLOCK_COPY_COUNT || new_block_number == current.metadata.block_number
@@ -1586,6 +1581,26 @@ mod tests {
         assert_eq!(node.metadata.generation, 6);
         assert_eq!(node.metadata.block_number, 20);
         assert_eq!(&next[start..start + size], &current[start..start + size]);
+    }
+
+    #[test]
+    fn object_leaf_copy_accepts_older_shared_generation() {
+        let key = ObjectTreeKey::new(4, ObjectRecordKind::Metadata, 0);
+        let record = ObjectLeafRecordHeader::new(key, 1).unwrap();
+        let mut current = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let start = TreeNodeHeader::entries_offset();
+        let size = record
+            .encode_with_value(&mut current[start..], b"x")
+            .unwrap();
+        TreeNodeHeader::new(MetadataKind::ObjectTree, 2, 8, 0, 1, size as u32)
+            .unwrap()
+            .seal(&mut current)
+            .unwrap();
+
+        let mut next = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let node = materialize_object_leaf_copy(&current, &mut next, 6, 20).unwrap();
+
+        assert_eq!(node.metadata.generation, 6);
     }
 
     #[test]

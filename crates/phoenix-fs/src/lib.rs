@@ -99,6 +99,9 @@ pub enum PhoenixFsError {
     InvalidReadRange,
     DirectoryEntryNotFound,
     ParentNotDirectory,
+    ObjectNotEmpty,
+    CannotRemoveRootObject,
+    DirectoryEntryTargetMismatch,
     UnsupportedFeatures(u64),
     InvalidReservedField,
     ChecksumMismatch,
@@ -833,6 +836,38 @@ pub fn lookup_directory_entry<D: BlockDevice>(
     )?;
 
     result.ok_or(PhoenixFsError::DirectoryEntryNotFound)
+}
+
+fn ensure_object_has_no_payload_records<D: BlockDevice>(
+    device: &mut D,
+    root_block: u64,
+    object_id: u64,
+    maximum_generation: u64,
+    node_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<(), PhoenixFsError> {
+    if object_id == 0 {
+        return Err(PhoenixFsError::InvalidObjectId);
+    }
+
+    let mut has_payload = false;
+    scan_object_tree_records(
+        device,
+        root_block,
+        maximum_generation,
+        node_buffer,
+        |key, _| {
+            if key.object_id == object_id && key.kind != ObjectRecordKind::Metadata {
+                has_payload = true;
+                return Ok(true);
+            }
+            Ok(false)
+        },
+    )?;
+
+    if has_payload {
+        return Err(PhoenixFsError::ObjectNotEmpty);
+    }
+    Ok(())
 }
 
 pub fn read_file_range<D: BlockDevice>(

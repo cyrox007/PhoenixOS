@@ -6763,6 +6763,158 @@ mod tests {
     }
 
     #[test]
+    fn deleting_last_leaf_record_prunes_single_child_parent_chain() {
+        let mut device = MemoryBlockDevice::<512, 512>::new();
+        let current = ActiveSuperblock {
+            superblock: Superblock::new(5, 64, VOLUME_ID, TransactionRoots::new(8, 9)).unwrap(),
+            slot: SuperblockSlot::First,
+        };
+
+        let target_key = ObjectTreeKey::new(1, ObjectRecordKind::Metadata, 0);
+        let sibling_key = ObjectTreeKey::new(100, ObjectRecordKind::Metadata, 0);
+        let start = TreeNodeHeader::entries_offset();
+
+        let mut target_leaf = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let target_size = ObjectLeafRecordHeader::new(target_key, 1)
+            .unwrap()
+            .encode_with_value(&mut target_leaf[start..], b"a")
+            .unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            3,
+            11,
+            0,
+            1,
+            target_size as u32,
+        )
+        .unwrap()
+        .seal(&mut target_leaf)
+        .unwrap();
+
+        let mut target_parent = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        ObjectInternalRecord::new(target_key, 11)
+            .unwrap()
+            .encode(&mut target_parent[start..start + OBJECT_INTERNAL_RECORD_SIZE])
+            .unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            4,
+            10,
+            1,
+            1,
+            OBJECT_INTERNAL_RECORD_SIZE as u32,
+        )
+        .unwrap()
+        .seal(&mut target_parent)
+        .unwrap();
+
+        let mut sibling_leaf = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let sibling_size = ObjectLeafRecordHeader::new(sibling_key, 1)
+            .unwrap()
+            .encode_with_value(&mut sibling_leaf[start..], b"b")
+            .unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            3,
+            14,
+            0,
+            1,
+            sibling_size as u32,
+        )
+        .unwrap()
+        .seal(&mut sibling_leaf)
+        .unwrap();
+
+        let mut sibling_parent = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        ObjectInternalRecord::new(sibling_key, 14)
+            .unwrap()
+            .encode(&mut sibling_parent[start..start + OBJECT_INTERNAL_RECORD_SIZE])
+            .unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            4,
+            13,
+            1,
+            1,
+            OBJECT_INTERNAL_RECORD_SIZE as u32,
+        )
+        .unwrap()
+        .seal(&mut sibling_parent)
+        .unwrap();
+
+        let mut root = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        ObjectInternalRecord::new(target_key, 10)
+            .unwrap()
+            .encode(&mut root[start..start + OBJECT_INTERNAL_RECORD_SIZE])
+            .unwrap();
+        ObjectInternalRecord::new(sibling_key, 13)
+            .unwrap()
+            .encode(
+                &mut root[start + OBJECT_INTERNAL_RECORD_SIZE
+                    ..start + 2 * OBJECT_INTERNAL_RECORD_SIZE],
+            )
+            .unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            5,
+            8,
+            2,
+            2,
+            (2 * OBJECT_INTERNAL_RECORD_SIZE) as u32,
+        )
+        .unwrap()
+        .seal(&mut root)
+        .unwrap();
+
+        let mut free_root = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        write_free_space_extent(&mut free_root, 0, FreeSpaceExtent::new(20, 40)).unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::FreeSpaceTree,
+            5,
+            9,
+            0,
+            1,
+            FREE_SPACE_RECORD_SIZE as u32,
+        )
+        .unwrap()
+        .seal(&mut free_root)
+        .unwrap();
+
+        write_filesystem_block(&mut device, 8, &root).unwrap();
+        write_filesystem_block(&mut device, 9, &free_root).unwrap();
+        write_filesystem_block(&mut device, 10, &target_parent).unwrap();
+        write_filesystem_block(&mut device, 11, &target_leaf).unwrap();
+        write_filesystem_block(&mut device, 13, &sibling_parent).unwrap();
+        write_filesystem_block(&mut device, 14, &sibling_leaf).unwrap();
+
+        let mut object_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut object_copy = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut current_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut next_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut superblock_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+
+        let result = commit_object_record_delete(
+            &mut device,
+            current,
+            target_key,
+            &mut object_buffer,
+            &mut object_copy,
+            &mut current_free,
+            &mut next_free,
+            &mut superblock_buffer,
+        )
+        .unwrap();
+
+        assert_eq!(result.active.superblock.roots.object_tree, 13);
+        let mut new_root = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        read_filesystem_block(&mut device, 13, &mut new_root).unwrap();
+        let root_node = validate_object_internal(&new_root).unwrap();
+        assert_eq!(root_node.level, 1);
+        assert_eq!(root_node.item_count, 1);
+        assert_eq!(object_internal_record_at(&new_root, 0).unwrap().child_block, 14);
+    }
+
+    #[test]
     fn deleting_last_leaf_record_collapses_two_child_root() {
         let mut device = MemoryBlockDevice::<512, 1024>::new();
         let current = ActiveSuperblock {

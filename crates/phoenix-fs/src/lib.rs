@@ -64,6 +64,11 @@ pub enum PhoenixFsError {
     NoFreeSpace,
     StaleAllocationPlan,
     AllocationTargetOutsideRange,
+    InvalidObjectRewriteTarget,
+    InvalidTransactionRoots,
+    InvalidRetiredBlock(u64),
+    DuplicateRetiredBlock(u64),
+    RetiredBlockStillReferenced(u64),
     UnsupportedFeatures(u64),
     InvalidReservedField,
     ChecksumMismatch,
@@ -956,6 +961,191 @@ fn write_free_space_extent(
     extent.encode(&mut block[offset..end])
 }
 
+pub fn materialize_object_leaf_copy(
+    current: &[u8],
+    destination: &mut [u8],
+    new_generation: u64,
+    new_block_number: u64,
+) -> Result<TreeNodeHeader, PhoenixFsError> {
+    let current_node = validate_object_leaf(current)?;
+    validate_rewrite_target(current_node, new_generation, new_block_number)?;
+
+    destination.fill(0);
+    let start = TreeNodeHeader::entries_offset();
+    let entries_bytes = current_node.entries_bytes as usize;
+    let end = start
+        .checked_add(entries_bytes)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    destination[start..end].copy_from_slice(&current[start..end]);
+
+    let next = TreeNodeHeader::new(
+        MetadataKind::ObjectTree,
+        new_generation,
+        new_block_number,
+        0,
+        current_node.item_count,
+        current_node.entries_bytes,
+    )?;
+    next.seal(destination)?;
+    validate_object_leaf(destination)?;
+    Ok(next)
+}
+
+pub fn materialize_object_internal_after_child_copy(
+    current: &[u8],
+    destination: &mut [u8],
+    new_generation: u64,
+    new_block_number: u64,
+    child_index: usize,
+    new_child_block: u64,
+    new_child_first_key: ObjectTreeKey,
+) -> Result<TreeNodeHeader, PhoenixFsError> {
+    let current_node = validate_object_internal(current)?;
+    validate_rewrite_target(current_node, new_generation, new_block_number)?;
+
+    if child_index >= current_node.item_count as usize {
+        return Err(PhoenixFsError::InvalidObjectRewriteTarget);
+    }
+    validate_object_child_block(new_child_block)?;
+    if new_child_block == new_block_number {
+        return Err(PhoenixFsError::InvalidObjectRewriteTarget);
+    }
+
+    destination.fill(0);
+    let start = TreeNodeHeader::entries_offset();
+    let entries_bytes = current_node.entries_bytes as usize;
+    let end = start
+        .checked_add(entries_bytes)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    destination[start..end].copy_from_slice(&current[start..end]);
+
+    let record_offset = start
+        .checked_add(
+            child_index
+                .checked_mul(OBJECT_INTERNAL_RECORD_SIZE)
+                .ok_or(PhoenixFsError::ArithmeticOverflow)?,
+        )
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    ObjectInternalRecord::new(new_child_first_key, new_child_block)?.encode(
+        &mut destination[record_offset..record_offset + OBJECT_INTERNAL_RECORD_SIZE],
+    )?;
+
+    let next = TreeNodeHeader::new(
+        MetadataKind::ObjectTree,
+        new_generation,
+        new_block_number,
+        current_node.level,
+        current_node.item_count,
+        current_node.entries_bytes,
+    )?;
+    next.seal(destination)?;
+    validate_object_internal(destination)?;
+    Ok(next)
+}
+
+fn validate_rewrite_target(
+    current: TreeNodeHeader,
+    new_generation: u64,
+    new_block_number: u64,
+) -> Result<(), PhoenixFsError> {
+    let expected_generation = current
+        .metadata
+        .generation
+        .checked_add(1)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    if new_generation != expected_generation {
+        return Err(PhoenixFsError::GenerationSequence);
+    }
+    if new_block_number < SUPERBLOCK_COPY_COUNT
+        || new_block_number == current.metadata.block_number
+    {
+        return Err(PhoenixFsError::InvalidObjectRewriteTarget);
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransactionCommitPlan<'a> {
+    pub next: Superblock,
+    pub retired_blocks: &'a [u64],
+}
+
+impl<'a> TransactionCommitPlan<'a> {
+    pub fn new(
+        current: ActiveSuperblock,
+        roots: TransactionRoots,
+        retired_blocks: &'a [u64],
+    ) -> Result<Self, PhoenixFsError> {
+        roots.validate(current.superblock.total_blocks)?;
+
+        let next_generation = current
+            .superblock
+            .generation
+            .checked_add(1)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+        let next = Superblock {
+            generation: next_generation,
+            total_blocks: current.superblock.total_blocks,
+            volume_id: current.superblock.volume_id,
+            incompatible_features: current.superblock.incompatible_features,
+            roots,
+        };
+        next.validate()?;
+        validate_retired_blocks(next, retired_blocks)?;
+
+        Ok(Self {
+            next,
+            retired_blocks,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommittedTransaction<'a> {
+    pub active: ActiveSuperblock,
+    retired_blocks: &'a [u64],
+}
+
+impl<'a> CommittedTransaction<'a> {
+    pub const fn retired_blocks(&self) -> &'a [u64] {
+        self.retired_blocks
+    }
+}
+
+pub fn commit_transaction<'a, D: BlockDevice>(
+    device: &mut D,
+    current: ActiveSuperblock,
+    plan: TransactionCommitPlan<'a>,
+    buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<CommittedTransaction<'a>, PhoenixFsError> {
+    validate_retired_blocks(plan.next, plan.retired_blocks)?;
+    device.flush()?;
+    let active = commit_next_superblock(device, current, plan.next, buffer)?;
+
+    Ok(CommittedTransaction {
+        active,
+        retired_blocks: plan.retired_blocks,
+    })
+}
+
+fn validate_retired_blocks(
+    next: Superblock,
+    retired_blocks: &[u64],
+) -> Result<(), PhoenixFsError> {
+    for (index, block) in retired_blocks.iter().copied().enumerate() {
+        if block < SUPERBLOCK_COPY_COUNT || block >= next.total_blocks {
+            return Err(PhoenixFsError::InvalidRetiredBlock(block));
+        }
+        if block == next.roots.object_tree || block == next.roots.free_space_tree {
+            return Err(PhoenixFsError::RetiredBlockStillReferenced(block));
+        }
+        if retired_blocks[..index].contains(&block) {
+            return Err(PhoenixFsError::DuplicateRetiredBlock(block));
+        }
+    }
+    Ok(())
+}
+
 fn align_up(value: usize, alignment: usize) -> Result<usize, PhoenixFsError> {
     let mask = alignment
         .checked_sub(1)
@@ -1379,6 +1569,131 @@ mod tests {
             TreeNodeHeader::new(MetadataKind::ObjectTree, 2, 4, 0, 1, 0),
             Err(PhoenixFsError::InvalidTreeNodeItemCount)
         );
+    }
+
+    #[test]
+    fn object_leaf_copy_moves_node_to_next_generation() {
+        let key = ObjectTreeKey::new(4, ObjectRecordKind::Metadata, 0);
+        let record = ObjectLeafRecordHeader::new(key, 3).unwrap();
+        let mut current = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let start = TreeNodeHeader::entries_offset();
+        let size = record
+            .encode_with_value(&mut current[start..], b"abc")
+            .unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            5,
+            8,
+            0,
+            1,
+            size as u32,
+        )
+        .unwrap()
+        .seal(&mut current)
+        .unwrap();
+
+        let mut next = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let node = materialize_object_leaf_copy(&current, &mut next, 6, 20).unwrap();
+
+        assert_eq!(node.metadata.generation, 6);
+        assert_eq!(node.metadata.block_number, 20);
+        assert_eq!(&next[start..start + size], &current[start..start + size]);
+    }
+
+    #[test]
+    fn object_internal_copy_repoints_only_selected_child() {
+        let first_key = ObjectTreeKey::new(1, ObjectRecordKind::Metadata, 0);
+        let second_key = ObjectTreeKey::new(2, ObjectRecordKind::Metadata, 0);
+        let mut current = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let start = TreeNodeHeader::entries_offset();
+
+        ObjectInternalRecord::new(first_key, 30)
+            .unwrap()
+            .encode(&mut current[start..start + OBJECT_INTERNAL_RECORD_SIZE])
+            .unwrap();
+        ObjectInternalRecord::new(second_key, 31)
+            .unwrap()
+            .encode(
+                &mut current
+                    [start + OBJECT_INTERNAL_RECORD_SIZE..start + 2 * OBJECT_INTERNAL_RECORD_SIZE],
+            )
+            .unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            7,
+            12,
+            1,
+            2,
+            (2 * OBJECT_INTERNAL_RECORD_SIZE) as u32,
+        )
+        .unwrap()
+        .seal(&mut current)
+        .unwrap();
+
+        let mut next = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        materialize_object_internal_after_child_copy(
+            &current,
+            &mut next,
+            8,
+            40,
+            1,
+            50,
+            second_key,
+        )
+        .unwrap();
+
+        let first = ObjectInternalRecord::decode(
+            &next[start..start + OBJECT_INTERNAL_RECORD_SIZE],
+        )
+        .unwrap();
+        let second = ObjectInternalRecord::decode(
+            &next[start + OBJECT_INTERNAL_RECORD_SIZE..start + 2 * OBJECT_INTERNAL_RECORD_SIZE],
+        )
+        .unwrap();
+
+        assert_eq!(first.child_block, 30);
+        assert_eq!(second.child_block, 50);
+    }
+
+    #[test]
+    fn transaction_plan_rejects_new_root_in_retired_set() {
+        let current = ActiveSuperblock {
+            superblock: Superblock::new(5, 64, VOLUME_ID, TransactionRoots::new(8, 9)).unwrap(),
+            slot: SuperblockSlot::First,
+        };
+        let retired = [8, 20];
+
+        assert_eq!(
+            TransactionCommitPlan::new(
+                current,
+                TransactionRoots::new(20, 21),
+                &retired,
+            ),
+            Err(PhoenixFsError::RetiredBlockStillReferenced(20))
+        );
+    }
+
+    #[test]
+    fn committed_transaction_exposes_retired_blocks_only_after_commit() {
+        let mut device = MemoryBlockDevice::<{ FILESYSTEM_BLOCK_SIZE * 64 }>::new(512).unwrap();
+        let current = ActiveSuperblock {
+            superblock: Superblock::new(5, 64, VOLUME_ID, TransactionRoots::new(8, 9)).unwrap(),
+            slot: SuperblockSlot::First,
+        };
+        let retired = [8, 9];
+        let plan = TransactionCommitPlan::new(
+            current,
+            TransactionRoots::new(20, 21),
+            &retired,
+        )
+        .unwrap();
+        let mut buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+
+        let committed = commit_transaction(&mut device, current, plan, &mut buffer).unwrap();
+
+        assert_eq!(committed.active.superblock.generation, 6);
+        assert_eq!(committed.active.superblock.roots, TransactionRoots::new(20, 21));
+        assert_eq!(committed.retired_blocks(), &retired);
     }
 
     #[test]

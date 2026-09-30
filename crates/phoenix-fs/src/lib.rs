@@ -97,6 +97,7 @@ pub enum PhoenixFsError {
     InvalidExtent,
     InvalidReadRange,
     DirectoryEntryNotFound,
+    ParentNotDirectory,
     UnsupportedFeatures(u64),
     InvalidReservedField,
     ChecksumMismatch,
@@ -1974,6 +1975,104 @@ pub fn commit_object_record_insertions<D: BlockDevice>(
         device,
         current,
         ObjectLeafMutation::InsertBatch { insertions },
+        object_buffer,
+        object_copy_buffer,
+        current_free_space,
+        next_free_space,
+        superblock_buffer,
+    )
+}
+
+pub fn commit_create_object<D: BlockDevice>(
+    device: &mut D,
+    current: ActiveSuperblock,
+    parent_object_id: u64,
+    entry_id: u64,
+    new_object_id: u64,
+    name: &str,
+    object_type: ObjectType,
+    timestamp_ns: u64,
+    object_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    object_copy_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    current_free_space: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    next_free_space: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    superblock_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<DeepRecordUpdateResult, PhoenixFsError> {
+    validate_directory_name(name)?;
+    if parent_object_id == 0 || new_object_id == 0 {
+        return Err(PhoenixFsError::InvalidObjectId);
+    }
+
+    let mut metadata_buffer = [0_u8; OBJECT_METADATA_VALUE_SIZE];
+    let parent_metadata = read_object_metadata(
+        device,
+        current.superblock.roots.object_tree,
+        parent_object_id,
+        current.superblock.generation,
+        object_buffer,
+        &mut metadata_buffer,
+    )?;
+    if parent_metadata.object_type != ObjectType::Directory {
+        return Err(PhoenixFsError::ParentNotDirectory);
+    }
+
+    match read_object_metadata(
+        device,
+        current.superblock.roots.object_tree,
+        new_object_id,
+        current.superblock.generation,
+        object_buffer,
+        &mut metadata_buffer,
+    ) {
+        Ok(_) => return Err(PhoenixFsError::ObjectRecordAlreadyExists),
+        Err(PhoenixFsError::ObjectRecordNotFound) => {}
+        Err(error) => return Err(error),
+    }
+
+    match lookup_directory_entry(
+        device,
+        current.superblock.roots.object_tree,
+        parent_object_id,
+        name,
+        current.superblock.generation,
+        object_buffer,
+    ) {
+        Ok(_) => return Err(PhoenixFsError::ObjectRecordAlreadyExists),
+        Err(PhoenixFsError::DirectoryEntryNotFound) => {}
+        Err(error) => return Err(error),
+    }
+
+    let metadata = ObjectMetadataValue::new(
+        object_type,
+        0,
+        timestamp_ns,
+        timestamp_ns,
+        timestamp_ns,
+    );
+    metadata.encode(&mut metadata_buffer)?;
+
+    let directory_entry = DirectoryEntryValue::new(new_object_id, object_type)?;
+    let mut directory_buffer =
+        [0_u8; DIRECTORY_ENTRY_VALUE_HEADER_SIZE + MAX_DIRECTORY_NAME_BYTES];
+    let directory_size = directory_entry.encode(name, &mut directory_buffer)?;
+
+    let metadata_key = ObjectTreeKey::new(new_object_id, ObjectRecordKind::Metadata, 0);
+    let directory_key =
+        ObjectTreeKey::new(parent_object_id, ObjectRecordKind::DirectoryEntry, entry_id);
+
+    let metadata_insert = ObjectLeafInsert::new(metadata_key, &metadata_buffer);
+    let directory_insert =
+        ObjectLeafInsert::new(directory_key, &directory_buffer[..directory_size]);
+    let insertions = if metadata_key < directory_key {
+        [metadata_insert, directory_insert]
+    } else {
+        [directory_insert, metadata_insert]
+    };
+
+    commit_object_record_insertions(
+        device,
+        current,
+        &insertions,
         object_buffer,
         object_copy_buffer,
         current_free_space,
@@ -4241,6 +4340,161 @@ mod tests {
                 ObjectLeafInsert::new(key, b"b"),
             ]),
             Err(PhoenixFsError::InvalidObjectMutationBatch)
+        );
+    }
+
+    #[test]
+    fn atomic_create_adds_metadata_and_directory_entry_in_one_generation() {
+        let mut device = MemoryBlockDevice::<512, 80>::new();
+        let mut format_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let current = format_volume(&mut device, VOLUME_ID, 10, &mut format_buffer).unwrap();
+
+        let mut object_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut object_copy = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut current_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut next_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut superblock_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+
+        let result = commit_create_object(
+            &mut device,
+            current,
+            ROOT_OBJECT_ID,
+            1,
+            2,
+            "hello",
+            ObjectType::File,
+            20,
+            &mut object_buffer,
+            &mut object_copy,
+            &mut current_free,
+            &mut next_free,
+            &mut superblock_buffer,
+        )
+        .unwrap();
+
+        assert_eq!(result.active.superblock.generation, 2);
+
+        let found = lookup_directory_entry(
+            &mut device,
+            result.active.superblock.roots.object_tree,
+            ROOT_OBJECT_ID,
+            "hello",
+            result.active.superblock.generation,
+            &mut object_buffer,
+        )
+        .unwrap();
+        assert_eq!(found.target_object_id, 2);
+        assert_eq!(found.target_type, ObjectType::File);
+
+        let mut metadata_value = [0_u8; OBJECT_METADATA_VALUE_SIZE];
+        let metadata = read_object_metadata(
+            &mut device,
+            result.active.superblock.roots.object_tree,
+            2,
+            result.active.superblock.generation,
+            &mut object_buffer,
+            &mut metadata_value,
+        )
+        .unwrap();
+        assert_eq!(metadata.object_type, ObjectType::File);
+        assert_eq!(metadata.created_ns, 20);
+    }
+
+    #[test]
+    fn atomic_create_rejects_duplicate_name_before_commit() {
+        let mut device = MemoryBlockDevice::<512, 80>::new();
+        let mut format_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let current = format_volume(&mut device, VOLUME_ID, 10, &mut format_buffer).unwrap();
+
+        let mut object_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut object_copy = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut current_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut next_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut superblock_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+
+        let first = commit_create_object(
+            &mut device,
+            current,
+            ROOT_OBJECT_ID,
+            1,
+            2,
+            "same",
+            ObjectType::File,
+            20,
+            &mut object_buffer,
+            &mut object_copy,
+            &mut current_free,
+            &mut next_free,
+            &mut superblock_buffer,
+        )
+        .unwrap();
+
+        assert_eq!(
+            commit_create_object(
+                &mut device,
+                first.active,
+                ROOT_OBJECT_ID,
+                2,
+                3,
+                "same",
+                ObjectType::File,
+                30,
+                &mut object_buffer,
+                &mut object_copy,
+                &mut current_free,
+                &mut next_free,
+                &mut superblock_buffer,
+            ),
+            Err(PhoenixFsError::ObjectRecordAlreadyExists)
+        );
+    }
+
+    #[test]
+    fn atomic_create_rejects_non_directory_parent() {
+        let mut device = MemoryBlockDevice::<512, 80>::new();
+        let mut format_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let current = format_volume(&mut device, VOLUME_ID, 10, &mut format_buffer).unwrap();
+
+        let mut object_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut object_copy = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut current_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut next_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut superblock_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+
+        let created = commit_create_object(
+            &mut device,
+            current,
+            ROOT_OBJECT_ID,
+            1,
+            2,
+            "file",
+            ObjectType::File,
+            20,
+            &mut object_buffer,
+            &mut object_copy,
+            &mut current_free,
+            &mut next_free,
+            &mut superblock_buffer,
+        )
+        .unwrap();
+
+        assert_eq!(
+            commit_create_object(
+                &mut device,
+                created.active,
+                2,
+                1,
+                3,
+                "child",
+                ObjectType::File,
+                30,
+                &mut object_buffer,
+                &mut object_copy,
+                &mut current_free,
+                &mut next_free,
+                &mut superblock_buffer,
+            ),
+            Err(PhoenixFsError::ParentNotDirectory)
         );
     }
 

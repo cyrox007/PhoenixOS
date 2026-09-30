@@ -78,6 +78,7 @@ pub enum PhoenixFsError {
     DuplicateRetiredBlock(u64),
     RetiredBlockStillReferenced(u64),
     ObjectRecordNotFound,
+    ObjectRecordAlreadyExists,
     InvalidReclaimedBlock(u64),
     ReclaimedBlockAlreadyFree(u64),
     ObjectTreeDepthExceeded,
@@ -1980,6 +1981,173 @@ fn sort_u64_prefix(values: &mut [u64], length: usize) {
     }
 }
 
+pub fn materialize_object_leaf_with_inserted_value(
+    current: &[u8],
+    destination: &mut [u8],
+    key: ObjectTreeKey,
+    value: &[u8],
+    new_generation: u64,
+    new_block_number: u64,
+) -> Result<TreeNodeHeader, PhoenixFsError> {
+    let current_node = validate_object_leaf(current)?;
+    validate_rewrite_target(current_node, new_generation, new_block_number)?;
+    key.validate()?;
+
+    let value_bytes =
+        u32::try_from(value.len()).map_err(|_| PhoenixFsError::InvalidObjectRecordSize)?;
+    let inserted_record = ObjectLeafRecordHeader::new(key, value_bytes)?;
+    let entries_start = TreeNodeHeader::entries_offset();
+    let entries_end = entries_start
+        .checked_add(current_node.entries_bytes as usize)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+
+    destination.fill(0);
+    let mut source_cursor = entries_start;
+    let mut destination_cursor = entries_start;
+    let mut inserted = false;
+
+    for _ in 0..current_node.item_count {
+        let (record, old_value, source_size) =
+            ObjectLeafRecordHeader::decode_with_value(&current[source_cursor..entries_end])?;
+
+        if record.key == key {
+            return Err(PhoenixFsError::ObjectRecordAlreadyExists);
+        }
+        if !inserted && record.key > key {
+            destination_cursor = encode_leaf_record_at(
+                destination,
+                destination_cursor,
+                inserted_record,
+                value,
+            )?;
+            inserted = true;
+        }
+
+        destination_cursor =
+            encode_leaf_record_at(destination, destination_cursor, record, old_value)?;
+        source_cursor = source_cursor
+            .checked_add(source_size)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    }
+
+    if !inserted {
+        destination_cursor =
+            encode_leaf_record_at(destination, destination_cursor, inserted_record, value)?;
+    }
+
+    seal_object_leaf_rewrite(
+        destination,
+        current_node,
+        new_generation,
+        new_block_number,
+        current_node
+            .item_count
+            .checked_add(1)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?,
+        destination_cursor,
+    )
+}
+
+pub fn materialize_object_leaf_without_key(
+    current: &[u8],
+    destination: &mut [u8],
+    target_key: ObjectTreeKey,
+    new_generation: u64,
+    new_block_number: u64,
+) -> Result<TreeNodeHeader, PhoenixFsError> {
+    let current_node = validate_object_leaf(current)?;
+    validate_rewrite_target(current_node, new_generation, new_block_number)?;
+    target_key.validate()?;
+
+    let entries_start = TreeNodeHeader::entries_offset();
+    let entries_end = entries_start
+        .checked_add(current_node.entries_bytes as usize)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+
+    destination.fill(0);
+    let mut source_cursor = entries_start;
+    let mut destination_cursor = entries_start;
+    let mut removed = false;
+
+    for _ in 0..current_node.item_count {
+        let (record, value, source_size) =
+            ObjectLeafRecordHeader::decode_with_value(&current[source_cursor..entries_end])?;
+
+        if record.key == target_key {
+            removed = true;
+        } else {
+            destination_cursor =
+                encode_leaf_record_at(destination, destination_cursor, record, value)?;
+        }
+
+        source_cursor = source_cursor
+            .checked_add(source_size)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    }
+
+    if !removed {
+        return Err(PhoenixFsError::ObjectRecordNotFound);
+    }
+
+    seal_object_leaf_rewrite(
+        destination,
+        current_node,
+        new_generation,
+        new_block_number,
+        current_node.item_count - 1,
+        destination_cursor,
+    )
+}
+
+fn encode_leaf_record_at(
+    destination: &mut [u8],
+    cursor: usize,
+    record: ObjectLeafRecordHeader,
+    value: &[u8],
+) -> Result<usize, PhoenixFsError> {
+    let encoded_size = record.encoded_size()?;
+    let end = cursor
+        .checked_add(encoded_size)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    if end > destination.len() {
+        return Err(PhoenixFsError::BufferSize);
+    }
+
+    record.encode_with_value(&mut destination[cursor..end], value)?;
+    Ok(end)
+}
+
+fn seal_object_leaf_rewrite(
+    destination: &mut [u8],
+    current_node: TreeNodeHeader,
+    new_generation: u64,
+    new_block_number: u64,
+    item_count: u32,
+    destination_cursor: usize,
+) -> Result<TreeNodeHeader, PhoenixFsError> {
+    let entries_start = TreeNodeHeader::entries_offset();
+    let entries_bytes = destination_cursor
+        .checked_sub(entries_start)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let entries_bytes =
+        u32::try_from(entries_bytes).map_err(|_| PhoenixFsError::InvalidObjectRecordSize)?;
+
+    let next = TreeNodeHeader::new(
+        MetadataKind::ObjectTree,
+        new_generation,
+        new_block_number,
+        0,
+        item_count,
+        entries_bytes,
+    )?;
+    if current_node.level != 0 {
+        return Err(PhoenixFsError::InvalidObjectLeafNode);
+    }
+    next.seal(destination)?;
+    validate_object_leaf(destination)?;
+    Ok(next)
+}
+
 pub fn materialize_object_leaf_with_replaced_value(
     current: &[u8],
     destination: &mut [u8],
@@ -3576,6 +3744,114 @@ mod tests {
         read_filesystem_block(&mut device, 10, &mut unchanged_leaf).unwrap();
         assert_eq!(unchanged_root, old_root);
         assert_eq!(unchanged_leaf, old_leaf);
+    }
+
+    #[test]
+    fn object_leaf_insertion_preserves_strict_key_order() {
+        let first_key = ObjectTreeKey::new(1, ObjectRecordKind::Metadata, 0);
+        let third_key = ObjectTreeKey::new(3, ObjectRecordKind::Metadata, 0);
+        let inserted_key = ObjectTreeKey::new(2, ObjectRecordKind::Metadata, 0);
+        let mut current = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let start = TreeNodeHeader::entries_offset();
+        let mut cursor = start;
+
+        for (key, value) in [(first_key, b"a".as_slice()), (third_key, b"c".as_slice())] {
+            let record = ObjectLeafRecordHeader::new(key, value.len() as u32).unwrap();
+            cursor += record
+                .encode_with_value(&mut current[cursor..], value)
+                .unwrap();
+        }
+        TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            4,
+            8,
+            0,
+            2,
+            (cursor - start) as u32,
+        )
+        .unwrap()
+        .seal(&mut current)
+        .unwrap();
+
+        let mut next = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let node = materialize_object_leaf_with_inserted_value(
+            &current,
+            &mut next,
+            inserted_key,
+            b"b",
+            5,
+            20,
+        )
+        .unwrap();
+
+        assert_eq!(node.item_count, 3);
+        let mut keys = [first_key; 3];
+        let mut offset = start;
+        for key in &mut keys {
+            let (record, _, size) =
+                ObjectLeafRecordHeader::decode_with_value(&next[offset..]).unwrap();
+            *key = record.key;
+            offset += size;
+        }
+        assert_eq!(keys, [first_key, inserted_key, third_key]);
+    }
+
+    #[test]
+    fn object_leaf_insertion_rejects_duplicate_key() {
+        let key = ObjectTreeKey::new(1, ObjectRecordKind::Metadata, 0);
+        let record = ObjectLeafRecordHeader::new(key, 1).unwrap();
+        let mut current = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let start = TreeNodeHeader::entries_offset();
+        let size = record
+            .encode_with_value(&mut current[start..], b"a")
+            .unwrap();
+        TreeNodeHeader::new(MetadataKind::ObjectTree, 4, 8, 0, 1, size as u32)
+            .unwrap()
+            .seal(&mut current)
+            .unwrap();
+
+        let mut next = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        assert_eq!(
+            materialize_object_leaf_with_inserted_value(&current, &mut next, key, b"x", 5, 20),
+            Err(PhoenixFsError::ObjectRecordAlreadyExists)
+        );
+    }
+
+    #[test]
+    fn object_leaf_deletion_removes_only_requested_key() {
+        let first_key = ObjectTreeKey::new(1, ObjectRecordKind::Metadata, 0);
+        let second_key = ObjectTreeKey::new(2, ObjectRecordKind::Metadata, 0);
+        let mut current = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let start = TreeNodeHeader::entries_offset();
+        let mut cursor = start;
+
+        for (key, value) in [(first_key, b"a".as_slice()), (second_key, b"b".as_slice())] {
+            let record = ObjectLeafRecordHeader::new(key, value.len() as u32).unwrap();
+            cursor += record
+                .encode_with_value(&mut current[cursor..], value)
+                .unwrap();
+        }
+        TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            4,
+            8,
+            0,
+            2,
+            (cursor - start) as u32,
+        )
+        .unwrap()
+        .seal(&mut current)
+        .unwrap();
+
+        let mut next = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let node =
+            materialize_object_leaf_without_key(&current, &mut next, first_key, 5, 20).unwrap();
+
+        assert_eq!(node.item_count, 1);
+        let (remaining, value, _) =
+            ObjectLeafRecordHeader::decode_with_value(&next[start..]).unwrap();
+        assert_eq!(remaining.key, second_key);
+        assert_eq!(value, b"b");
     }
 
     #[test]

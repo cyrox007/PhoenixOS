@@ -19,10 +19,12 @@ pub enum VfsError {
     NoSpace,
     FileTooLarge,
     InvalidOffset,
+    ReadOnly,
+    Storage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NodeId(pub u32);
+pub struct NodeId(pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileSystemId(pub u32);
@@ -889,7 +891,7 @@ impl<const NODES: usize, const FILE_CAPACITY: usize> MemoryFileSystem<NODES, FIL
             .find_map(|(index, node)| {
                 let node = node.as_ref()?;
                 (node.parent == Some(parent) && node.name.equals(name))
-                    .then_some(NodeId(index as u32))
+                    .then_some(NodeId(index as u64))
             })
             .ok_or(VfsError::NotFound)
     }
@@ -951,7 +953,7 @@ impl<const NODES: usize, const FILE_CAPACITY: usize> FileSystem
         };
         self.nodes[index] = Some(Node::child(parent, name, kind));
         self.count += 1;
-        Ok(NodeId(index as u32))
+        Ok(NodeId(index as u64))
     }
 
     fn read_node(&self, node: NodeId, offset: u64, output: &mut [u8]) -> Result<usize, VfsError> {

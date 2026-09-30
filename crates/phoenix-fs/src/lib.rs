@@ -2661,12 +2661,7 @@ impl<D: BlockDevice> FileSystem for PhoenixVfs<'_, D> {
         .map_err(map_phoenix_fs_to_vfs)
     }
 
-    fn write_node(
-        &mut self,
-        _node: NodeId,
-        _offset: u64,
-        _data: &[u8],
-    ) -> Result<usize, VfsError> {
+    fn write_node(&mut self, _node: NodeId, _offset: u64, _data: &[u8]) -> Result<usize, VfsError> {
         Err(VfsError::ReadOnly)
     }
 

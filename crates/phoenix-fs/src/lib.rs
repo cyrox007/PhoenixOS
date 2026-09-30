@@ -2570,10 +2570,7 @@ mod tests {
         assert_eq!(decoded, extent);
         assert_eq!(decoded.validate_for_key(key, 64), Ok(()));
         assert_eq!(
-            decoded.validate_for_key(
-                ObjectTreeKey::new(7, ObjectRecordKind::Extent, 1),
-                64,
-            ),
+            decoded.validate_for_key(ObjectTreeKey::new(7, ObjectRecordKind::Extent, 1), 64,),
             Err(PhoenixFsError::InvalidExtent)
         );
     }

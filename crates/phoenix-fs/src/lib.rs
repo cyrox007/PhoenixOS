@@ -1465,15 +1465,9 @@ mod tests {
 
         let plan = plan_cow_allocation(&current, 64, 3).unwrap();
         let mut next = [0_u8; FILESYSTEM_BLOCK_SIZE];
-        let node = materialize_free_space_leaf_after_allocation(
-            &current,
-            &mut next,
-            64,
-            7,
-            10,
-            plan,
-        )
-        .unwrap();
+        let node =
+            materialize_free_space_leaf_after_allocation(&current, &mut next, 64, 7, 10, plan)
+                .unwrap();
 
         assert_eq!(current, before);
         assert_eq!(node.metadata.generation, 7);
@@ -1503,14 +1497,7 @@ mod tests {
         let plan = plan_cow_allocation(&current, 64, 2).unwrap();
         let mut next = [0_u8; FILESYSTEM_BLOCK_SIZE];
         assert_eq!(
-            materialize_free_space_leaf_after_allocation(
-                &current,
-                &mut next,
-                64,
-                7,
-                30,
-                plan,
-            ),
+            materialize_free_space_leaf_after_allocation(&current, &mut next, 64, 7, 30, plan,),
             Err(PhoenixFsError::AllocationTargetOutsideRange)
         );
     }

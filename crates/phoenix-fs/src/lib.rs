@@ -476,7 +476,10 @@ impl ObjectLeafRecordHeader {
             .ok_or(PhoenixFsError::ArithmeticOverflow)?;
         let value = &source[OBJECT_LEAF_RECORD_HEADER_SIZE..value_end];
 
-        if source[value_end..encoded_size].iter().any(|byte| *byte != 0) {
+        if source[value_end..encoded_size]
+            .iter()
+            .any(|byte| *byte != 0)
+        {
             return Err(PhoenixFsError::InvalidReservedField);
         }
 
@@ -504,7 +507,9 @@ pub fn validate_object_leaf(block: &[u8]) -> Result<TreeNodeHeader, PhoenixFsErr
         .checked_add(entries_size)
         .ok_or(PhoenixFsError::ArithmeticOverflow)?;
     if entries_end > block.len() {
-        return Err(PhoenixFsError::InvalidTreeNodePayloadSize(node.entries_bytes));
+        return Err(PhoenixFsError::InvalidTreeNodePayloadSize(
+            node.entries_bytes,
+        ));
     }
 
     let mut cursor = entries_start;
@@ -1279,16 +1284,12 @@ mod tests {
 
     #[test]
     fn object_leaf_validates_strict_key_order() {
-        let first = ObjectLeafRecordHeader::new(
-            ObjectTreeKey::new(1, ObjectRecordKind::Metadata, 0),
-            3,
-        )
-        .unwrap();
-        let second = ObjectLeafRecordHeader::new(
-            ObjectTreeKey::new(1, ObjectRecordKind::Extent, 4096),
-            4,
-        )
-        .unwrap();
+        let first =
+            ObjectLeafRecordHeader::new(ObjectTreeKey::new(1, ObjectRecordKind::Metadata, 0), 3)
+                .unwrap();
+        let second =
+            ObjectLeafRecordHeader::new(ObjectTreeKey::new(1, ObjectRecordKind::Extent, 4096), 4)
+                .unwrap();
 
         let mut block = [0_u8; FILESYSTEM_BLOCK_SIZE];
         let mut cursor = TreeNodeHeader::entries_offset();
@@ -1335,10 +1336,7 @@ mod tests {
     #[test]
     fn object_leaf_rejects_zero_object_id() {
         assert_eq!(
-            ObjectLeafRecordHeader::new(
-                ObjectTreeKey::new(0, ObjectRecordKind::Metadata, 0),
-                0,
-            ),
+            ObjectLeafRecordHeader::new(ObjectTreeKey::new(0, ObjectRecordKind::Metadata, 0), 0,),
             Err(PhoenixFsError::InvalidObjectId)
         );
     }

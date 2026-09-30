@@ -2161,6 +2161,53 @@ pub fn commit_create_object<D: BlockDevice>(
     )
 }
 
+pub fn commit_object_record_deletions<D: BlockDevice>(
+    device: &mut D,
+    current: ActiveSuperblock,
+    deletions: &[ObjectLeafDelete],
+    object_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    object_copy_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    current_free_space: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    next_free_space: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    superblock_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<DeepRecordUpdateResult, PhoenixFsError> {
+    validate_object_deletions(deletions)?;
+    let paths = classify_deletion_paths(
+        device,
+        current.superblock.roots.object_tree,
+        deletions,
+        current.superblock.generation,
+        object_buffer,
+    )?;
+
+    let Some(second_path) = paths.second else {
+        return commit_object_leaf_mutation(
+            device,
+            current,
+            ObjectLeafMutation::DeleteBatch { deletions },
+            object_buffer,
+            object_copy_buffer,
+            current_free_space,
+            next_free_space,
+            superblock_buffer,
+        );
+    };
+
+    commit_two_leaf_deletions(
+        device,
+        current,
+        paths.first,
+        second_path,
+        &deletions[..paths.split_index],
+        &deletions[paths.split_index..],
+        object_buffer,
+        object_copy_buffer,
+        current_free_space,
+        next_free_space,
+        superblock_buffer,
+    )
+}
+
 pub fn commit_object_record_delete<D: BlockDevice>(
     device: &mut D,
     current: ActiveSuperblock,
@@ -2209,6 +2256,14 @@ fn commit_object_leaf_mutation<D: BlockDevice>(
             current.superblock.generation,
             object_buffer,
         )?
+    } else if let ObjectLeafMutation::DeleteBatch { deletions } = mutation {
+        find_shared_deletion_path(
+            device,
+            current.superblock.roots.object_tree,
+            deletions,
+            current.superblock.generation,
+            object_buffer,
+        )?
     } else if mutation.is_insertion() {
         find_object_tree_path_for_insertion(
             device,
@@ -2247,10 +2302,12 @@ fn commit_object_leaf_mutation<D: BlockDevice>(
 
     read_filesystem_block(device, path.leaf_block, object_buffer)?;
     let leaf = validate_object_leaf(object_buffer)?;
-    if matches!(mutation, ObjectLeafMutation::Delete { .. })
-        && path.parent_count > 0
-        && leaf.item_count == 1
-    {
+    let deleted_items = match mutation {
+        ObjectLeafMutation::Delete { .. } => 1,
+        ObjectLeafMutation::DeleteBatch { deletions } => deletions.len(),
+        _ => 0,
+    };
+    if path.parent_count > 0 && deleted_items != 0 && deleted_items >= leaf.item_count as usize {
         return Err(PhoenixFsError::ObjectLeafWouldBecomeEmpty);
     }
 
@@ -2289,6 +2346,15 @@ fn commit_object_leaf_mutation<D: BlockDevice>(
                 object_buffer,
                 object_copy_buffer,
                 key,
+                generation,
+                first_new_block,
+            )?;
+        }
+        ObjectLeafMutation::DeleteBatch { deletions } => {
+            materialize_object_leaf_without_keys(
+                object_buffer,
+                object_copy_buffer,
+                deletions,
                 generation,
                 first_new_block,
             )?;
@@ -2371,6 +2437,79 @@ fn commit_object_leaf_mutation<D: BlockDevice>(
         retired_count,
         allocated: allocation.allocated,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ObjectDeletionPaths {
+    first: ObjectTreePath,
+    split_index: usize,
+    second: Option<ObjectTreePath>,
+}
+
+fn classify_deletion_paths<D: BlockDevice>(
+    device: &mut D,
+    root_block: u64,
+    deletions: &[ObjectLeafDelete],
+    maximum_generation: u64,
+    buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<ObjectDeletionPaths, PhoenixFsError> {
+    validate_object_deletions(deletions)?;
+
+    let first = find_object_tree_path(
+        device,
+        root_block,
+        deletions[0].key,
+        maximum_generation,
+        buffer,
+    )?;
+    let mut second = None;
+    let mut split_index = deletions.len();
+
+    for (index, deletion) in deletions.iter().enumerate().skip(1) {
+        let candidate = find_object_tree_path(
+            device,
+            root_block,
+            deletion.key,
+            maximum_generation,
+            buffer,
+        )?;
+
+        match second {
+            None if candidate == first => {}
+            None => {
+                second = Some(candidate);
+                split_index = index;
+            }
+            Some(existing) if candidate == existing => {}
+            Some(_) => return Err(PhoenixFsError::ObjectMutationBatchSpansLeaves),
+        }
+    }
+
+    Ok(ObjectDeletionPaths {
+        first,
+        split_index,
+        second,
+    })
+}
+
+fn find_shared_deletion_path<D: BlockDevice>(
+    device: &mut D,
+    root_block: u64,
+    deletions: &[ObjectLeafDelete],
+    maximum_generation: u64,
+    buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<ObjectTreePath, PhoenixFsError> {
+    let paths = classify_deletion_paths(
+        device,
+        root_block,
+        deletions,
+        maximum_generation,
+        buffer,
+    )?;
+    if paths.second.is_some() {
+        return Err(PhoenixFsError::ObjectMutationBatchSpansLeaves);
+    }
+    Ok(paths.first)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

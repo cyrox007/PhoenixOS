@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+<title id="title">PhoenixOS — основной логотип</title>
+<desc id="desc">Абстрактный феникс из оранжевых, золотых и синих энергетических лент.</desc>
+<defs>
+  <linearGradient id="fire" x1="0" y1="1" x2="1" y2="0">
+    <stop offset="0" stop-color="#E74614"/>
+    <stop offset=".55" stop-color="#FF7A18"/>
+    <stop offset="1" stop-color="#FFC14D"/>
+  </linearGradient>
+  <linearGradient id="ice" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#DCE7F2"/>
+    <stop offset=".45" stop-color="#5BBFFF"/>
+    <stop offset="1" stop-color="#176BCE"/>
+  </linearGradient>
+  <radialGradient id="glow">
+    <stop offset="0" stop-color="#FF8C24" stop-opacity=".38"/>
+    <stop offset="1" stop-color="#FF8C24" stop-opacity="0"/>
+  </radialGradient>
+</defs>
+<rect width="1200" height="760" fill="#070B12"/>
+<circle cx="600" cy="320" r="265" fill="url(#glow)"/>
+<circle cx="600" cy="320" r="250" fill="none" stroke="#FF8A22" stroke-opacity=".42" stroke-width="3"/>
+<path d="M600 570C487 512 404 411 383 286c91 85 169 97 226 76-66-24-112-76-137-151 112 73 206 83 275 31-25 61-64 104-119 132 76 30 145 23 210-25-39 114-122 192-238 221Z" fill="url(#fire)"/>
+<path d="M590 554c28-105 70-176 136-225-58 8-106-7-147-44 8-73 50-131 123-174-8 69-1 119 24 150-55 17-94 50-115 99 41 50 48 115 21 194Z" fill="url(#ice)" opacity=".96"/>
+<path d="M585 383c45-112 94-168 158-181-35 24-56 51-62 82 37-5 70 3 99 26-61-5-103 21-126 79-17 42-20 94-10 155-45-48-65-102-59-161Z" fill="url(#fire)"/>
+<path d="M725 215c43-8 83 4 119 35-39-8-72-4-100 12 21 2 42 13 61 33-44-13-82-5-115 24 3-39 15-74 35-104Z" fill="#FFC14D"/>
+<path d="M787 267l37 4-30 19Z" fill="#FFF4D2"/>
+<text x="600" y="690" text-anchor="middle" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="92" letter-spacing="11" fill="#EAF1F7">PHOENIX<tspan fill="#FF7A18">OS</tspan></text>
+</svg>

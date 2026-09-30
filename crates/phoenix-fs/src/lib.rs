@@ -568,9 +568,8 @@ pub fn validate_object_internal(block: &[u8]) -> Result<TreeNodeHeader, PhoenixF
     let mut previous_key: Option<ObjectTreeKey> = None;
     for index in 0..node.item_count as usize {
         let offset = entries_start + index * OBJECT_INTERNAL_RECORD_SIZE;
-        let record = ObjectInternalRecord::decode(
-            &block[offset..offset + OBJECT_INTERNAL_RECORD_SIZE],
-        )?;
+        let record =
+            ObjectInternalRecord::decode(&block[offset..offset + OBJECT_INTERNAL_RECORD_SIZE])?;
         if record.child_block == node.metadata.block_number {
             return Err(PhoenixFsError::InvalidObjectChildBlock(record.child_block));
         }
@@ -609,7 +608,9 @@ pub fn validate_object_tree_transition(
         return Err(PhoenixFsError::InvalidObjectInternalNode);
     }
     if record.child_block != child.metadata.block_number {
-        return Err(PhoenixFsError::InvalidObjectChildBlock(child.metadata.block_number));
+        return Err(PhoenixFsError::InvalidObjectChildBlock(
+            child.metadata.block_number,
+        ));
     }
     if child.level.checked_add(1) != Some(parent.level) {
         return Err(PhoenixFsError::InvalidObjectTreeLevel);
@@ -1131,11 +1132,9 @@ mod tests {
 
     #[test]
     fn object_internal_record_round_trip_preserves_key_and_child() {
-        let record = ObjectInternalRecord::new(
-            ObjectTreeKey::new(7, ObjectRecordKind::Extent, 8192),
-            33,
-        )
-        .unwrap();
+        let record =
+            ObjectInternalRecord::new(ObjectTreeKey::new(7, ObjectRecordKind::Extent, 8192), 33)
+                .unwrap();
         let mut encoded = [0_u8; OBJECT_INTERNAL_RECORD_SIZE];
 
         record.encode(&mut encoded).unwrap();
@@ -1144,16 +1143,12 @@ mod tests {
 
     #[test]
     fn object_internal_node_requires_strict_keys() {
-        let first = ObjectInternalRecord::new(
-            ObjectTreeKey::new(1, ObjectRecordKind::Metadata, 0),
-            20,
-        )
-        .unwrap();
-        let second = ObjectInternalRecord::new(
-            ObjectTreeKey::new(1, ObjectRecordKind::Extent, 4096),
-            21,
-        )
-        .unwrap();
+        let first =
+            ObjectInternalRecord::new(ObjectTreeKey::new(1, ObjectRecordKind::Metadata, 0), 20)
+                .unwrap();
+        let second =
+            ObjectInternalRecord::new(ObjectTreeKey::new(1, ObjectRecordKind::Extent, 4096), 21)
+                .unwrap();
 
         let mut block = [0_u8; FILESYSTEM_BLOCK_SIZE];
         let start = TreeNodeHeader::entries_offset();
@@ -1162,8 +1157,8 @@ mod tests {
             .unwrap();
         second
             .encode(
-                &mut block[start + OBJECT_INTERNAL_RECORD_SIZE
-                    ..start + 2 * OBJECT_INTERNAL_RECORD_SIZE],
+                &mut block
+                    [start + OBJECT_INTERNAL_RECORD_SIZE..start + 2 * OBJECT_INTERNAL_RECORD_SIZE],
             )
             .unwrap();
 
@@ -1208,15 +1203,8 @@ mod tests {
         let child_size = leaf_record
             .encode_with_value(&mut child[child_start..], b"abc")
             .unwrap();
-        let child_header = TreeNodeHeader::new(
-            MetadataKind::ObjectTree,
-            8,
-            12,
-            0,
-            1,
-            child_size as u32,
-        )
-        .unwrap();
+        let child_header =
+            TreeNodeHeader::new(MetadataKind::ObjectTree, 8, 12, 0, 1, child_size as u32).unwrap();
         child_header.seal(&mut child).unwrap();
 
         assert_eq!(
@@ -1253,17 +1241,10 @@ mod tests {
         let child_size = leaf_record
             .encode_with_value(&mut child[child_start..], b"")
             .unwrap();
-        TreeNodeHeader::new(
-            MetadataKind::ObjectTree,
-            10,
-            12,
-            0,
-            1,
-            child_size as u32,
-        )
-        .unwrap()
-        .seal(&mut child)
-        .unwrap();
+        TreeNodeHeader::new(MetadataKind::ObjectTree, 10, 12, 0, 1, child_size as u32)
+            .unwrap()
+            .seal(&mut child)
+            .unwrap();
 
         assert_eq!(
             validate_object_tree_transition(&parent, 0, &child),

@@ -1,6 +1,8 @@
 #![no_std]
 
+use core::cell::RefCell;
 use phoenix_block::{BlockDevice, BlockError};
+use phoenix_vfs::{FileSystem, NodeId, NodeKind, NodeMetadata, VfsError};
 
 pub const FILESYSTEM_BLOCK_SIZE: usize = 4096;
 pub const SUPERBLOCK_COPY_COUNT: u64 = 2;
@@ -20,6 +22,7 @@ pub const OBJECT_LEAF_RECORD_HEADER_SIZE: usize = 32;
 pub const OBJECT_INTERNAL_RECORD_SIZE: usize = 32;
 pub const FREE_SPACE_RECORD_SIZE: usize = 16;
 pub const MAX_OBJECT_TREE_DEPTH: usize = 16;
+pub const ROOT_OBJECT_ID: u64 = 1;
 pub const OBJECT_METADATA_VALUE_SIZE: usize = 48;
 pub const DIRECTORY_ENTRY_VALUE_HEADER_SIZE: usize = 16;
 pub const MAX_DIRECTORY_NAME_BYTES: usize = 1024;
@@ -2507,6 +2510,182 @@ fn align_up(value: usize, alignment: usize) -> Result<usize, PhoenixFsError> {
     Ok(adjusted & !mask)
 }
 
+pub struct PhoenixVfs<'a, D: BlockDevice> {
+    device: RefCell<&'a mut D>,
+    active: ActiveSuperblock,
+    node_buffer: RefCell<[u8; FILESYSTEM_BLOCK_SIZE]>,
+    data_buffer: RefCell<[u8; FILESYSTEM_BLOCK_SIZE]>,
+    metadata_buffer: RefCell<[u8; OBJECT_METADATA_VALUE_SIZE]>,
+}
+
+impl<'a, D: BlockDevice> PhoenixVfs<'a, D> {
+    pub fn new(device: &'a mut D, active: ActiveSuperblock) -> Result<Self, PhoenixFsError> {
+        let total_blocks = filesystem_block_count(device)?;
+        if active.superblock.total_blocks != total_blocks {
+            return Err(PhoenixFsError::InvalidVolumeGeometry);
+        }
+
+        Ok(Self {
+            device: RefCell::new(device),
+            active,
+            node_buffer: RefCell::new([0; FILESYSTEM_BLOCK_SIZE]),
+            data_buffer: RefCell::new([0; FILESYSTEM_BLOCK_SIZE]),
+            metadata_buffer: RefCell::new([0; OBJECT_METADATA_VALUE_SIZE]),
+        })
+    }
+
+    pub const fn active_superblock(&self) -> ActiveSuperblock {
+        self.active
+    }
+
+    fn object_metadata(&self, object_id: u64) -> Result<ObjectMetadataValue, VfsError> {
+        let mut device = self
+            .device
+            .try_borrow_mut()
+            .map_err(|_| VfsError::Storage)?;
+        let mut node_buffer = self
+            .node_buffer
+            .try_borrow_mut()
+            .map_err(|_| VfsError::Storage)?;
+        let mut metadata_buffer = self
+            .metadata_buffer
+            .try_borrow_mut()
+            .map_err(|_| VfsError::Storage)?;
+
+        read_object_metadata(
+            &mut **device,
+            self.active.superblock.roots.object_tree,
+            object_id,
+            self.active.superblock.generation,
+            &mut *node_buffer,
+            &mut *metadata_buffer,
+        )
+        .map_err(map_phoenix_fs_to_vfs)
+    }
+}
+
+impl<D: BlockDevice> FileSystem for PhoenixVfs<'_, D> {
+    fn root_node(&self) -> Result<NodeId, VfsError> {
+        let metadata = self.object_metadata(ROOT_OBJECT_ID)?;
+        if metadata.object_type != ObjectType::Directory {
+            return Err(VfsError::NotDirectory);
+        }
+        Ok(NodeId(ROOT_OBJECT_ID))
+    }
+
+    fn metadata(&self, node: NodeId) -> Result<NodeMetadata, VfsError> {
+        let metadata = self.object_metadata(node.0)?;
+        let kind = match metadata.object_type {
+            ObjectType::File => NodeKind::File,
+            ObjectType::Directory => NodeKind::Directory,
+        };
+
+        Ok(NodeMetadata {
+            kind,
+            length: metadata.size_bytes,
+        })
+    }
+
+    fn lookup_child(&self, parent: NodeId, name: &[u8]) -> Result<NodeId, VfsError> {
+        if self.metadata(parent)?.kind != NodeKind::Directory {
+            return Err(VfsError::NotDirectory);
+        }
+
+        let name = core::str::from_utf8(name).map_err(|_| VfsError::InvalidPath)?;
+        let mut device = self
+            .device
+            .try_borrow_mut()
+            .map_err(|_| VfsError::Storage)?;
+        let mut node_buffer = self
+            .node_buffer
+            .try_borrow_mut()
+            .map_err(|_| VfsError::Storage)?;
+
+        let entry = lookup_directory_entry(
+            &mut **device,
+            self.active.superblock.roots.object_tree,
+            parent.0,
+            name,
+            self.active.superblock.generation,
+            &mut *node_buffer,
+        )
+        .map_err(map_phoenix_fs_to_vfs)?;
+
+        Ok(NodeId(entry.target_object_id))
+    }
+
+    fn create_node(
+        &mut self,
+        _parent: NodeId,
+        _name: &[u8],
+        _kind: NodeKind,
+    ) -> Result<NodeId, VfsError> {
+        Err(VfsError::ReadOnly)
+    }
+
+    fn read_node(&self, node: NodeId, offset: u64, output: &mut [u8]) -> Result<usize, VfsError> {
+        let metadata = self.metadata(node)?;
+        if metadata.kind != NodeKind::File {
+            return Err(VfsError::IsDirectory);
+        }
+        if offset >= metadata.length || output.is_empty() {
+            return Ok(0);
+        }
+
+        let remaining = metadata.length - offset;
+        let limit = core::cmp::min(output.len() as u64, remaining) as usize;
+
+        let mut device = self
+            .device
+            .try_borrow_mut()
+            .map_err(|_| VfsError::Storage)?;
+        let mut node_buffer = self
+            .node_buffer
+            .try_borrow_mut()
+            .map_err(|_| VfsError::Storage)?;
+        let mut data_buffer = self
+            .data_buffer
+            .try_borrow_mut()
+            .map_err(|_| VfsError::Storage)?;
+
+        read_file_range(
+            &mut **device,
+            self.active.superblock.roots.object_tree,
+            node.0,
+            offset,
+            &mut output[..limit],
+            self.active.superblock.generation,
+            &mut *node_buffer,
+            &mut *data_buffer,
+        )
+        .map_err(map_phoenix_fs_to_vfs)
+    }
+
+    fn write_node(
+        &mut self,
+        _node: NodeId,
+        _offset: u64,
+        _data: &[u8],
+    ) -> Result<usize, VfsError> {
+        Err(VfsError::ReadOnly)
+    }
+
+    fn truncate_node(&mut self, _node: NodeId, _length: u64) -> Result<(), VfsError> {
+        Err(VfsError::ReadOnly)
+    }
+}
+
+fn map_phoenix_fs_to_vfs(error: PhoenixFsError) -> VfsError {
+    match error {
+        PhoenixFsError::ObjectRecordNotFound | PhoenixFsError::DirectoryEntryNotFound => {
+            VfsError::NotFound
+        }
+        PhoenixFsError::InvalidDirectoryName => VfsError::InvalidPath,
+        PhoenixFsError::BufferSize => VfsError::NoSpace,
+        _ => VfsError::Storage,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Superblock {
     pub generation: u64,
@@ -2919,6 +3098,121 @@ mod tests {
         assert_eq!(
             TreeNodeHeader::new(MetadataKind::ObjectTree, 2, 4, 0, 1, 0),
             Err(PhoenixFsError::InvalidTreeNodeItemCount)
+        );
+    }
+
+    #[test]
+    fn phoenix_vfs_resolves_path_and_reads_file() {
+        use phoenix_vfs::{FileSystem, NodeId, resolve_path};
+
+        let mut device = MemoryBlockDevice::<512, 512>::new();
+        let root_metadata = ObjectMetadataValue::new(ObjectType::Directory, 0, 1, 1, 1);
+        let file_metadata = ObjectMetadataValue::new(ObjectType::File, 5, 1, 1, 1);
+        let directory_entry = DirectoryEntryValue::new(2, ObjectType::File).unwrap();
+        let extent = ExtentValue::new(20, 1, 5);
+
+        let mut root_metadata_bytes = [0_u8; OBJECT_METADATA_VALUE_SIZE];
+        let mut file_metadata_bytes = [0_u8; OBJECT_METADATA_VALUE_SIZE];
+        let mut directory_entry_bytes = [0_u8; 64];
+        let mut extent_bytes = [0_u8; EXTENT_VALUE_SIZE];
+        root_metadata.encode(&mut root_metadata_bytes).unwrap();
+        file_metadata.encode(&mut file_metadata_bytes).unwrap();
+        let directory_entry_size = directory_entry
+            .encode("hello", &mut directory_entry_bytes)
+            .unwrap();
+        extent.encode(&mut extent_bytes).unwrap();
+
+        let records = [
+            (
+                ObjectTreeKey::new(1, ObjectRecordKind::Metadata, 0),
+                &root_metadata_bytes[..],
+            ),
+            (
+                ObjectTreeKey::new(1, ObjectRecordKind::DirectoryEntry, 1),
+                &directory_entry_bytes[..directory_entry_size],
+            ),
+            (
+                ObjectTreeKey::new(2, ObjectRecordKind::Metadata, 0),
+                &file_metadata_bytes[..],
+            ),
+            (
+                ObjectTreeKey::new(2, ObjectRecordKind::Extent, 0),
+                &extent_bytes[..],
+            ),
+        ];
+
+        let mut object_root = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let start = TreeNodeHeader::entries_offset();
+        let mut cursor = start;
+        for (key, value) in records {
+            let header = ObjectLeafRecordHeader::new(key, value.len() as u32).unwrap();
+            cursor += header
+                .encode_with_value(&mut object_root[cursor..], value)
+                .unwrap();
+        }
+        TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            5,
+            8,
+            0,
+            records.len() as u32,
+            (cursor - start) as u32,
+        )
+        .unwrap()
+        .seal(&mut object_root)
+        .unwrap();
+
+        let data = {
+            let mut block = [0_u8; FILESYSTEM_BLOCK_SIZE];
+            block[..5].copy_from_slice(b"hello");
+            block
+        };
+        write_filesystem_block(&mut device, 8, &object_root).unwrap();
+        write_filesystem_block(&mut device, 20, &data).unwrap();
+
+        let active = ActiveSuperblock {
+            superblock: Superblock::new(5, 64, VOLUME_ID, TransactionRoots::new(8, 9)).unwrap(),
+            slot: SuperblockSlot::First,
+        };
+        let filesystem = PhoenixVfs::new(&mut device, active).unwrap();
+
+        assert_eq!(filesystem.root_node(), Ok(NodeId(1)));
+        assert_eq!(resolve_path(&filesystem, "/hello"), Ok(NodeId(2)));
+        assert_eq!(
+            filesystem.metadata(NodeId(2)),
+            Ok(NodeMetadata {
+                kind: NodeKind::File,
+                length: 5,
+            })
+        );
+
+        let mut output = [0_u8; 5];
+        assert_eq!(filesystem.read_node(NodeId(2), 0, &mut output), Ok(5));
+        assert_eq!(&output, b"hello");
+    }
+
+    #[test]
+    fn phoenix_vfs_rejects_mutation_until_write_path_is_atomic() {
+        use phoenix_vfs::{FileSystem, NodeId};
+
+        let mut device = MemoryBlockDevice::<512, 512>::new();
+        let active = ActiveSuperblock {
+            superblock: Superblock::new(5, 64, VOLUME_ID, TransactionRoots::new(8, 9)).unwrap(),
+            slot: SuperblockSlot::First,
+        };
+        let mut filesystem = PhoenixVfs::new(&mut device, active).unwrap();
+
+        assert_eq!(
+            filesystem.create_node(NodeId(1), b"x", NodeKind::File),
+            Err(VfsError::ReadOnly)
+        );
+        assert_eq!(
+            filesystem.write_node(NodeId(2), 0, b"x"),
+            Err(VfsError::ReadOnly)
+        );
+        assert_eq!(
+            filesystem.truncate_node(NodeId(2), 0),
+            Err(VfsError::ReadOnly)
         );
     }
 

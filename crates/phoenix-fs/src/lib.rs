@@ -1921,6 +1921,17 @@ impl<'a> ObjectLeafInsert<'a> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectLeafDelete {
+    pub key: ObjectTreeKey,
+}
+
+impl ObjectLeafDelete {
+    pub const fn new(key: ObjectTreeKey) -> Self {
+        Self { key }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum ObjectLeafMutation<'a> {
     Replace {
@@ -1937,6 +1948,9 @@ enum ObjectLeafMutation<'a> {
     Delete {
         key: ObjectTreeKey,
     },
+    DeleteBatch {
+        deletions: &'a [ObjectLeafDelete],
+    },
 }
 
 impl ObjectLeafMutation<'_> {
@@ -1946,6 +1960,10 @@ impl ObjectLeafMutation<'_> {
             Self::InsertBatch { insertions } => insertions
                 .first()
                 .map(|insertion| insertion.key)
+                .ok_or(PhoenixFsError::InvalidObjectMutationBatch),
+            Self::DeleteBatch { deletions } => deletions
+                .first()
+                .map(|deletion| deletion.key)
                 .ok_or(PhoenixFsError::InvalidObjectMutationBatch),
         }
     }
@@ -2925,6 +2943,84 @@ pub fn materialize_object_leaf_with_inserted_values(
         item_count,
         destination_cursor,
     )
+}
+
+pub fn materialize_object_leaf_without_keys(
+    current: &[u8],
+    destination: &mut [u8],
+    deletions: &[ObjectLeafDelete],
+    new_generation: u64,
+    new_block_number: u64,
+) -> Result<TreeNodeHeader, PhoenixFsError> {
+    let current_node = validate_object_leaf(current)?;
+    validate_rewrite_target(current_node, new_generation, new_block_number)?;
+    validate_object_deletions(deletions)?;
+
+    let entries_start = TreeNodeHeader::entries_offset();
+    let entries_end = entries_start
+        .checked_add(current_node.entries_bytes as usize)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+
+    destination.fill(0);
+    let mut source_cursor = entries_start;
+    let mut destination_cursor = entries_start;
+    let mut deletion_index = 0_usize;
+
+    for _ in 0..current_node.item_count {
+        let (record, value, source_size) =
+            ObjectLeafRecordHeader::decode_with_value(&current[source_cursor..entries_end])?;
+
+        while deletion_index < deletions.len() && deletions[deletion_index].key < record.key {
+            return Err(PhoenixFsError::ObjectRecordNotFound);
+        }
+
+        if deletion_index < deletions.len() && deletions[deletion_index].key == record.key {
+            deletion_index += 1;
+        } else {
+            destination_cursor =
+                encode_leaf_record_at(destination, destination_cursor, record, value)?;
+        }
+
+        source_cursor = source_cursor
+            .checked_add(source_size)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    }
+
+    if deletion_index != deletions.len() {
+        return Err(PhoenixFsError::ObjectRecordNotFound);
+    }
+
+    let deleted_count =
+        u32::try_from(deletions.len()).map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
+    let item_count = current_node
+        .item_count
+        .checked_sub(deleted_count)
+        .ok_or(PhoenixFsError::InvalidObjectMutationBatch)?;
+
+    seal_object_leaf_rewrite(
+        destination,
+        current_node,
+        new_generation,
+        new_block_number,
+        item_count,
+        destination_cursor,
+    )
+}
+
+fn validate_object_deletions(deletions: &[ObjectLeafDelete]) -> Result<(), PhoenixFsError> {
+    if deletions.is_empty() {
+        return Err(PhoenixFsError::InvalidObjectMutationBatch);
+    }
+
+    let mut previous_key = None;
+    for deletion in deletions {
+        deletion.key.validate()?;
+        if previous_key.is_some_and(|previous| previous >= deletion.key) {
+            return Err(PhoenixFsError::InvalidObjectMutationBatch);
+        }
+        previous_key = Some(deletion.key);
+    }
+    Ok(())
 }
 
 pub fn materialize_object_leaf_without_key(

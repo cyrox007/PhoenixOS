@@ -8,8 +8,14 @@ pub const FORMAT_VERSION: u32 = 1;
 
 const SUPERBLOCK_MAGIC: [u8; 8] = *b"PHXFS\0\x01\0";
 const SUPERBLOCK_HEADER_SIZE: u32 = 88;
-const CHECKSUM_OFFSET: usize = 64;
-const CHECKSUM_END: usize = 68;
+const SUPERBLOCK_CHECKSUM_OFFSET: usize = 64;
+const SUPERBLOCK_CHECKSUM_END: usize = 68;
+const METADATA_MAGIC: [u8; 8] = *b"PHXMETA\0";
+const METADATA_HEADER_SIZE: u32 = 48;
+const METADATA_CHECKSUM_OFFSET: usize = 44;
+const METADATA_CHECKSUM_END: usize = 48;
+const TREE_NODE_HEADER_SIZE: u32 = 64;
+const TREE_NODE_PREFIX_SIZE: u32 = TREE_NODE_HEADER_SIZE - METADATA_HEADER_SIZE;
 const SUPPORTED_INCOMPATIBLE_FEATURES: u64 = 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +32,15 @@ pub enum PhoenixFsError {
     InvalidVolumeGeometry,
     InvalidRootBlock(u64),
     DuplicateRootBlock(u64),
+    InvalidMetadataMagic,
+    InvalidMetadataHeaderSize,
+    InvalidMetadataKind(u32),
+    InvalidMetadataGeneration,
+    InvalidMetadataBlock(u64),
+    InvalidMetadataPayloadSize(u32),
+    MetadataChecksumMismatch,
+    InvalidTreeNodePayloadSize(u32),
+    InvalidTreeNodeItemCount,
     UnsupportedFeatures(u64),
     InvalidReservedField,
     ChecksumMismatch,
@@ -101,6 +116,236 @@ impl TransactionRoots {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum MetadataKind {
+    ObjectTree = 1,
+    FreeSpaceTree = 2,
+}
+
+impl MetadataKind {
+    fn from_raw(value: u32) -> Result<Self, PhoenixFsError> {
+        match value {
+            1 => Ok(Self::ObjectTree),
+            2 => Ok(Self::FreeSpaceTree),
+            other => Err(PhoenixFsError::InvalidMetadataKind(other)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MetadataBlockHeader {
+    pub kind: MetadataKind,
+    pub generation: u64,
+    pub block_number: u64,
+    pub payload_bytes: u32,
+}
+
+impl MetadataBlockHeader {
+    pub const fn new(
+        kind: MetadataKind,
+        generation: u64,
+        block_number: u64,
+        payload_bytes: u32,
+    ) -> Self {
+        Self {
+            kind,
+            generation,
+            block_number,
+            payload_bytes,
+        }
+    }
+
+    pub fn seal(&self, block: &mut [u8]) -> Result<(), PhoenixFsError> {
+        self.validate()?;
+        if block.len() != FILESYSTEM_BLOCK_SIZE {
+            return Err(PhoenixFsError::BufferSize);
+        }
+
+        self.write_prefix(block)?;
+        let checksum = metadata_crc32c(block);
+        write_u32(block, METADATA_CHECKSUM_OFFSET, checksum);
+        Ok(())
+    }
+
+    pub fn decode(block: &[u8]) -> Result<Self, PhoenixFsError> {
+        if block.len() != FILESYSTEM_BLOCK_SIZE {
+            return Err(PhoenixFsError::BufferSize);
+        }
+        if block[..8] != METADATA_MAGIC {
+            return Err(PhoenixFsError::InvalidMetadataMagic);
+        }
+
+        let version = read_u32(block, 8);
+        if version != FORMAT_VERSION {
+            return Err(PhoenixFsError::UnsupportedVersion(version));
+        }
+        if read_u32(block, 12) != METADATA_HEADER_SIZE {
+            return Err(PhoenixFsError::InvalidMetadataHeaderSize);
+        }
+        if read_u32(block, 20) != 0 {
+            return Err(PhoenixFsError::InvalidReservedField);
+        }
+
+        let expected = read_u32(block, METADATA_CHECKSUM_OFFSET);
+        if expected != metadata_crc32c(block) {
+            return Err(PhoenixFsError::MetadataChecksumMismatch);
+        }
+
+        let header = Self {
+            kind: MetadataKind::from_raw(read_u32(block, 16))?,
+            generation: read_u64(block, 24),
+            block_number: read_u64(block, 32),
+            payload_bytes: read_u32(block, 40),
+        };
+        header.validate()?;
+        Ok(header)
+    }
+
+    pub fn validate_for_volume(&self, total_blocks: u64) -> Result<(), PhoenixFsError> {
+        self.validate()?;
+        if self.block_number >= total_blocks {
+            return Err(PhoenixFsError::InvalidMetadataBlock(self.block_number));
+        }
+        Ok(())
+    }
+
+    fn write_prefix(&self, block: &mut [u8]) -> Result<(), PhoenixFsError> {
+        self.validate()?;
+        if block.len() != FILESYSTEM_BLOCK_SIZE {
+            return Err(PhoenixFsError::BufferSize);
+        }
+
+        block[..METADATA_HEADER_SIZE as usize].fill(0);
+        block[..8].copy_from_slice(&METADATA_MAGIC);
+        write_u32(block, 8, FORMAT_VERSION);
+        write_u32(block, 12, METADATA_HEADER_SIZE);
+        write_u32(block, 16, self.kind as u32);
+        write_u64(block, 24, self.generation);
+        write_u64(block, 32, self.block_number);
+        write_u32(block, 40, self.payload_bytes);
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<(), PhoenixFsError> {
+        if self.generation == 0 {
+            return Err(PhoenixFsError::InvalidMetadataGeneration);
+        }
+        if self.block_number < SUPERBLOCK_COPY_COUNT {
+            return Err(PhoenixFsError::InvalidMetadataBlock(self.block_number));
+        }
+
+        let capacity = FILESYSTEM_BLOCK_SIZE - METADATA_HEADER_SIZE as usize;
+        let payload_size = usize::try_from(self.payload_bytes)
+            .map_err(|_| PhoenixFsError::InvalidMetadataPayloadSize(self.payload_bytes))?;
+        if payload_size > capacity {
+            return Err(PhoenixFsError::InvalidMetadataPayloadSize(
+                self.payload_bytes,
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TreeNodeHeader {
+    pub metadata: MetadataBlockHeader,
+    pub level: u32,
+    pub item_count: u32,
+    pub entries_bytes: u32,
+}
+
+impl TreeNodeHeader {
+    pub fn new(
+        kind: MetadataKind,
+        generation: u64,
+        block_number: u64,
+        level: u32,
+        item_count: u32,
+        entries_bytes: u32,
+    ) -> Result<Self, PhoenixFsError> {
+        let payload_bytes = TREE_NODE_PREFIX_SIZE
+            .checked_add(entries_bytes)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+        let node = Self {
+            metadata: MetadataBlockHeader::new(kind, generation, block_number, payload_bytes),
+            level,
+            item_count,
+            entries_bytes,
+        };
+        node.validate()?;
+        Ok(node)
+    }
+
+    pub fn seal(&self, block: &mut [u8]) -> Result<(), PhoenixFsError> {
+        self.validate()?;
+        if block.len() != FILESYSTEM_BLOCK_SIZE {
+            return Err(PhoenixFsError::BufferSize);
+        }
+
+        self.metadata.write_prefix(block)?;
+        block[METADATA_HEADER_SIZE as usize..TREE_NODE_HEADER_SIZE as usize].fill(0);
+        write_u32(block, 48, self.level);
+        write_u32(block, 52, self.item_count);
+        write_u32(block, 56, self.entries_bytes);
+
+        let checksum = metadata_crc32c(block);
+        write_u32(block, METADATA_CHECKSUM_OFFSET, checksum);
+        Ok(())
+    }
+
+    pub fn decode(block: &[u8]) -> Result<Self, PhoenixFsError> {
+        let metadata = MetadataBlockHeader::decode(block)?;
+        let node = Self {
+            metadata,
+            level: read_u32(block, 48),
+            item_count: read_u32(block, 52),
+            entries_bytes: read_u32(block, 56),
+        };
+
+        if read_u32(block, 60) != 0 {
+            return Err(PhoenixFsError::InvalidReservedField);
+        }
+
+        node.validate()?;
+        Ok(node)
+    }
+
+    pub const fn entries_offset() -> usize {
+        TREE_NODE_HEADER_SIZE as usize
+    }
+
+    fn validate(&self) -> Result<(), PhoenixFsError> {
+        self.metadata.validate()?;
+
+        let expected_payload = TREE_NODE_PREFIX_SIZE
+            .checked_add(self.entries_bytes)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+        if self.metadata.payload_bytes != expected_payload {
+            return Err(PhoenixFsError::InvalidTreeNodePayloadSize(
+                self.metadata.payload_bytes,
+            ));
+        }
+
+        let entries_capacity = FILESYSTEM_BLOCK_SIZE - TREE_NODE_HEADER_SIZE as usize;
+        let entries_size = usize::try_from(self.entries_bytes)
+            .map_err(|_| PhoenixFsError::InvalidTreeNodePayloadSize(self.entries_bytes))?;
+        if entries_size > entries_capacity {
+            return Err(PhoenixFsError::InvalidTreeNodePayloadSize(
+                self.entries_bytes,
+            ));
+        }
+
+        if self.item_count == 0 && self.entries_bytes != 0 {
+            return Err(PhoenixFsError::InvalidTreeNodeItemCount);
+        }
+        if self.item_count != 0 && self.entries_bytes == 0 {
+            return Err(PhoenixFsError::InvalidTreeNodeItemCount);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Superblock {
     pub generation: u64,
     pub total_blocks: u64,
@@ -146,7 +391,7 @@ impl Superblock {
         write_u64(destination, 80, self.roots.free_space_tree);
 
         let checksum = superblock_crc32c(destination);
-        write_u32(destination, CHECKSUM_OFFSET, checksum);
+        write_u32(destination, SUPERBLOCK_CHECKSUM_OFFSET, checksum);
         Ok(())
     }
 
@@ -172,7 +417,7 @@ impl Superblock {
             return Err(PhoenixFsError::InvalidReservedField);
         }
 
-        let expected = read_u32(source, CHECKSUM_OFFSET);
+        let expected = read_u32(source, SUPERBLOCK_CHECKSUM_OFFSET);
         let actual = superblock_crc32c(source);
         if expected != actual {
             return Err(PhoenixFsError::ChecksumMismatch);
@@ -375,9 +620,17 @@ fn write_filesystem_block<D: BlockDevice>(
 }
 
 fn superblock_crc32c(bytes: &[u8]) -> u32 {
+    crc32c_with_zeroed_range(bytes, SUPERBLOCK_CHECKSUM_OFFSET, SUPERBLOCK_CHECKSUM_END)
+}
+
+fn metadata_crc32c(bytes: &[u8]) -> u32 {
+    crc32c_with_zeroed_range(bytes, METADATA_CHECKSUM_OFFSET, METADATA_CHECKSUM_END)
+}
+
+fn crc32c_with_zeroed_range(bytes: &[u8], zero_start: usize, zero_end: usize) -> u32 {
     let mut crc = !0_u32;
     for (index, byte) in bytes.iter().copied().enumerate() {
-        let value = if (CHECKSUM_OFFSET..CHECKSUM_END).contains(&index) {
+        let value = if (zero_start..zero_end).contains(&index) {
             0
         } else {
             byte
@@ -428,6 +681,84 @@ mod tests {
 
     const VOLUME_ID: [u8; 16] = *b"phoenix-volume-1";
     const ROOTS: TransactionRoots = TransactionRoots::new(2, 3);
+
+    #[test]
+    fn metadata_header_round_trip_preserves_payload() {
+        let header = MetadataBlockHeader::new(MetadataKind::ObjectTree, 9, 7, 5);
+        let mut block = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        block[METADATA_HEADER_SIZE as usize..METADATA_HEADER_SIZE as usize + 5]
+            .copy_from_slice(b"hello");
+
+        header.seal(&mut block).unwrap();
+
+        assert_eq!(MetadataBlockHeader::decode(&block), Ok(header));
+        assert_eq!(
+            &block[METADATA_HEADER_SIZE as usize..METADATA_HEADER_SIZE as usize + 5],
+            b"hello"
+        );
+    }
+
+    #[test]
+    fn metadata_checksum_covers_payload() {
+        let header = MetadataBlockHeader::new(MetadataKind::FreeSpaceTree, 3, 6, 1);
+        let mut block = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        block[METADATA_HEADER_SIZE as usize] = 0x5a;
+        header.seal(&mut block).unwrap();
+
+        block[METADATA_HEADER_SIZE as usize] ^= 1;
+
+        assert_eq!(
+            MetadataBlockHeader::decode(&block),
+            Err(PhoenixFsError::MetadataChecksumMismatch)
+        );
+    }
+
+    #[test]
+    fn metadata_header_rejects_reserved_or_out_of_volume_block() {
+        let reserved = MetadataBlockHeader::new(MetadataKind::ObjectTree, 1, 1, 0);
+        let outside = MetadataBlockHeader::new(MetadataKind::ObjectTree, 1, 8, 0);
+        let mut block = [0_u8; FILESYSTEM_BLOCK_SIZE];
+
+        assert_eq!(
+            reserved.seal(&mut block),
+            Err(PhoenixFsError::InvalidMetadataBlock(1))
+        );
+        assert_eq!(
+            outside.validate_for_volume(8),
+            Err(PhoenixFsError::InvalidMetadataBlock(8))
+        );
+    }
+
+    #[test]
+    fn tree_node_round_trip_preserves_entries() {
+        let node = TreeNodeHeader::new(MetadataKind::ObjectTree, 12, 7, 0, 2, 8).unwrap();
+        let mut block = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let offset = TreeNodeHeader::entries_offset();
+        block[offset..offset + 8].copy_from_slice(b"entries!");
+
+        node.seal(&mut block).unwrap();
+
+        assert_eq!(TreeNodeHeader::decode(&block), Ok(node));
+        assert_eq!(&block[offset..offset + 8], b"entries!");
+    }
+
+    #[test]
+    fn tree_node_accepts_empty_leaf() {
+        let node = TreeNodeHeader::new(MetadataKind::FreeSpaceTree, 4, 5, 0, 0, 0).unwrap();
+        let mut block = [0_u8; FILESYSTEM_BLOCK_SIZE];
+
+        node.seal(&mut block).unwrap();
+
+        assert_eq!(TreeNodeHeader::decode(&block), Ok(node));
+    }
+
+    #[test]
+    fn tree_node_rejects_item_count_without_entry_bytes() {
+        assert_eq!(
+            TreeNodeHeader::new(MetadataKind::ObjectTree, 2, 4, 0, 1, 0),
+            Err(PhoenixFsError::InvalidTreeNodeItemCount)
+        );
+    }
 
     #[test]
     fn superblock_round_trip_preserves_identity_and_generation() {

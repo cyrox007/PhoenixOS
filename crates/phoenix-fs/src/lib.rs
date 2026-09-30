@@ -82,6 +82,7 @@ pub enum PhoenixFsError {
     RetiredBlockStillReferenced(u64),
     ObjectRecordNotFound,
     ObjectRecordAlreadyExists,
+    ObjectLeafWouldBecomeEmpty,
     InvalidReclaimedBlock(u64),
     ReclaimedBlockAlreadyFree(u64),
     ObjectTreeDepthExceeded,
@@ -1698,6 +1699,41 @@ pub fn find_object_tree_path<D: BlockDevice>(
     maximum_generation: u64,
     buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
 ) -> Result<ObjectTreePath, PhoenixFsError> {
+    find_object_tree_path_with_mode(
+        device,
+        root_block,
+        target_key,
+        maximum_generation,
+        buffer,
+        false,
+    )
+}
+
+fn find_object_tree_path_for_insertion<D: BlockDevice>(
+    device: &mut D,
+    root_block: u64,
+    target_key: ObjectTreeKey,
+    maximum_generation: u64,
+    buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<ObjectTreePath, PhoenixFsError> {
+    find_object_tree_path_with_mode(
+        device,
+        root_block,
+        target_key,
+        maximum_generation,
+        buffer,
+        true,
+    )
+}
+
+fn find_object_tree_path_with_mode<D: BlockDevice>(
+    device: &mut D,
+    root_block: u64,
+    target_key: ObjectTreeKey,
+    maximum_generation: u64,
+    buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    insertion: bool,
+) -> Result<ObjectTreePath, PhoenixFsError> {
     target_key.validate()?;
     let mut path = ObjectTreePath::new();
     let mut current_block = root_block;
@@ -1736,13 +1772,15 @@ pub fn find_object_tree_path<D: BlockDevice>(
 
         if node.level == 0 {
             validate_object_leaf(buffer)?;
-            find_object_leaf_record(buffer, target_key)?;
+            if !insertion {
+                find_object_leaf_record(buffer, target_key)?;
+            }
             path.leaf_block = current_block;
             return Ok(path);
         }
 
         validate_object_internal(buffer)?;
-        let (child_index, child_record) = select_object_child(buffer, node, target_key)?;
+        let (child_index, child_record) = select_object_child(buffer, node, target_key, insertion)?;
         if path.parent_count == MAX_OBJECT_TREE_DEPTH {
             return Err(PhoenixFsError::ObjectTreeDepthExceeded);
         }
@@ -1764,6 +1802,7 @@ fn select_object_child(
     block: &[u8],
     node: TreeNodeHeader,
     target_key: ObjectTreeKey,
+    insertion: bool,
 ) -> Result<(usize, ObjectInternalRecord), PhoenixFsError> {
     let mut selected = None;
 
@@ -1783,7 +1822,13 @@ fn select_object_child(
         selected = Some((index, record));
     }
 
-    selected.ok_or(PhoenixFsError::ObjectRecordNotFound)
+    if let Some(selected) = selected {
+        return Ok(selected);
+    }
+    if insertion {
+        return Ok((0, object_internal_record_at(block, 0)?));
+    }
+    Err(PhoenixFsError::ObjectRecordNotFound)
 }
 
 fn find_object_leaf_record(block: &[u8], target_key: ObjectTreeKey) -> Result<(), PhoenixFsError> {
@@ -1825,11 +1870,100 @@ impl DeepRecordUpdateResult {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ObjectLeafMutation<'a> {
+    Replace { key: ObjectTreeKey, value: &'a [u8] },
+    Insert { key: ObjectTreeKey, value: &'a [u8] },
+    Delete { key: ObjectTreeKey },
+}
+
+impl ObjectLeafMutation<'_> {
+    const fn key(self) -> ObjectTreeKey {
+        match self {
+            Self::Replace { key, .. } | Self::Insert { key, .. } | Self::Delete { key } => key,
+        }
+    }
+
+    const fn is_insertion(self) -> bool {
+        matches!(self, Self::Insert { .. })
+    }
+}
+
 pub fn commit_object_record_update<D: BlockDevice>(
     device: &mut D,
     current: ActiveSuperblock,
     target_key: ObjectTreeKey,
     new_value: &[u8],
+    object_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    object_copy_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    current_free_space: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    next_free_space: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    superblock_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<DeepRecordUpdateResult, PhoenixFsError> {
+    commit_object_leaf_mutation(
+        device,
+        current,
+        ObjectLeafMutation::Replace {
+            key: target_key,
+            value: new_value,
+        },
+        object_buffer,
+        object_copy_buffer,
+        current_free_space,
+        next_free_space,
+        superblock_buffer,
+    )
+}
+
+pub fn commit_object_record_insert<D: BlockDevice>(
+    device: &mut D,
+    current: ActiveSuperblock,
+    key: ObjectTreeKey,
+    value: &[u8],
+    object_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    object_copy_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    current_free_space: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    next_free_space: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    superblock_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<DeepRecordUpdateResult, PhoenixFsError> {
+    commit_object_leaf_mutation(
+        device,
+        current,
+        ObjectLeafMutation::Insert { key, value },
+        object_buffer,
+        object_copy_buffer,
+        current_free_space,
+        next_free_space,
+        superblock_buffer,
+    )
+}
+
+pub fn commit_object_record_delete<D: BlockDevice>(
+    device: &mut D,
+    current: ActiveSuperblock,
+    key: ObjectTreeKey,
+    object_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    object_copy_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    current_free_space: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    next_free_space: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    superblock_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<DeepRecordUpdateResult, PhoenixFsError> {
+    commit_object_leaf_mutation(
+        device,
+        current,
+        ObjectLeafMutation::Delete { key },
+        object_buffer,
+        object_copy_buffer,
+        current_free_space,
+        next_free_space,
+        superblock_buffer,
+    )
+}
+
+fn commit_object_leaf_mutation<D: BlockDevice>(
+    device: &mut D,
+    current: ActiveSuperblock,
+    mutation: ObjectLeafMutation<'_>,
     object_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
     object_copy_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
     current_free_space: &mut [u8; FILESYSTEM_BLOCK_SIZE],
@@ -1842,14 +1976,25 @@ pub fn commit_object_record_update<D: BlockDevice>(
         .generation
         .checked_add(1)
         .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let key = mutation.key();
 
-    let path = find_object_tree_path(
-        device,
-        current.superblock.roots.object_tree,
-        target_key,
-        current.superblock.generation,
-        object_buffer,
-    )?;
+    let path = if mutation.is_insertion() {
+        find_object_tree_path_for_insertion(
+            device,
+            current.superblock.roots.object_tree,
+            key,
+            current.superblock.generation,
+            object_buffer,
+        )?
+    } else {
+        find_object_tree_path(
+            device,
+            current.superblock.roots.object_tree,
+            key,
+            current.superblock.generation,
+            object_buffer,
+        )?
+    };
 
     read_filesystem_block(
         device,
@@ -1870,19 +2015,54 @@ pub fn commit_object_record_update<D: BlockDevice>(
     let first_new_block = allocation.allocated.start_block;
 
     read_filesystem_block(device, path.leaf_block, object_buffer)?;
-    materialize_object_leaf_with_replaced_value(
-        object_buffer,
-        object_copy_buffer,
-        target_key,
-        new_value,
-        generation,
-        first_new_block,
-    )?;
+    let leaf = validate_object_leaf(object_buffer)?;
+    if matches!(mutation, ObjectLeafMutation::Delete { .. })
+        && path.parent_count > 0
+        && leaf.item_count == 1
+    {
+        return Err(PhoenixFsError::ObjectLeafWouldBecomeEmpty);
+    }
+
+    match mutation {
+        ObjectLeafMutation::Replace { key, value } => {
+            materialize_object_leaf_with_replaced_value(
+                object_buffer,
+                object_copy_buffer,
+                key,
+                value,
+                generation,
+                first_new_block,
+            )?;
+        }
+        ObjectLeafMutation::Insert { key, value } => {
+            materialize_object_leaf_with_inserted_value(
+                object_buffer,
+                object_copy_buffer,
+                key,
+                value,
+                generation,
+                first_new_block,
+            )?;
+        }
+        ObjectLeafMutation::Delete { key } => {
+            materialize_object_leaf_without_key(
+                object_buffer,
+                object_copy_buffer,
+                key,
+                generation,
+                first_new_block,
+            )?;
+        }
+    }
     write_filesystem_block(device, first_new_block, object_copy_buffer)?;
 
     let leaf_node = TreeNodeHeader::decode(object_copy_buffer)?;
     let mut new_child_block = first_new_block;
-    let mut new_child_first_key = first_object_node_key(object_copy_buffer, leaf_node)?;
+    let mut new_child_first_key = if path.parent_count == 0 && leaf_node.item_count == 0 {
+        None
+    } else {
+        Some(first_object_node_key(object_copy_buffer, leaf_node)?)
+    };
     let mut next_block = first_new_block
         .checked_add(1)
         .ok_or(PhoenixFsError::ArithmeticOverflow)?;
@@ -1900,6 +2080,8 @@ pub fn commit_object_record_update<D: BlockDevice>(
             return Err(PhoenixFsError::ObjectTreePathMismatch);
         }
 
+        let child_first_key =
+            new_child_first_key.ok_or(PhoenixFsError::ObjectLeafWouldBecomeEmpty)?;
         materialize_object_internal_after_child_copy(
             object_buffer,
             object_copy_buffer,
@@ -1907,12 +2089,12 @@ pub fn commit_object_record_update<D: BlockDevice>(
             next_block,
             step.child_index as usize,
             new_child_block,
-            new_child_first_key,
+            child_first_key,
         )?;
         write_filesystem_block(device, next_block, object_copy_buffer)?;
 
         let copied_parent = TreeNodeHeader::decode(object_copy_buffer)?;
-        new_child_first_key = first_object_node_key(object_copy_buffer, copied_parent)?;
+        new_child_first_key = Some(first_object_node_key(object_copy_buffer, copied_parent)?);
         new_child_block = next_block;
         next_block = next_block
             .checked_add(1)
@@ -3792,7 +3974,10 @@ mod tests {
         .unwrap();
         node.seal(&mut root).unwrap();
 
-        assert_eq!(select_object_child(&root, node, target).unwrap().0, 1);
+        assert_eq!(
+            select_object_child(&root, node, target, false).unwrap().0,
+            1
+        );
     }
 
     #[test]
@@ -3837,6 +4022,262 @@ mod tests {
         assert_eq!(
             find_object_tree_path(&mut device, 8, actual, 5, &mut buffer),
             Err(PhoenixFsError::ObjectTreePathMismatch)
+        );
+    }
+
+    #[test]
+    fn deep_record_insert_updates_first_separator_when_key_becomes_smaller() {
+        let mut device = MemoryBlockDevice::<512, 512>::new();
+        let old_key = ObjectTreeKey::new(10, ObjectRecordKind::Metadata, 0);
+        let inserted_key = ObjectTreeKey::new(5, ObjectRecordKind::Metadata, 0);
+
+        let mut leaf = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let leaf_start = TreeNodeHeader::entries_offset();
+        let old_record = ObjectLeafRecordHeader::new(old_key, 1).unwrap();
+        let leaf_bytes = old_record
+            .encode_with_value(&mut leaf[leaf_start..], b"x")
+            .unwrap();
+        TreeNodeHeader::new(MetadataKind::ObjectTree, 3, 10, 0, 1, leaf_bytes as u32)
+            .unwrap()
+            .seal(&mut leaf)
+            .unwrap();
+
+        let mut root = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let root_start = TreeNodeHeader::entries_offset();
+        ObjectInternalRecord::new(old_key, 10)
+            .unwrap()
+            .encode(&mut root[root_start..root_start + OBJECT_INTERNAL_RECORD_SIZE])
+            .unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            4,
+            8,
+            1,
+            1,
+            OBJECT_INTERNAL_RECORD_SIZE as u32,
+        )
+        .unwrap()
+        .seal(&mut root)
+        .unwrap();
+
+        let mut free_root = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        write_free_space_extent(&mut free_root, 0, FreeSpaceExtent::new(20, 10)).unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::FreeSpaceTree,
+            5,
+            9,
+            0,
+            1,
+            FREE_SPACE_RECORD_SIZE as u32,
+        )
+        .unwrap()
+        .seal(&mut free_root)
+        .unwrap();
+
+        write_filesystem_block(&mut device, 8, &root).unwrap();
+        write_filesystem_block(&mut device, 10, &leaf).unwrap();
+        write_filesystem_block(&mut device, 9, &free_root).unwrap();
+
+        let current = ActiveSuperblock {
+            superblock: Superblock::new(5, 64, VOLUME_ID, TransactionRoots::new(8, 9)).unwrap(),
+            slot: SuperblockSlot::First,
+        };
+        let mut object_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut object_copy = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut current_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut next_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut superblock_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+
+        let result = commit_object_record_insert(
+            &mut device,
+            current,
+            inserted_key,
+            b"y",
+            &mut object_buffer,
+            &mut object_copy,
+            &mut current_free,
+            &mut next_free,
+            &mut superblock_buffer,
+        )
+        .unwrap();
+
+        let mut new_root = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        read_filesystem_block(
+            &mut device,
+            result.active.superblock.roots.object_tree,
+            &mut new_root,
+        )
+        .unwrap();
+        let pointer = object_internal_record_at(&new_root, 0).unwrap();
+        assert_eq!(pointer.key, inserted_key);
+    }
+
+    #[test]
+    fn deep_record_delete_updates_separator_to_remaining_first_key() {
+        let mut device = MemoryBlockDevice::<512, 512>::new();
+        let first_key = ObjectTreeKey::new(5, ObjectRecordKind::Metadata, 0);
+        let second_key = ObjectTreeKey::new(10, ObjectRecordKind::Metadata, 0);
+
+        let mut leaf = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let leaf_start = TreeNodeHeader::entries_offset();
+        let mut cursor = leaf_start;
+        for key in [first_key, second_key] {
+            let record = ObjectLeafRecordHeader::new(key, 1).unwrap();
+            cursor += record.encode_with_value(&mut leaf[cursor..], b"x").unwrap();
+        }
+        TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            3,
+            10,
+            0,
+            2,
+            (cursor - leaf_start) as u32,
+        )
+        .unwrap()
+        .seal(&mut leaf)
+        .unwrap();
+
+        let mut root = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let root_start = TreeNodeHeader::entries_offset();
+        ObjectInternalRecord::new(first_key, 10)
+            .unwrap()
+            .encode(&mut root[root_start..root_start + OBJECT_INTERNAL_RECORD_SIZE])
+            .unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            4,
+            8,
+            1,
+            1,
+            OBJECT_INTERNAL_RECORD_SIZE as u32,
+        )
+        .unwrap()
+        .seal(&mut root)
+        .unwrap();
+
+        let mut free_root = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        write_free_space_extent(&mut free_root, 0, FreeSpaceExtent::new(20, 10)).unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::FreeSpaceTree,
+            5,
+            9,
+            0,
+            1,
+            FREE_SPACE_RECORD_SIZE as u32,
+        )
+        .unwrap()
+        .seal(&mut free_root)
+        .unwrap();
+
+        write_filesystem_block(&mut device, 8, &root).unwrap();
+        write_filesystem_block(&mut device, 10, &leaf).unwrap();
+        write_filesystem_block(&mut device, 9, &free_root).unwrap();
+
+        let current = ActiveSuperblock {
+            superblock: Superblock::new(5, 64, VOLUME_ID, TransactionRoots::new(8, 9)).unwrap(),
+            slot: SuperblockSlot::First,
+        };
+        let mut object_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut object_copy = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut current_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut next_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut superblock_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+
+        let result = commit_object_record_delete(
+            &mut device,
+            current,
+            first_key,
+            &mut object_buffer,
+            &mut object_copy,
+            &mut current_free,
+            &mut next_free,
+            &mut superblock_buffer,
+        )
+        .unwrap();
+
+        let mut new_root = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        read_filesystem_block(
+            &mut device,
+            result.active.superblock.roots.object_tree,
+            &mut new_root,
+        )
+        .unwrap();
+        let pointer = object_internal_record_at(&new_root, 0).unwrap();
+        assert_eq!(pointer.key, second_key);
+    }
+
+    #[test]
+    fn deep_record_delete_rejects_emptying_non_root_leaf() {
+        let mut device = MemoryBlockDevice::<512, 512>::new();
+        let key = ObjectTreeKey::new(5, ObjectRecordKind::Metadata, 0);
+
+        let mut leaf = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let start = TreeNodeHeader::entries_offset();
+        let record = ObjectLeafRecordHeader::new(key, 1).unwrap();
+        let size = record.encode_with_value(&mut leaf[start..], b"x").unwrap();
+        TreeNodeHeader::new(MetadataKind::ObjectTree, 3, 10, 0, 1, size as u32)
+            .unwrap()
+            .seal(&mut leaf)
+            .unwrap();
+
+        let mut root = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let root_start = TreeNodeHeader::entries_offset();
+        ObjectInternalRecord::new(key, 10)
+            .unwrap()
+            .encode(&mut root[root_start..root_start + OBJECT_INTERNAL_RECORD_SIZE])
+            .unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            4,
+            8,
+            1,
+            1,
+            OBJECT_INTERNAL_RECORD_SIZE as u32,
+        )
+        .unwrap()
+        .seal(&mut root)
+        .unwrap();
+
+        let mut free_root = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        write_free_space_extent(&mut free_root, 0, FreeSpaceExtent::new(20, 10)).unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::FreeSpaceTree,
+            5,
+            9,
+            0,
+            1,
+            FREE_SPACE_RECORD_SIZE as u32,
+        )
+        .unwrap()
+        .seal(&mut free_root)
+        .unwrap();
+
+        write_filesystem_block(&mut device, 8, &root).unwrap();
+        write_filesystem_block(&mut device, 10, &leaf).unwrap();
+        write_filesystem_block(&mut device, 9, &free_root).unwrap();
+
+        let current = ActiveSuperblock {
+            superblock: Superblock::new(5, 64, VOLUME_ID, TransactionRoots::new(8, 9)).unwrap(),
+            slot: SuperblockSlot::First,
+        };
+        let mut object_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut object_copy = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut current_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut next_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut superblock_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+
+        assert_eq!(
+            commit_object_record_delete(
+                &mut device,
+                current,
+                key,
+                &mut object_buffer,
+                &mut object_copy,
+                &mut current_free,
+                &mut next_free,
+                &mut superblock_buffer,
+            ),
+            Err(PhoenixFsError::ObjectLeafWouldBecomeEmpty)
         );
     }
 

@@ -3104,11 +3104,11 @@ mod tests {
     fn phoenix_vfs_resolves_path_and_reads_file() {
         use phoenix_vfs::{FileSystem, NodeId, resolve_path};
 
-        let mut device = MemoryBlockDevice::<512, 512>::new();
+        let device = MemoryBlockDevice::<512, 40>::new();
         let root_metadata = ObjectMetadataValue::new(ObjectType::Directory, 0, 1, 1, 1);
         let file_metadata = ObjectMetadataValue::new(ObjectType::File, 5, 1, 1, 1);
         let directory_entry = DirectoryEntryValue::new(2, ObjectType::File).unwrap();
-        let extent = ExtentValue::new(20, 1, 5);
+        let extent = ExtentValue::new(4, 1, 5);
 
         let mut root_metadata_bytes = [0_u8; OBJECT_METADATA_VALUE_SIZE];
         let mut file_metadata_bytes = [0_u8; OBJECT_METADATA_VALUE_SIZE];
@@ -3152,7 +3152,7 @@ mod tests {
         TreeNodeHeader::new(
             MetadataKind::ObjectTree,
             5,
-            8,
+            2,
             0,
             records.len() as u32,
             (cursor - start) as u32,
@@ -3166,11 +3166,12 @@ mod tests {
             block[..5].copy_from_slice(b"hello");
             block
         };
-        write_filesystem_block(&mut device, 8, &object_root).unwrap();
-        write_filesystem_block(&mut device, 20, &data).unwrap();
+        let mut device = device;
+        write_filesystem_block(&mut device, 2, &object_root).unwrap();
+        write_filesystem_block(&mut device, 4, &data).unwrap();
 
         let active = ActiveSuperblock {
-            superblock: Superblock::new(5, 64, VOLUME_ID, TransactionRoots::new(8, 9)).unwrap(),
+            superblock: Superblock::new(5, 5, VOLUME_ID, TransactionRoots::new(2, 3)).unwrap(),
             slot: SuperblockSlot::First,
         };
         let filesystem = PhoenixVfs::new(device, active).unwrap();
@@ -3194,9 +3195,9 @@ mod tests {
     fn phoenix_vfs_rejects_mutation_until_write_path_is_atomic() {
         use phoenix_vfs::{FileSystem, NodeId};
 
-        let mut device = MemoryBlockDevice::<512, 512>::new();
+        let device = MemoryBlockDevice::<512, 40>::new();
         let active = ActiveSuperblock {
-            superblock: Superblock::new(5, 64, VOLUME_ID, TransactionRoots::new(8, 9)).unwrap(),
+            superblock: Superblock::new(5, 5, VOLUME_ID, TransactionRoots::new(2, 3)).unwrap(),
             slot: SuperblockSlot::First,
         };
         let mut filesystem = PhoenixVfs::new(device, active).unwrap();

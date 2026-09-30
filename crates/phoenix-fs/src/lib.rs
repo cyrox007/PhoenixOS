@@ -3522,6 +3522,33 @@ fn materialize_object_leaf_insert_split_side(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn count_full_parent_chain<D: BlockDevice>(
+    device: &mut D,
+    current: ActiveSuperblock,
+    path: ObjectTreePath,
+    buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<usize, PhoenixFsError> {
+    let mut full = 0_usize;
+
+    for parent_position in (0..path.parent_count).rev() {
+        let step = path.parents[parent_position];
+        read_filesystem_block(device, step.block_number, buffer)?;
+        let parent = validate_object_internal(buffer)?;
+        if parent.metadata.generation > current.superblock.generation {
+            return Err(PhoenixFsError::ObjectNodeGenerationAhead);
+        }
+        validate_path_pointer(buffer, step)?;
+
+        if object_internal_can_accept_split(buffer)? {
+            break;
+        }
+        full += 1;
+    }
+
+    Ok(full)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn commit_nonroot_leaf_split_insertions<D: BlockDevice>(
     device: &mut D,
     current: ActiveSuperblock,
@@ -3542,6 +3569,7 @@ fn commit_nonroot_leaf_split_insertions<D: BlockDevice>(
         return Err(PhoenixFsError::ObjectTreePathMismatch);
     }
 
+    let full_parent_count = count_full_parent_chain(device, current, path, object_copy_buffer)?;
     let split_index = choose_object_leaf_split_index(current_leaf, insertions)?;
     let total_items = leaf.item_count as usize + insertions.len();
     let generation = current
@@ -3549,19 +3577,37 @@ fn commit_nonroot_leaf_split_insertions<D: BlockDevice>(
         .generation
         .checked_add(1)
         .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+
+    let requested_blocks = if full_parent_count == path.parent_count {
+        2_usize
+            .checked_add(
+                full_parent_count
+                    .checked_mul(2)
+                    .ok_or(PhoenixFsError::ArithmeticOverflow)?,
+            )
+            .and_then(|value| value.checked_add(2))
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?
+    } else {
+        path.parent_count
+            .checked_add(full_parent_count)
+            .and_then(|value| value.checked_add(3))
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?
+    };
     let requested_blocks =
-        u64::try_from(path.parent_count + 3).map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
+        u64::try_from(requested_blocks).map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
     let allocation = plan_cow_allocation(
         current_free_space,
         current.superblock.total_blocks,
         requested_blocks,
     )?;
 
-    let left_block = allocation.allocated.start_block;
-    let right_block = left_block
+    let mut next_block = allocation.allocated.start_block;
+    let left_block = next_block;
+    next_block = next_block
         .checked_add(1)
         .ok_or(PhoenixFsError::ArithmeticOverflow)?;
-    let parent_block = right_block
+    let right_block = next_block;
+    next_block = next_block
         .checked_add(1)
         .ok_or(PhoenixFsError::ArithmeticOverflow)?;
 
@@ -3574,7 +3620,7 @@ fn commit_nonroot_leaf_split_insertions<D: BlockDevice>(
         0,
         split_index,
     )?;
-    let left_key = first_object_node_key(object_copy_buffer, left)?;
+    let mut left_key = first_object_node_key(object_copy_buffer, left)?;
     write_filesystem_block(device, left_block, object_copy_buffer)?;
 
     let right = materialize_object_leaf_insert_split_side(
@@ -3586,47 +3632,148 @@ fn commit_nonroot_leaf_split_insertions<D: BlockDevice>(
         split_index,
         total_items,
     )?;
-    let right_key = first_object_node_key(object_copy_buffer, right)?;
+    let mut right_key = first_object_node_key(object_copy_buffer, right)?;
     write_filesystem_block(device, right_block, object_copy_buffer)?;
 
-    let parent_position = path.parent_count - 1;
-    let parent_step = path.parents[parent_position];
-    read_filesystem_block(device, parent_step.block_number, object_copy_buffer)?;
-    validate_path_pointer(object_copy_buffer, parent_step)?;
+    let mut left_child_block = left_block;
+    let mut right_child_block = right_block;
+    let mut first_single_parent = None;
+    let mut top_split_level = None;
 
-    let mut parent_source = [0_u8; FILESYSTEM_BLOCK_SIZE];
-    parent_source.copy_from_slice(object_copy_buffer);
-    materialize_object_internal_after_child_split(
-        &parent_source,
-        object_copy_buffer,
-        generation,
-        parent_block,
-        parent_step.child_index as usize,
-        left_block,
-        left_key,
-        right_block,
-        right_key,
-    )?;
-    write_filesystem_block(device, parent_block, object_copy_buffer)?;
+    for parent_position in (0..path.parent_count).rev() {
+        let step = path.parents[parent_position];
+        read_filesystem_block(device, step.block_number, object_copy_buffer)?;
+        let parent = validate_object_internal(object_copy_buffer)?;
+        if parent.metadata.generation > current.superblock.generation {
+            return Err(PhoenixFsError::ObjectNodeGenerationAhead);
+        }
+        validate_path_pointer(object_copy_buffer, step)?;
 
-    let parent_node = TreeNodeHeader::decode(object_copy_buffer)?;
-    let parent_first_key = first_object_node_key(object_copy_buffer, parent_node)?;
-    let mut next_block = parent_block
-        .checked_add(1)
-        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
-    let root = copy_object_parent_range(
-        device,
-        current,
-        path,
-        0,
-        parent_position,
-        parent_block,
-        parent_first_key,
-        generation,
-        &mut next_block,
-        &mut parent_source,
-        object_copy_buffer,
-    )?;
+        let mut parent_source = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        parent_source.copy_from_slice(object_copy_buffer);
+
+        if object_internal_can_accept_split(&parent_source)? {
+            materialize_object_internal_after_child_split(
+                &parent_source,
+                object_copy_buffer,
+                generation,
+                next_block,
+                step.child_index as usize,
+                left_child_block,
+                left_key,
+                right_child_block,
+                right_key,
+            )?;
+            write_filesystem_block(device, next_block, object_copy_buffer)?;
+
+            let node = TreeNodeHeader::decode(object_copy_buffer)?;
+            let key = first_object_node_key(object_copy_buffer, node)?;
+            first_single_parent = Some((parent_position, next_block, key));
+            next_block = next_block
+                .checked_add(1)
+                .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+            break;
+        }
+
+        let total_records = parent.item_count as usize + 1;
+        let split_at = total_records / 2;
+        let left_parent_block = next_block;
+        next_block = next_block
+            .checked_add(1)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+        let right_parent_block = next_block;
+        next_block = next_block
+            .checked_add(1)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+
+        let source_left_block = left_child_block;
+        let source_left_key = left_key;
+        let source_right_block = right_child_block;
+        let source_right_key = right_key;
+
+        let left_parent = materialize_object_internal_child_split_side(
+            &parent_source,
+            object_copy_buffer,
+            generation,
+            left_parent_block,
+            step.child_index as usize,
+            source_left_block,
+            source_left_key,
+            source_right_block,
+            source_right_key,
+            0,
+            split_at,
+        )?;
+        let next_left_key = first_object_node_key(object_copy_buffer, left_parent)?;
+        write_filesystem_block(device, left_parent_block, object_copy_buffer)?;
+
+        let right_parent = materialize_object_internal_child_split_side(
+            &parent_source,
+            object_copy_buffer,
+            generation,
+            right_parent_block,
+            step.child_index as usize,
+            source_left_block,
+            source_left_key,
+            source_right_block,
+            source_right_key,
+            split_at,
+            total_records,
+        )?;
+        let next_right_key = first_object_node_key(object_copy_buffer, right_parent)?;
+        write_filesystem_block(device, right_parent_block, object_copy_buffer)?;
+
+        left_child_block = left_parent_block;
+        left_key = next_left_key;
+        right_child_block = right_parent_block;
+        right_key = next_right_key;
+        top_split_level = Some(parent.level);
+    }
+
+    let root = if let Some((parent_position, block, key)) = first_single_parent {
+        let mut parent_read_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        copy_object_parent_range(
+            device,
+            current,
+            path,
+            0,
+            parent_position,
+            block,
+            key,
+            generation,
+            &mut next_block,
+            &mut parent_read_buffer,
+            object_copy_buffer,
+        )?
+    } else {
+        let level = top_split_level
+            .and_then(|value| value.checked_add(1))
+            .ok_or(PhoenixFsError::InvalidObjectTreeLevel)?;
+        object_copy_buffer.fill(0);
+        let start = TreeNodeHeader::entries_offset();
+        ObjectInternalRecord::new(left_key, left_child_block)?
+            .encode(&mut object_copy_buffer[start..start + OBJECT_INTERNAL_RECORD_SIZE])?;
+        ObjectInternalRecord::new(right_key, right_child_block)?.encode(
+            &mut object_copy_buffer
+                [start + OBJECT_INTERNAL_RECORD_SIZE..start + 2 * OBJECT_INTERNAL_RECORD_SIZE],
+        )?;
+        let root = TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            generation,
+            next_block,
+            level,
+            2,
+            (2 * OBJECT_INTERNAL_RECORD_SIZE) as u32,
+        )?;
+        root.seal(object_copy_buffer)?;
+        validate_object_internal(object_copy_buffer)?;
+        write_filesystem_block(device, next_block, object_copy_buffer)?;
+        let block = next_block;
+        next_block = next_block
+            .checked_add(1)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+        (block, left_key)
+    };
 
     let free_space_block = next_block;
     let allocation_end = allocation.allocated.end_block_exclusive()?;
@@ -4527,6 +4674,105 @@ pub fn materialize_object_internal_after_child_rewrites(
         current_node.level,
         current_node.item_count,
         current_node.entries_bytes,
+    )?;
+    next.seal(destination)?;
+    validate_object_internal(destination)?;
+    Ok(next)
+}
+
+fn object_internal_capacity() -> usize {
+    (FILESYSTEM_BLOCK_SIZE - TreeNodeHeader::entries_offset()) / OBJECT_INTERNAL_RECORD_SIZE
+}
+
+fn object_internal_can_accept_split(block: &[u8]) -> Result<bool, PhoenixFsError> {
+    let node = validate_object_internal(block)?;
+    let next_count = (node.item_count as usize)
+        .checked_add(1)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    Ok(next_count <= object_internal_capacity())
+}
+
+fn materialize_object_internal_child_split_side(
+    current: &[u8],
+    destination: &mut [u8],
+    new_generation: u64,
+    new_block_number: u64,
+    child_index: usize,
+    left_block: u64,
+    left_first_key: ObjectTreeKey,
+    right_block: u64,
+    right_first_key: ObjectTreeKey,
+    range_start: usize,
+    range_end: usize,
+) -> Result<TreeNodeHeader, PhoenixFsError> {
+    let current_node = validate_object_internal(current)?;
+    validate_rewrite_target(current_node, new_generation, new_block_number)?;
+
+    if child_index >= current_node.item_count as usize
+        || left_first_key >= right_first_key
+        || range_start >= range_end
+        || left_block == right_block
+        || left_block == new_block_number
+        || right_block == new_block_number
+    {
+        return Err(PhoenixFsError::InvalidObjectRewriteTarget);
+    }
+    validate_object_child_block(left_block)?;
+    validate_object_child_block(right_block)?;
+    left_first_key.validate()?;
+    right_first_key.validate()?;
+
+    let total_records = current_node.item_count as usize + 1;
+    if range_end > total_records {
+        return Err(PhoenixFsError::InvalidObjectRewriteTarget);
+    }
+
+    destination.fill(0);
+    let start = TreeNodeHeader::entries_offset();
+    let mut output_index = 0_usize;
+    let mut merged_index = 0_usize;
+
+    for input_index in 0..current_node.item_count as usize {
+        if input_index == child_index {
+            for record in [
+                ObjectInternalRecord::new(left_first_key, left_block)?,
+                ObjectInternalRecord::new(right_first_key, right_block)?,
+            ] {
+                if (range_start..range_end).contains(&merged_index) {
+                    record.encode(
+                        &mut destination[start + output_index * OBJECT_INTERNAL_RECORD_SIZE
+                            ..start + (output_index + 1) * OBJECT_INTERNAL_RECORD_SIZE],
+                    )?;
+                    output_index += 1;
+                }
+                merged_index += 1;
+            }
+            continue;
+        }
+
+        let record = object_internal_record_at(current, input_index)?;
+        if (range_start..range_end).contains(&merged_index) {
+            record.encode(
+                &mut destination[start + output_index * OBJECT_INTERNAL_RECORD_SIZE
+                    ..start + (output_index + 1) * OBJECT_INTERNAL_RECORD_SIZE],
+            )?;
+            output_index += 1;
+        }
+        merged_index += 1;
+    }
+
+    let item_count =
+        u32::try_from(range_end - range_start).map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
+    let entries_bytes = output_index
+        .checked_mul(OBJECT_INTERNAL_RECORD_SIZE)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let next = TreeNodeHeader::new(
+        MetadataKind::ObjectTree,
+        new_generation,
+        new_block_number,
+        current_node.level,
+        item_count,
+        entries_bytes as u32,
     )?;
     next.seal(destination)?;
     validate_object_internal(destination)?;
@@ -6308,6 +6554,113 @@ mod tests {
             ),
             Err(PhoenixFsError::ObjectNotEmpty)
         );
+    }
+
+    #[test]
+    fn recursive_split_raises_new_root_when_parent_is_full() {
+        let mut device = MemoryBlockDevice::<512, 512>::new();
+        let current = ActiveSuperblock {
+            superblock: Superblock::new(5, 64, VOLUME_ID, TransactionRoots::new(8, 9)).unwrap(),
+            slot: SuperblockSlot::First,
+        };
+
+        let mut root = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let root_start = TreeNodeHeader::entries_offset();
+        for index in 0..126_usize {
+            let key = ObjectTreeKey::new((index + 1) as u64, ObjectRecordKind::Metadata, 0);
+            let child_block = if index == 125 { 11 } else { 10 };
+            ObjectInternalRecord::new(key, child_block)
+                .unwrap()
+                .encode(
+                    &mut root[root_start + index * OBJECT_INTERNAL_RECORD_SIZE
+                        ..root_start + (index + 1) * OBJECT_INTERNAL_RECORD_SIZE],
+                )
+                .unwrap();
+        }
+        TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            5,
+            8,
+            1,
+            126,
+            (126 * OBJECT_INTERNAL_RECORD_SIZE) as u32,
+        )
+        .unwrap()
+        .seal(&mut root)
+        .unwrap();
+
+        let target_leaf_block = 11_u64;
+        let mut leaf = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let leaf_start = TreeNodeHeader::entries_offset();
+        let mut cursor = leaf_start;
+        let payload = [0x44_u8; 192];
+        for object_id in 126..=143_u64 {
+            let key = ObjectTreeKey::new(object_id, ObjectRecordKind::Metadata, 0);
+            let record = ObjectLeafRecordHeader::new(key, payload.len() as u32).unwrap();
+            cursor += record
+                .encode_with_value(&mut leaf[cursor..], &payload)
+                .unwrap();
+        }
+        TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            4,
+            target_leaf_block,
+            0,
+            18,
+            (cursor - leaf_start) as u32,
+        )
+        .unwrap()
+        .seal(&mut leaf)
+        .unwrap();
+
+        let mut free_root = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        write_free_space_extent(&mut free_root, 0, FreeSpaceExtent::new(20, 40)).unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::FreeSpaceTree,
+            5,
+            9,
+            0,
+            1,
+            FREE_SPACE_RECORD_SIZE as u32,
+        )
+        .unwrap()
+        .seal(&mut free_root)
+        .unwrap();
+
+        write_filesystem_block(&mut device, 8, &root).unwrap();
+        write_filesystem_block(&mut device, target_leaf_block, &leaf).unwrap();
+        write_filesystem_block(&mut device, 9, &free_root).unwrap();
+
+        let inserted_key = ObjectTreeKey::new(144, ObjectRecordKind::Metadata, 0);
+        let mut object_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut object_copy = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut current_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut next_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut superblock_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+
+        let result = commit_object_record_insert(
+            &mut device,
+            current,
+            inserted_key,
+            &payload,
+            &mut object_buffer,
+            &mut object_copy,
+            &mut current_free,
+            &mut next_free,
+            &mut superblock_buffer,
+        )
+        .unwrap();
+
+        let mut new_root = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        read_filesystem_block(
+            &mut device,
+            result.active.superblock.roots.object_tree,
+            &mut new_root,
+        )
+        .unwrap();
+        let root_node = validate_object_internal(&new_root).unwrap();
+        assert_eq!(root_node.level, 2);
+        assert_eq!(root_node.item_count, 2);
     }
 
     #[test]

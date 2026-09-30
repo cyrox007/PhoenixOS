@@ -4713,9 +4713,16 @@ fn materialize_object_internal_child_split_side(
     if child_index >= current_node.item_count as usize
         || left_first_key >= right_first_key
         || range_start >= range_end
+        || left_block == right_block
+        || left_block == new_block_number
+        || right_block == new_block_number
     {
         return Err(PhoenixFsError::InvalidObjectRewriteTarget);
     }
+    validate_object_child_block(left_block)?;
+    validate_object_child_block(right_block)?;
+    left_first_key.validate()?;
+    right_first_key.validate()?;
 
     let total_records = current_node.item_count as usize + 1;
     if range_end > total_records {

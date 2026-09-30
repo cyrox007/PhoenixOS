@@ -1780,8 +1780,7 @@ fn find_object_tree_path_with_mode<D: BlockDevice>(
         }
 
         validate_object_internal(buffer)?;
-        let (child_index, child_record) =
-            select_object_child(buffer, node, target_key, insertion)?;
+        let (child_index, child_record) = select_object_child(buffer, node, target_key, insertion)?;
         if path.parent_count == MAX_OBJECT_TREE_DEPTH {
             return Err(PhoenixFsError::ObjectTreeDepthExceeded);
         }
@@ -1873,17 +1872,9 @@ impl DeepRecordUpdateResult {
 
 #[derive(Debug, Clone, Copy)]
 enum ObjectLeafMutation<'a> {
-    Replace {
-        key: ObjectTreeKey,
-        value: &'a [u8],
-    },
-    Insert {
-        key: ObjectTreeKey,
-        value: &'a [u8],
-    },
-    Delete {
-        key: ObjectTreeKey,
-    },
+    Replace { key: ObjectTreeKey, value: &'a [u8] },
+    Insert { key: ObjectTreeKey, value: &'a [u8] },
+    Delete { key: ObjectTreeKey },
 }
 
 impl ObjectLeafMutation<'_> {
@@ -3983,7 +3974,10 @@ mod tests {
         .unwrap();
         node.seal(&mut root).unwrap();
 
-        assert_eq!(select_object_child(&root, node, target, false).unwrap().0, 1);
+        assert_eq!(
+            select_object_child(&root, node, target, false).unwrap().0,
+            1
+        );
     }
 
     #[test]
@@ -4129,9 +4123,7 @@ mod tests {
         let mut cursor = leaf_start;
         for key in [first_key, second_key] {
             let record = ObjectLeafRecordHeader::new(key, 1).unwrap();
-            cursor += record
-                .encode_with_value(&mut leaf[cursor..], b"x")
-                .unwrap();
+            cursor += record.encode_with_value(&mut leaf[cursor..], b"x").unwrap();
         }
         TreeNodeHeader::new(
             MetadataKind::ObjectTree,

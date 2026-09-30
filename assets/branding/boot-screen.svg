@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080" role="img" aria-labelledby="title">
+<title id="title">PhoenixOS — загрузочный экран</title>
+<defs>
+  <radialGradient id="bg" cx=".5" cy=".55" r=".7">
+    <stop offset="0" stop-color="#15263A"/>
+    <stop offset=".48" stop-color="#0A1420"/>
+    <stop offset="1" stop-color="#05070B"/>
+  </radialGradient>
+  <linearGradient id="horizon" x1="0" x2="1">
+    <stop offset="0" stop-color="#2EA8FF" stop-opacity="0"/>
+    <stop offset=".45" stop-color="#2EA8FF" stop-opacity=".7"/>
+    <stop offset=".55" stop-color="#FF7A18" stop-opacity=".8"/>
+    <stop offset="1" stop-color="#FF7A18" stop-opacity="0"/>
+  </linearGradient>
+  <linearGradient id="mark" x1="0" y1="1" x2="1" y2="0">
+    <stop offset="0" stop-color="#2EA8FF"/>
+    <stop offset=".52" stop-color="#DCE7F2"/>
+    <stop offset=".72" stop-color="#FF7A18"/>
+    <stop offset="1" stop-color="#FFC14D"/>
+  </linearGradient>
+</defs>
+<rect width="1920" height="1080" fill="url(#bg)"/>
+<circle cx="960" cy="460" r="245" fill="none" stroke="#FF8A22" stroke-opacity=".35" stroke-width="3"/>
+<path d="M960 650c-104-47-178-137-198-257 83 75 156 88 214 65-62-22-106-70-129-137 100 60 186 67 254 17-23 60-61 103-112 129 73 26 139 18 201-27-34 105-111 176-230 210Z" fill="url(#mark)"/>
+<path d="M1070 318c42-6 79 5 111 33-38-8-69-4-95 11 21 2 39 12 56 29-41-12-75-4-104 22 4-36 14-68 32-95Z" fill="#FFC14D"/>
+<rect x="240" y="825" width="1440" height="3" rx="2" fill="url(#horizon)"/>
+<text x="960" y="792" text-anchor="middle" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="70" letter-spacing="14" fill="#EAF1F7">PHOENIX<tspan fill="#FF7A18">OS</tspan></text>
+</svg>

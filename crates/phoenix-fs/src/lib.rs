@@ -1011,10 +1011,8 @@ pub fn materialize_object_leaf_with_replaced_value(
             return Err(PhoenixFsError::BufferSize);
         }
 
-        next_record.encode_with_value(
-            &mut destination[destination_cursor..destination_end],
-            value,
-        )?;
+        next_record
+            .encode_with_value(&mut destination[destination_cursor..destination_end], value)?;
         source_cursor = source_cursor
             .checked_add(source_size)
             .ok_or(PhoenixFsError::ArithmeticOverflow)?;
@@ -1203,7 +1201,10 @@ fn insert_free_space_extent(
 
     let insert_offset = start + index * FREE_SPACE_RECORD_SIZE;
     let used_end = start + used_bytes;
-    block.copy_within(insert_offset..used_end, insert_offset + FREE_SPACE_RECORD_SIZE);
+    block.copy_within(
+        insert_offset..used_end,
+        insert_offset + FREE_SPACE_RECORD_SIZE,
+    );
     *item_count += 1;
     write_free_space_extent(block, index, extent)
 }
@@ -1937,12 +1938,7 @@ mod tests {
 
         let mut next = [0_u8; FILESYSTEM_BLOCK_SIZE];
         materialize_object_leaf_with_replaced_value(
-            &current,
-            &mut next,
-            second_key,
-            b"updated",
-            6,
-            20,
+            &current, &mut next, second_key, b"updated", 6, 20,
         )
         .unwrap();
 
@@ -2036,17 +2032,10 @@ mod tests {
         let object_bytes = record
             .encode_with_value(&mut object_root[start..], b"old")
             .unwrap();
-        TreeNodeHeader::new(
-            MetadataKind::ObjectTree,
-            3,
-            8,
-            0,
-            1,
-            object_bytes as u32,
-        )
-        .unwrap()
-        .seal(&mut object_root)
-        .unwrap();
+        TreeNodeHeader::new(MetadataKind::ObjectTree, 3, 8, 0, 1, object_bytes as u32)
+            .unwrap()
+            .seal(&mut object_root)
+            .unwrap();
 
         let mut free_root = [0_u8; FILESYSTEM_BLOCK_SIZE];
         write_free_space_extent(&mut free_root, 0, FreeSpaceExtent::new(20, 10)).unwrap();

@@ -21,11 +21,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Установить QEMU и OVMF
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 ovmf
-
       - name: Выбрать инструментарий Rust
         run: rustup show
 
@@ -64,6 +59,11 @@ jobs:
           IMAGE="$(cargo run --release --quiet)"
           test -f "$IMAGE"
           cp "$IMAGE" artifacts/phoenixos-uefi.img
+
+      - name: Установить QEMU и OVMF
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf
 
       - name: Проверить ядро в QEMU
         env:

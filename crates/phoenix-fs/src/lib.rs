@@ -20,6 +20,10 @@ pub const OBJECT_LEAF_RECORD_HEADER_SIZE: usize = 32;
 pub const OBJECT_INTERNAL_RECORD_SIZE: usize = 32;
 pub const FREE_SPACE_RECORD_SIZE: usize = 16;
 pub const MAX_OBJECT_TREE_DEPTH: usize = 16;
+pub const OBJECT_METADATA_VALUE_SIZE: usize = 48;
+pub const DIRECTORY_ENTRY_VALUE_HEADER_SIZE: usize = 16;
+pub const MAX_DIRECTORY_NAME_BYTES: usize = 1024;
+pub const EXTENT_VALUE_SIZE: usize = 24;
 const OBJECT_LEAF_RECORD_ALIGNMENT: usize = 8;
 const SUPPORTED_INCOMPATIBLE_FEATURES: u64 = 0;
 
@@ -76,6 +80,11 @@ pub enum PhoenixFsError {
     ObjectTreeDepthExceeded,
     ObjectNodeGenerationAhead,
     ObjectTreePathMismatch,
+    InvalidObjectValueSize,
+    InvalidObjectType(u32),
+    InvalidObjectFlags(u32),
+    InvalidDirectoryName,
+    InvalidExtent,
     UnsupportedFeatures(u64),
     InvalidReservedField,
     ChecksumMismatch,
@@ -420,6 +429,273 @@ impl ObjectTreeKey {
             return Err(PhoenixFsError::InvalidObjectId);
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum ObjectType {
+    File = 1,
+    Directory = 2,
+}
+
+impl ObjectType {
+    fn from_raw(value: u32) -> Result<Self, PhoenixFsError> {
+        match value {
+            1 => Ok(Self::File),
+            2 => Ok(Self::Directory),
+            other => Err(PhoenixFsError::InvalidObjectType(other)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectMetadataValue {
+    pub object_type: ObjectType,
+    pub size_bytes: u64,
+    pub created_ns: u64,
+    pub modified_ns: u64,
+    pub changed_ns: u64,
+}
+
+impl ObjectMetadataValue {
+    pub const fn new(
+        object_type: ObjectType,
+        size_bytes: u64,
+        created_ns: u64,
+        modified_ns: u64,
+        changed_ns: u64,
+    ) -> Self {
+        Self {
+            object_type,
+            size_bytes,
+            created_ns,
+            modified_ns,
+            changed_ns,
+        }
+    }
+
+    pub fn encode(self, destination: &mut [u8]) -> Result<(), PhoenixFsError> {
+        if destination.len() != OBJECT_METADATA_VALUE_SIZE {
+            return Err(PhoenixFsError::InvalidObjectValueSize);
+        }
+
+        destination.fill(0);
+        write_u32(destination, 0, self.object_type as u32);
+        write_u64(destination, 8, self.size_bytes);
+        write_u64(destination, 16, self.created_ns);
+        write_u64(destination, 24, self.modified_ns);
+        write_u64(destination, 32, self.changed_ns);
+        Ok(())
+    }
+
+    pub fn decode(source: &[u8]) -> Result<Self, PhoenixFsError> {
+        if source.len() != OBJECT_METADATA_VALUE_SIZE {
+            return Err(PhoenixFsError::InvalidObjectValueSize);
+        }
+        let flags = read_u32(source, 4);
+        if flags != 0 {
+            return Err(PhoenixFsError::InvalidObjectFlags(flags));
+        }
+        if read_u64(source, 40) != 0 {
+            return Err(PhoenixFsError::InvalidReservedField);
+        }
+
+        Ok(Self {
+            object_type: ObjectType::from_raw(read_u32(source, 0))?,
+            size_bytes: read_u64(source, 8),
+            created_ns: read_u64(source, 16),
+            modified_ns: read_u64(source, 24),
+            changed_ns: read_u64(source, 32),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectoryEntryValue {
+    pub target_object_id: u64,
+    pub target_type: ObjectType,
+}
+
+impl DirectoryEntryValue {
+    pub fn new(target_object_id: u64, target_type: ObjectType) -> Result<Self, PhoenixFsError> {
+        if target_object_id == 0 {
+            return Err(PhoenixFsError::InvalidObjectId);
+        }
+        Ok(Self {
+            target_object_id,
+            target_type,
+        })
+    }
+
+    pub fn encoded_size(name: &str) -> Result<usize, PhoenixFsError> {
+        validate_directory_name(name)?;
+        DIRECTORY_ENTRY_VALUE_HEADER_SIZE
+            .checked_add(name.len())
+            .ok_or(PhoenixFsError::ArithmeticOverflow)
+    }
+
+    pub fn encode(self, name: &str, destination: &mut [u8]) -> Result<usize, PhoenixFsError> {
+        if self.target_object_id == 0 {
+            return Err(PhoenixFsError::InvalidObjectId);
+        }
+        let encoded_size = Self::encoded_size(name)?;
+        if destination.len() < encoded_size {
+            return Err(PhoenixFsError::BufferSize);
+        }
+
+        destination[..encoded_size].fill(0);
+        write_u64(destination, 0, self.target_object_id);
+        write_u32(destination, 8, self.target_type as u32);
+        let name_bytes =
+            u32::try_from(name.len()).map_err(|_| PhoenixFsError::InvalidDirectoryName)?;
+        write_u32(destination, 12, name_bytes);
+        destination[DIRECTORY_ENTRY_VALUE_HEADER_SIZE..encoded_size]
+            .copy_from_slice(name.as_bytes());
+        Ok(encoded_size)
+    }
+
+    pub fn decode(source: &[u8]) -> Result<(Self, &str), PhoenixFsError> {
+        if source.len() < DIRECTORY_ENTRY_VALUE_HEADER_SIZE {
+            return Err(PhoenixFsError::InvalidObjectValueSize);
+        }
+
+        let target_object_id = read_u64(source, 0);
+        if target_object_id == 0 {
+            return Err(PhoenixFsError::InvalidObjectId);
+        }
+        let target_type = ObjectType::from_raw(read_u32(source, 8))?;
+        let name_bytes = read_u32(source, 12) as usize;
+        let expected_size = DIRECTORY_ENTRY_VALUE_HEADER_SIZE
+            .checked_add(name_bytes)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+        if source.len() != expected_size {
+            return Err(PhoenixFsError::InvalidObjectValueSize);
+        }
+
+        let name = core::str::from_utf8(&source[DIRECTORY_ENTRY_VALUE_HEADER_SIZE..])
+            .map_err(|_| PhoenixFsError::InvalidDirectoryName)?;
+        validate_directory_name(name)?;
+        Ok((
+            Self {
+                target_object_id,
+                target_type,
+            },
+            name,
+        ))
+    }
+}
+
+fn validate_directory_name(name: &str) -> Result<(), PhoenixFsError> {
+    if name.is_empty()
+        || name.len() > MAX_DIRECTORY_NAME_BYTES
+        || name == "."
+        || name == ".."
+        || name.bytes().any(|byte| byte == 0 || byte == b'/')
+    {
+        return Err(PhoenixFsError::InvalidDirectoryName);
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtentValue {
+    pub physical_start_block: u64,
+    pub block_count: u64,
+    pub data_bytes: u64,
+}
+
+impl ExtentValue {
+    pub const fn new(physical_start_block: u64, block_count: u64, data_bytes: u64) -> Self {
+        Self {
+            physical_start_block,
+            block_count,
+            data_bytes,
+        }
+    }
+
+    pub fn encode(self, destination: &mut [u8]) -> Result<(), PhoenixFsError> {
+        if destination.len() != EXTENT_VALUE_SIZE {
+            return Err(PhoenixFsError::InvalidObjectValueSize);
+        }
+        if self.block_count == 0 || self.data_bytes == 0 {
+            return Err(PhoenixFsError::InvalidExtent);
+        }
+
+        write_u64(destination, 0, self.physical_start_block);
+        write_u64(destination, 8, self.block_count);
+        write_u64(destination, 16, self.data_bytes);
+        Ok(())
+    }
+
+    pub fn decode(source: &[u8]) -> Result<Self, PhoenixFsError> {
+        if source.len() != EXTENT_VALUE_SIZE {
+            return Err(PhoenixFsError::InvalidObjectValueSize);
+        }
+
+        let extent = Self {
+            physical_start_block: read_u64(source, 0),
+            block_count: read_u64(source, 8),
+            data_bytes: read_u64(source, 16),
+        };
+        if extent.block_count == 0 || extent.data_bytes == 0 {
+            return Err(PhoenixFsError::InvalidExtent);
+        }
+        Ok(extent)
+    }
+
+    pub fn validate_for_key(
+        self,
+        key: ObjectTreeKey,
+        total_blocks: u64,
+    ) -> Result<(), PhoenixFsError> {
+        if key.kind != ObjectRecordKind::Extent
+            || !key.offset.is_multiple_of(FILESYSTEM_BLOCK_SIZE as u64)
+            || self.physical_start_block < SUPERBLOCK_COPY_COUNT
+        {
+            return Err(PhoenixFsError::InvalidExtent);
+        }
+
+        let end_block = self
+            .physical_start_block
+            .checked_add(self.block_count)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+        if end_block > total_blocks {
+            return Err(PhoenixFsError::InvalidExtent);
+        }
+
+        let capacity = self
+            .block_count
+            .checked_mul(FILESYSTEM_BLOCK_SIZE as u64)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+        if self.data_bytes > capacity {
+            return Err(PhoenixFsError::InvalidExtent);
+        }
+        Ok(())
+    }
+}
+
+pub fn validate_object_record_value(
+    key: ObjectTreeKey,
+    value: &[u8],
+    total_blocks: u64,
+) -> Result<(), PhoenixFsError> {
+    match key.kind {
+        ObjectRecordKind::Metadata => {
+            if key.offset != 0 {
+                return Err(PhoenixFsError::InvalidObjectValueSize);
+            }
+            ObjectMetadataValue::decode(value)?;
+            Ok(())
+        }
+        ObjectRecordKind::DirectoryEntry => {
+            DirectoryEntryValue::decode(value)?;
+            Ok(())
+        }
+        ObjectRecordKind::Extent => {
+            let extent = ExtentValue::decode(value)?;
+            extent.validate_for_key(key, total_blocks)
+        }
     }
 }
 
@@ -2243,6 +2519,83 @@ mod tests {
         assert_eq!(
             TreeNodeHeader::new(MetadataKind::ObjectTree, 2, 4, 0, 1, 0),
             Err(PhoenixFsError::InvalidTreeNodeItemCount)
+        );
+    }
+
+    #[test]
+    fn object_metadata_value_round_trip_is_fixed_and_reserved_clean() {
+        let value = ObjectMetadataValue::new(ObjectType::File, 12_345, 10, 20, 30);
+        let mut encoded = [0_u8; OBJECT_METADATA_VALUE_SIZE];
+
+        value.encode(&mut encoded).unwrap();
+
+        assert_eq!(ObjectMetadataValue::decode(&encoded), Ok(value));
+        assert_eq!(read_u32(&encoded, 4), 0);
+        assert_eq!(read_u64(&encoded, 40), 0);
+    }
+
+    #[test]
+    fn directory_entry_round_trip_preserves_utf8_name() {
+        let entry = DirectoryEntryValue::new(44, ObjectType::Directory).unwrap();
+        let mut encoded = [0_u8; 128];
+
+        let size = entry.encode("Документы", &mut encoded).unwrap();
+        let (decoded, name) = DirectoryEntryValue::decode(&encoded[..size]).unwrap();
+
+        assert_eq!(decoded, entry);
+        assert_eq!(name, "Документы");
+    }
+
+    #[test]
+    fn directory_entry_rejects_path_components() {
+        assert_eq!(
+            DirectoryEntryValue::encoded_size("../secret"),
+            Err(PhoenixFsError::InvalidDirectoryName)
+        );
+        assert_eq!(
+            DirectoryEntryValue::encoded_size("dir/file"),
+            Err(PhoenixFsError::InvalidDirectoryName)
+        );
+    }
+
+    #[test]
+    fn extent_value_checks_alignment_capacity_and_volume() {
+        let key = ObjectTreeKey::new(7, ObjectRecordKind::Extent, 4096);
+        let extent = ExtentValue::new(20, 2, 7000);
+        let mut encoded = [0_u8; EXTENT_VALUE_SIZE];
+
+        extent.encode(&mut encoded).unwrap();
+
+        let decoded = ExtentValue::decode(&encoded).unwrap();
+        assert_eq!(decoded, extent);
+        assert_eq!(decoded.validate_for_key(key, 64), Ok(()));
+        assert_eq!(
+            decoded.validate_for_key(ObjectTreeKey::new(7, ObjectRecordKind::Extent, 1), 64,),
+            Err(PhoenixFsError::InvalidExtent)
+        );
+    }
+
+    #[test]
+    fn object_record_value_validation_matches_key_kind() {
+        let metadata = ObjectMetadataValue::new(ObjectType::Directory, 0, 1, 1, 1);
+        let mut encoded = [0_u8; OBJECT_METADATA_VALUE_SIZE];
+        metadata.encode(&mut encoded).unwrap();
+
+        assert_eq!(
+            validate_object_record_value(
+                ObjectTreeKey::new(3, ObjectRecordKind::Metadata, 0),
+                &encoded,
+                64,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_object_record_value(
+                ObjectTreeKey::new(3, ObjectRecordKind::Metadata, 8),
+                &encoded,
+                64,
+            ),
+            Err(PhoenixFsError::InvalidObjectValueSize)
         );
     }
 

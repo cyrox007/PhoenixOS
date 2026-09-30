@@ -23,6 +23,9 @@ pub const OBJECT_INTERNAL_RECORD_SIZE: usize = 32;
 pub const FREE_SPACE_RECORD_SIZE: usize = 16;
 pub const MAX_OBJECT_TREE_DEPTH: usize = 16;
 pub const ROOT_OBJECT_ID: u64 = 1;
+pub const INITIAL_OBJECT_TREE_BLOCK: u64 = 2;
+pub const INITIAL_FREE_SPACE_TREE_BLOCK: u64 = 3;
+pub const MINIMUM_FILESYSTEM_BLOCKS: u64 = 5;
 pub const OBJECT_METADATA_VALUE_SIZE: usize = 48;
 pub const DIRECTORY_ENTRY_VALUE_HEADER_SIZE: usize = 16;
 pub const MAX_DIRECTORY_NAME_BYTES: usize = 1024;
@@ -2510,6 +2513,102 @@ fn align_up(value: usize, alignment: usize) -> Result<usize, PhoenixFsError> {
     Ok(adjusted & !mask)
 }
 
+pub fn format_volume<D: BlockDevice>(
+    device: &mut D,
+    volume_id: [u8; 16],
+    timestamp_ns: u64,
+    buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<ActiveSuperblock, PhoenixFsError> {
+    let total_blocks = filesystem_block_count(device)?;
+    if total_blocks < MINIMUM_FILESYSTEM_BLOCKS {
+        return Err(PhoenixFsError::InvalidVolumeGeometry);
+    }
+
+    let roots = TransactionRoots::new(INITIAL_OBJECT_TREE_BLOCK, INITIAL_FREE_SPACE_TREE_BLOCK);
+    let superblock = Superblock::new(1, total_blocks, volume_id, roots)?;
+
+    write_initial_object_tree(device, timestamp_ns, buffer)?;
+    write_initial_free_space_tree(device, total_blocks, buffer)?;
+    device.flush()?;
+
+    superblock.encode(buffer)?;
+    write_filesystem_block(device, SuperblockSlot::First.filesystem_block(), buffer)?;
+    device.flush()?;
+    write_filesystem_block(device, SuperblockSlot::Second.filesystem_block(), buffer)?;
+    device.flush()?;
+
+    Ok(ActiveSuperblock {
+        superblock,
+        slot: SuperblockSlot::First,
+    })
+}
+
+fn write_initial_object_tree<D: BlockDevice>(
+    device: &mut D,
+    timestamp_ns: u64,
+    buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<(), PhoenixFsError> {
+    buffer.fill(0);
+
+    let metadata = ObjectMetadataValue::new(
+        ObjectType::Directory,
+        0,
+        timestamp_ns,
+        timestamp_ns,
+        timestamp_ns,
+    );
+    let mut value = [0_u8; OBJECT_METADATA_VALUE_SIZE];
+    metadata.encode(&mut value)?;
+
+    let key = ObjectTreeKey::new(ROOT_OBJECT_ID, ObjectRecordKind::Metadata, 0);
+    let record = ObjectLeafRecordHeader::new(key, OBJECT_METADATA_VALUE_SIZE as u32)?;
+    let start = TreeNodeHeader::entries_offset();
+    let encoded_size = record.encode_with_value(&mut buffer[start..], &value)?;
+
+    let node = TreeNodeHeader::new(
+        MetadataKind::ObjectTree,
+        1,
+        INITIAL_OBJECT_TREE_BLOCK,
+        0,
+        1,
+        encoded_size as u32,
+    )?;
+    node.seal(buffer)?;
+    write_filesystem_block(device, INITIAL_OBJECT_TREE_BLOCK, buffer)
+}
+
+fn write_initial_free_space_tree<D: BlockDevice>(
+    device: &mut D,
+    total_blocks: u64,
+    buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<(), PhoenixFsError> {
+    buffer.fill(0);
+
+    let first_free_block = INITIAL_FREE_SPACE_TREE_BLOCK
+        .checked_add(1)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let free_blocks = total_blocks
+        .checked_sub(first_free_block)
+        .ok_or(PhoenixFsError::InvalidVolumeGeometry)?;
+    if free_blocks == 0 {
+        return Err(PhoenixFsError::InvalidVolumeGeometry);
+    }
+
+    let extent = FreeSpaceExtent::new(first_free_block, free_blocks);
+    write_free_space_extent(buffer, 0, extent)?;
+
+    let node = TreeNodeHeader::new(
+        MetadataKind::FreeSpaceTree,
+        1,
+        INITIAL_FREE_SPACE_TREE_BLOCK,
+        0,
+        1,
+        FREE_SPACE_RECORD_SIZE as u32,
+    )?;
+    node.seal(buffer)?;
+    write_filesystem_block(device, INITIAL_FREE_SPACE_TREE_BLOCK, buffer)
+}
+
 pub struct PhoenixVfs<D: BlockDevice> {
     device: RefCell<D>,
     active: ActiveSuperblock,
@@ -2519,6 +2618,25 @@ pub struct PhoenixVfs<D: BlockDevice> {
 }
 
 impl<D: BlockDevice> PhoenixVfs<D> {
+    pub fn mount(
+        mut device: D,
+        first_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+        second_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    ) -> Result<Self, PhoenixFsError> {
+        let active = read_active_superblock(&mut device, first_buffer, second_buffer)?;
+        Self::new(device, active)
+    }
+
+    pub fn format_new(
+        mut device: D,
+        volume_id: [u8; 16],
+        timestamp_ns: u64,
+        buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    ) -> Result<Self, PhoenixFsError> {
+        let active = format_volume(&mut device, volume_id, timestamp_ns, buffer)?;
+        Self::new(device, active)
+    }
+
     pub fn new(device: D, active: ActiveSuperblock) -> Result<Self, PhoenixFsError> {
         let total_blocks = filesystem_block_count(&device)?;
         if active.superblock.total_blocks != total_blocks {
@@ -3098,6 +3216,89 @@ mod tests {
             TreeNodeHeader::new(MetadataKind::ObjectTree, 2, 4, 0, 1, 0),
             Err(PhoenixFsError::InvalidTreeNodeItemCount)
         );
+    }
+
+    #[test]
+    fn format_volume_creates_root_directory_and_free_space() {
+        let mut device = MemoryBlockDevice::<512, 40>::new();
+        let mut buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+
+        let active = format_volume(&mut device, VOLUME_ID, 123, &mut buffer).unwrap();
+
+        assert_eq!(active.superblock.generation, 1);
+        assert_eq!(
+            active.superblock.roots,
+            TransactionRoots::new(INITIAL_OBJECT_TREE_BLOCK, INITIAL_FREE_SPACE_TREE_BLOCK)
+        );
+
+        let mut first = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut second = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let detected = read_active_superblock(&mut device, &mut first, &mut second).unwrap();
+        assert_eq!(detected.superblock, active.superblock);
+
+        let mut node_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut metadata_buffer = [0_u8; OBJECT_METADATA_VALUE_SIZE];
+        let metadata = read_object_metadata(
+            &mut device,
+            INITIAL_OBJECT_TREE_BLOCK,
+            ROOT_OBJECT_ID,
+            1,
+            &mut node_buffer,
+            &mut metadata_buffer,
+        )
+        .unwrap();
+        assert_eq!(metadata.object_type, ObjectType::Directory);
+        assert_eq!(metadata.created_ns, 123);
+
+        read_filesystem_block(&mut device, INITIAL_FREE_SPACE_TREE_BLOCK, &mut node_buffer)
+            .unwrap();
+        validate_free_space_leaf(&node_buffer, active.superblock.total_blocks).unwrap();
+        assert_eq!(
+            free_space_extent_at(&node_buffer, 0).unwrap(),
+            FreeSpaceExtent::new(
+                INITIAL_FREE_SPACE_TREE_BLOCK + 1,
+                active.superblock.total_blocks - (INITIAL_FREE_SPACE_TREE_BLOCK + 1),
+            )
+        );
+    }
+
+    #[test]
+    fn formatted_volume_mounts_through_phoenix_vfs() {
+        use phoenix_vfs::{FileSystem, NodeId};
+
+        let mut device = MemoryBlockDevice::<512, 40>::new();
+        let mut buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let active = format_volume(&mut device, VOLUME_ID, 1, &mut buffer).unwrap();
+
+        let filesystem = PhoenixVfs::new(device, active).unwrap();
+
+        assert_eq!(filesystem.root_node(), Ok(NodeId(ROOT_OBJECT_ID)));
+        assert_eq!(
+            filesystem.metadata(NodeId(ROOT_OBJECT_ID)),
+            Ok(NodeMetadata {
+                kind: NodeKind::Directory,
+                length: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn phoenix_vfs_can_format_and_remount_volume() {
+        use phoenix_vfs::{FileSystem, NodeId};
+
+        let device = MemoryBlockDevice::<512, 40>::new();
+        let mut format_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let filesystem = PhoenixVfs::format_new(device, VOLUME_ID, 77, &mut format_buffer).unwrap();
+
+        assert_eq!(filesystem.root_node(), Ok(NodeId(ROOT_OBJECT_ID)));
+
+        let device = filesystem.into_device();
+        let mut first = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut second = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let remounted = PhoenixVfs::mount(device, &mut first, &mut second).unwrap();
+
+        assert_eq!(remounted.root_node(), Ok(NodeId(ROOT_OBJECT_ID)));
+        assert_eq!(remounted.active_superblock().superblock.generation, 1);
     }
 
     #[test]

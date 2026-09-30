@@ -18,6 +18,7 @@ const TREE_NODE_HEADER_SIZE: u32 = 64;
 const TREE_NODE_PREFIX_SIZE: u32 = TREE_NODE_HEADER_SIZE - METADATA_HEADER_SIZE;
 pub const OBJECT_LEAF_RECORD_HEADER_SIZE: usize = 32;
 pub const OBJECT_INTERNAL_RECORD_SIZE: usize = 32;
+pub const FREE_SPACE_RECORD_SIZE: usize = 16;
 const OBJECT_LEAF_RECORD_ALIGNMENT: usize = 8;
 const SUPPORTED_INCOMPATIBLE_FEATURES: u64 = 0;
 
@@ -56,6 +57,13 @@ pub enum PhoenixFsError {
     ObjectChildGenerationAhead,
     ObjectChildKeyMismatch,
     ObjectRecordsOutOfOrder,
+    InvalidFreeSpaceLeafNode,
+    InvalidFreeSpaceRecordSize,
+    InvalidFreeSpaceRange,
+    FreeSpaceRangesNotCanonical,
+    NoFreeSpace,
+    StaleAllocationPlan,
+    AllocationTargetOutsideRange,
     UnsupportedFeatures(u64),
     InvalidReservedField,
     ChecksumMismatch,
@@ -705,6 +713,249 @@ pub fn validate_object_leaf(block: &[u8]) -> Result<TreeNodeHeader, PhoenixFsErr
     Ok(node)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FreeSpaceExtent {
+    pub start_block: u64,
+    pub block_count: u64,
+}
+
+impl FreeSpaceExtent {
+    pub const fn new(start_block: u64, block_count: u64) -> Self {
+        Self {
+            start_block,
+            block_count,
+        }
+    }
+
+    pub fn end_block_exclusive(self) -> Result<u64, PhoenixFsError> {
+        self.start_block
+            .checked_add(self.block_count)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)
+    }
+
+    pub fn contains(self, block: u64) -> Result<bool, PhoenixFsError> {
+        Ok(block >= self.start_block && block < self.end_block_exclusive()?)
+    }
+
+    fn validate(self, total_blocks: u64) -> Result<(), PhoenixFsError> {
+        if self.block_count == 0 || self.start_block < SUPERBLOCK_COPY_COUNT {
+            return Err(PhoenixFsError::InvalidFreeSpaceRange);
+        }
+        if self.end_block_exclusive()? > total_blocks {
+            return Err(PhoenixFsError::InvalidFreeSpaceRange);
+        }
+        Ok(())
+    }
+
+    pub fn encode(self, destination: &mut [u8]) -> Result<(), PhoenixFsError> {
+        if destination.len() < FREE_SPACE_RECORD_SIZE {
+            return Err(PhoenixFsError::BufferSize);
+        }
+        if self.block_count == 0 {
+            return Err(PhoenixFsError::InvalidFreeSpaceRange);
+        }
+
+        write_u64(destination, 0, self.start_block);
+        write_u64(destination, 8, self.block_count);
+        Ok(())
+    }
+
+    pub fn decode(source: &[u8]) -> Result<Self, PhoenixFsError> {
+        if source.len() < FREE_SPACE_RECORD_SIZE {
+            return Err(PhoenixFsError::InvalidFreeSpaceRecordSize);
+        }
+
+        let extent = Self {
+            start_block: read_u64(source, 0),
+            block_count: read_u64(source, 8),
+        };
+        if extent.block_count == 0 {
+            return Err(PhoenixFsError::InvalidFreeSpaceRange);
+        }
+        Ok(extent)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CowAllocationPlan {
+    pub record_index: u32,
+    pub source_extent: FreeSpaceExtent,
+    pub allocated: FreeSpaceExtent,
+    pub remaining: Option<FreeSpaceExtent>,
+}
+
+pub fn validate_free_space_leaf(
+    block: &[u8],
+    total_blocks: u64,
+) -> Result<TreeNodeHeader, PhoenixFsError> {
+    let node = TreeNodeHeader::decode(block)?;
+    if node.metadata.kind != MetadataKind::FreeSpaceTree || node.level != 0 {
+        return Err(PhoenixFsError::InvalidFreeSpaceLeafNode);
+    }
+
+    let expected_bytes = (node.item_count as usize)
+        .checked_mul(FREE_SPACE_RECORD_SIZE)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    if node.entries_bytes as usize != expected_bytes {
+        return Err(PhoenixFsError::InvalidFreeSpaceRecordSize);
+    }
+
+    let mut previous_end = None;
+    for index in 0..node.item_count as usize {
+        let extent = free_space_extent_at(block, index)?;
+        extent.validate(total_blocks)?;
+        if previous_end.is_some_and(|end| extent.start_block <= end) {
+            return Err(PhoenixFsError::FreeSpaceRangesNotCanonical);
+        }
+        previous_end = Some(extent.end_block_exclusive()?);
+    }
+
+    Ok(node)
+}
+
+pub fn plan_cow_allocation(
+    free_space_leaf: &[u8],
+    total_blocks: u64,
+    requested_blocks: u64,
+) -> Result<CowAllocationPlan, PhoenixFsError> {
+    if requested_blocks == 0 {
+        return Err(PhoenixFsError::InvalidFreeSpaceRange);
+    }
+
+    let node = validate_free_space_leaf(free_space_leaf, total_blocks)?;
+    for index in 0..node.item_count as usize {
+        let extent = free_space_extent_at(free_space_leaf, index)?;
+        if extent.block_count < requested_blocks {
+            continue;
+        }
+
+        let allocated = FreeSpaceExtent::new(extent.start_block, requested_blocks);
+        let remaining_count = extent.block_count - requested_blocks;
+        let remaining = if remaining_count == 0 {
+            None
+        } else {
+            Some(FreeSpaceExtent::new(
+                extent.start_block + requested_blocks,
+                remaining_count,
+            ))
+        };
+
+        return Ok(CowAllocationPlan {
+            record_index: index as u32,
+            source_extent: extent,
+            allocated,
+            remaining,
+        });
+    }
+
+    Err(PhoenixFsError::NoFreeSpace)
+}
+
+pub fn materialize_free_space_leaf_after_allocation(
+    current: &[u8],
+    destination: &mut [u8],
+    total_blocks: u64,
+    new_generation: u64,
+    new_block_number: u64,
+    plan: CowAllocationPlan,
+) -> Result<TreeNodeHeader, PhoenixFsError> {
+    let current_node = validate_free_space_leaf(current, total_blocks)?;
+    if destination.len() != FILESYSTEM_BLOCK_SIZE {
+        return Err(PhoenixFsError::BufferSize);
+    }
+    if new_generation != current_node.metadata.generation + 1 {
+        return Err(PhoenixFsError::GenerationSequence);
+    }
+    if !plan.allocated.contains(new_block_number)? {
+        return Err(PhoenixFsError::AllocationTargetOutsideRange);
+    }
+
+    let selected = free_space_extent_at(current, plan.record_index as usize)?;
+    if selected != plan.source_extent {
+        return Err(PhoenixFsError::StaleAllocationPlan);
+    }
+
+    destination.fill(0);
+    let entries_start = TreeNodeHeader::entries_offset();
+    let mut write_index = 0_usize;
+
+    for index in 0..current_node.item_count as usize {
+        if index != plan.record_index as usize {
+            let extent = free_space_extent_at(current, index)?;
+            write_free_space_extent(destination, write_index, extent)?;
+            write_index += 1;
+            continue;
+        }
+
+        if let Some(remaining) = plan.remaining {
+            remaining.validate(total_blocks)?;
+            write_free_space_extent(destination, write_index, remaining)?;
+            write_index += 1;
+        }
+    }
+
+    let entries_bytes = write_index
+        .checked_mul(FREE_SPACE_RECORD_SIZE)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let node = TreeNodeHeader::new(
+        MetadataKind::FreeSpaceTree,
+        new_generation,
+        new_block_number,
+        0,
+        write_index as u32,
+        entries_bytes as u32,
+    )?;
+    node.seal(destination)?;
+    validate_free_space_leaf(destination, total_blocks)?;
+
+    let data_end = entries_start
+        .checked_add(entries_bytes)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    if destination[data_end..].iter().any(|byte| *byte != 0) {
+        return Err(PhoenixFsError::InvalidReservedField);
+    }
+
+    Ok(node)
+}
+
+fn free_space_extent_at(block: &[u8], index: usize) -> Result<FreeSpaceExtent, PhoenixFsError> {
+    let offset = TreeNodeHeader::entries_offset()
+        .checked_add(
+            index
+                .checked_mul(FREE_SPACE_RECORD_SIZE)
+                .ok_or(PhoenixFsError::ArithmeticOverflow)?,
+        )
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let end = offset
+        .checked_add(FREE_SPACE_RECORD_SIZE)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    if end > block.len() {
+        return Err(PhoenixFsError::InvalidFreeSpaceRecordSize);
+    }
+    FreeSpaceExtent::decode(&block[offset..end])
+}
+
+fn write_free_space_extent(
+    block: &mut [u8],
+    index: usize,
+    extent: FreeSpaceExtent,
+) -> Result<(), PhoenixFsError> {
+    let offset = TreeNodeHeader::entries_offset()
+        .checked_add(
+            index
+                .checked_mul(FREE_SPACE_RECORD_SIZE)
+                .ok_or(PhoenixFsError::ArithmeticOverflow)?,
+        )
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let end = offset
+        .checked_add(FREE_SPACE_RECORD_SIZE)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    if end > block.len() {
+        return Err(PhoenixFsError::BufferSize);
+    }
+    extent.encode(&mut block[offset..end])
+}
+
 fn align_up(value: usize, alignment: usize) -> Result<usize, PhoenixFsError> {
     let mask = alignment
         .checked_sub(1)
@@ -1127,6 +1378,127 @@ mod tests {
         assert_eq!(
             TreeNodeHeader::new(MetadataKind::ObjectTree, 2, 4, 0, 1, 0),
             Err(PhoenixFsError::InvalidTreeNodeItemCount)
+        );
+    }
+
+    #[test]
+    fn free_space_leaf_accepts_sorted_non_adjacent_extents() {
+        let mut block = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        write_free_space_extent(&mut block, 0, FreeSpaceExtent::new(10, 5)).unwrap();
+        write_free_space_extent(&mut block, 1, FreeSpaceExtent::new(20, 8)).unwrap();
+        let node = TreeNodeHeader::new(
+            MetadataKind::FreeSpaceTree,
+            4,
+            7,
+            0,
+            2,
+            (2 * FREE_SPACE_RECORD_SIZE) as u32,
+        )
+        .unwrap();
+        node.seal(&mut block).unwrap();
+
+        assert_eq!(validate_free_space_leaf(&block, 64), Ok(node));
+    }
+
+    #[test]
+    fn free_space_leaf_rejects_adjacent_ranges() {
+        let mut block = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        write_free_space_extent(&mut block, 0, FreeSpaceExtent::new(10, 5)).unwrap();
+        write_free_space_extent(&mut block, 1, FreeSpaceExtent::new(15, 4)).unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::FreeSpaceTree,
+            4,
+            7,
+            0,
+            2,
+            (2 * FREE_SPACE_RECORD_SIZE) as u32,
+        )
+        .unwrap()
+        .seal(&mut block)
+        .unwrap();
+
+        assert_eq!(
+            validate_free_space_leaf(&block, 64),
+            Err(PhoenixFsError::FreeSpaceRangesNotCanonical)
+        );
+    }
+
+    #[test]
+    fn cow_allocation_uses_first_sufficient_extent() {
+        let mut block = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        write_free_space_extent(&mut block, 0, FreeSpaceExtent::new(10, 2)).unwrap();
+        write_free_space_extent(&mut block, 1, FreeSpaceExtent::new(20, 8)).unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::FreeSpaceTree,
+            6,
+            7,
+            0,
+            2,
+            (2 * FREE_SPACE_RECORD_SIZE) as u32,
+        )
+        .unwrap()
+        .seal(&mut block)
+        .unwrap();
+
+        let plan = plan_cow_allocation(&block, 64, 3).unwrap();
+        assert_eq!(plan.record_index, 1);
+        assert_eq!(plan.allocated, FreeSpaceExtent::new(20, 3));
+        assert_eq!(plan.remaining, Some(FreeSpaceExtent::new(23, 5)));
+    }
+
+    #[test]
+    fn cow_allocation_materializes_next_generation_without_touching_source() {
+        let mut current = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        write_free_space_extent(&mut current, 0, FreeSpaceExtent::new(10, 10)).unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::FreeSpaceTree,
+            6,
+            7,
+            0,
+            1,
+            FREE_SPACE_RECORD_SIZE as u32,
+        )
+        .unwrap()
+        .seal(&mut current)
+        .unwrap();
+        let before = current;
+
+        let plan = plan_cow_allocation(&current, 64, 3).unwrap();
+        let mut next = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let node =
+            materialize_free_space_leaf_after_allocation(&current, &mut next, 64, 7, 10, plan)
+                .unwrap();
+
+        assert_eq!(current, before);
+        assert_eq!(node.metadata.generation, 7);
+        assert_eq!(node.metadata.block_number, 10);
+        assert_eq!(
+            free_space_extent_at(&next, 0).unwrap(),
+            FreeSpaceExtent::new(13, 7)
+        );
+    }
+
+    #[test]
+    fn cow_allocation_rejects_target_outside_reserved_range() {
+        let mut current = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        write_free_space_extent(&mut current, 0, FreeSpaceExtent::new(10, 10)).unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::FreeSpaceTree,
+            6,
+            7,
+            0,
+            1,
+            FREE_SPACE_RECORD_SIZE as u32,
+        )
+        .unwrap()
+        .seal(&mut current)
+        .unwrap();
+
+        let plan = plan_cow_allocation(&current, 64, 2).unwrap();
+        let mut next = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        assert_eq!(
+            materialize_free_space_leaf_after_allocation(&current, &mut next, 64, 7, 30, plan,),
+            Err(PhoenixFsError::AllocationTargetOutsideRange)
         );
     }
 

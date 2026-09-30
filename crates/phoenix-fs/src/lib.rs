@@ -6880,9 +6880,9 @@ mod tests {
 
     #[test]
     fn recursive_split_raises_new_root_when_parent_is_full() {
-        let mut device = MemoryBlockDevice::<512, 4096>::new();
+        let mut device = MemoryBlockDevice::<512, 512>::new();
         let current = ActiveSuperblock {
-            superblock: Superblock::new(5, 512, VOLUME_ID, TransactionRoots::new(8, 9)).unwrap(),
+            superblock: Superblock::new(5, 64, VOLUME_ID, TransactionRoots::new(8, 9)).unwrap(),
             slot: SuperblockSlot::First,
         };
 
@@ -6890,7 +6890,7 @@ mod tests {
         let root_start = TreeNodeHeader::entries_offset();
         for index in 0..126_usize {
             let key = ObjectTreeKey::new((index + 1) as u64, ObjectRecordKind::Metadata, 0);
-            let child_block = 100 + index as u64;
+            let child_block = if index == 125 { 11 } else { 10 };
             ObjectInternalRecord::new(key, child_block)
                 .unwrap()
                 .encode(
@@ -6911,7 +6911,7 @@ mod tests {
         .seal(&mut root)
         .unwrap();
 
-        let target_leaf_block = 225_u64;
+        let target_leaf_block = 11_u64;
         let mut leaf = [0_u8; FILESYSTEM_BLOCK_SIZE];
         let leaf_start = TreeNodeHeader::entries_offset();
         let mut cursor = leaf_start;
@@ -6936,7 +6936,7 @@ mod tests {
         .unwrap();
 
         let mut free_root = [0_u8; FILESYSTEM_BLOCK_SIZE];
-        write_free_space_extent(&mut free_root, 0, FreeSpaceExtent::new(300, 120)).unwrap();
+        write_free_space_extent(&mut free_root, 0, FreeSpaceExtent::new(20, 40)).unwrap();
         TreeNodeHeader::new(
             MetadataKind::FreeSpaceTree,
             5,
@@ -6987,9 +6987,9 @@ mod tests {
 
     #[test]
     fn nonroot_leaf_split_inserts_second_child_into_parent() {
-        let mut device = MemoryBlockDevice::<512, 2048>::new();
+        let mut device = MemoryBlockDevice::<512, 512>::new();
         let current = ActiveSuperblock {
-            superblock: Superblock::new(5, 256, VOLUME_ID, TransactionRoots::new(8, 9)).unwrap(),
+            superblock: Superblock::new(5, 64, VOLUME_ID, TransactionRoots::new(8, 9)).unwrap(),
             slot: SuperblockSlot::First,
         };
 
@@ -7036,7 +7036,7 @@ mod tests {
         .unwrap();
 
         let mut free_root = [0_u8; FILESYSTEM_BLOCK_SIZE];
-        write_free_space_extent(&mut free_root, 0, FreeSpaceExtent::new(20, 120)).unwrap();
+        write_free_space_extent(&mut free_root, 0, FreeSpaceExtent::new(20, 40)).unwrap();
         TreeNodeHeader::new(
             MetadataKind::FreeSpaceTree,
             5,

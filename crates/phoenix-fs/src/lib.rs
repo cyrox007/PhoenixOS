@@ -3549,8 +3549,8 @@ fn commit_nonroot_leaf_split_insertions<D: BlockDevice>(
         .generation
         .checked_add(1)
         .ok_or(PhoenixFsError::ArithmeticOverflow)?;
-    let requested_blocks = u64::try_from(path.parent_count + 3)
-        .map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
+    let requested_blocks =
+        u64::try_from(path.parent_count + 3).map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
     let allocation = plan_cow_allocation(
         current_free_space,
         current.superblock.total_blocks,

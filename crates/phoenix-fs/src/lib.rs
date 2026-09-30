@@ -2618,6 +2618,25 @@ pub struct PhoenixVfs<D: BlockDevice> {
 }
 
 impl<D: BlockDevice> PhoenixVfs<D> {
+    pub fn mount(
+        mut device: D,
+        first_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+        second_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    ) -> Result<Self, PhoenixFsError> {
+        let active = read_active_superblock(&mut device, first_buffer, second_buffer)?;
+        Self::new(device, active)
+    }
+
+    pub fn format_new(
+        mut device: D,
+        volume_id: [u8; 16],
+        timestamp_ns: u64,
+        buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    ) -> Result<Self, PhoenixFsError> {
+        let active = format_volume(&mut device, volume_id, timestamp_ns, buffer)?;
+        Self::new(device, active)
+    }
+
     pub fn new(device: D, active: ActiveSuperblock) -> Result<Self, PhoenixFsError> {
         let total_blocks = filesystem_block_count(&device)?;
         if active.superblock.total_blocks != total_blocks {
@@ -3265,6 +3284,25 @@ mod tests {
                 length: 0,
             })
         );
+    }
+
+    #[test]
+    fn phoenix_vfs_can_format_and_remount_volume() {
+        use phoenix_vfs::{FileSystem, NodeId};
+
+        let device = MemoryBlockDevice::<512, 40>::new();
+        let mut format_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let filesystem = PhoenixVfs::format_new(device, VOLUME_ID, 77, &mut format_buffer).unwrap();
+
+        assert_eq!(filesystem.root_node(), Ok(NodeId(ROOT_OBJECT_ID)));
+
+        let device = filesystem.into_device();
+        let mut first = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut second = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let remounted = PhoenixVfs::mount(device, &mut first, &mut second).unwrap();
+
+        assert_eq!(remounted.root_node(), Ok(NodeId(ROOT_OBJECT_ID)));
+        assert_eq!(remounted.active_superblock().superblock.generation, 1);
     }
 
     #[test]

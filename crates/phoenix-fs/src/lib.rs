@@ -16,6 +16,8 @@ const METADATA_CHECKSUM_OFFSET: usize = 44;
 const METADATA_CHECKSUM_END: usize = 48;
 const TREE_NODE_HEADER_SIZE: u32 = 64;
 const TREE_NODE_PREFIX_SIZE: u32 = TREE_NODE_HEADER_SIZE - METADATA_HEADER_SIZE;
+pub const OBJECT_LEAF_RECORD_HEADER_SIZE: usize = 32;
+const OBJECT_LEAF_RECORD_ALIGNMENT: usize = 8;
 const SUPPORTED_INCOMPATIBLE_FEATURES: u64 = 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +43,12 @@ pub enum PhoenixFsError {
     MetadataChecksumMismatch,
     InvalidTreeNodePayloadSize(u32),
     InvalidTreeNodeItemCount,
+    InvalidObjectId,
+    InvalidObjectRecordKind(u32),
+    InvalidObjectRecordFlags(u32),
+    InvalidObjectRecordSize,
+    InvalidObjectLeafNode,
+    ObjectRecordsOutOfOrder,
     UnsupportedFeatures(u64),
     InvalidReservedField,
     ChecksumMismatch,
@@ -343,6 +351,191 @@ impl TreeNodeHeader {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum ObjectRecordKind {
+    Metadata = 1,
+    DirectoryEntry = 2,
+    Extent = 3,
+}
+
+impl ObjectRecordKind {
+    fn from_raw(value: u32) -> Result<Self, PhoenixFsError> {
+        match value {
+            1 => Ok(Self::Metadata),
+            2 => Ok(Self::DirectoryEntry),
+            3 => Ok(Self::Extent),
+            other => Err(PhoenixFsError::InvalidObjectRecordKind(other)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ObjectTreeKey {
+    pub object_id: u64,
+    pub kind: ObjectRecordKind,
+    pub offset: u64,
+}
+
+impl ObjectTreeKey {
+    pub const fn new(object_id: u64, kind: ObjectRecordKind, offset: u64) -> Self {
+        Self {
+            object_id,
+            kind,
+            offset,
+        }
+    }
+
+    fn validate(self) -> Result<(), PhoenixFsError> {
+        if self.object_id == 0 {
+            return Err(PhoenixFsError::InvalidObjectId);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectLeafRecordHeader {
+    pub key: ObjectTreeKey,
+    pub value_bytes: u32,
+}
+
+impl ObjectLeafRecordHeader {
+    pub fn new(key: ObjectTreeKey, value_bytes: u32) -> Result<Self, PhoenixFsError> {
+        key.validate()?;
+        let header = Self { key, value_bytes };
+        header.encoded_size()?;
+        Ok(header)
+    }
+
+    pub fn encode_with_value(
+        &self,
+        destination: &mut [u8],
+        value: &[u8],
+    ) -> Result<usize, PhoenixFsError> {
+        self.key.validate()?;
+        if value.len() != self.value_bytes as usize {
+            return Err(PhoenixFsError::InvalidObjectRecordSize);
+        }
+
+        let encoded_size = self.encoded_size()?;
+        if destination.len() < encoded_size {
+            return Err(PhoenixFsError::BufferSize);
+        }
+
+        destination[..encoded_size].fill(0);
+        write_u64(destination, 0, self.key.object_id);
+        write_u32(destination, 8, self.key.kind as u32);
+        write_u64(destination, 16, self.key.offset);
+        write_u32(destination, 24, self.value_bytes);
+        destination[OBJECT_LEAF_RECORD_HEADER_SIZE..OBJECT_LEAF_RECORD_HEADER_SIZE + value.len()]
+            .copy_from_slice(value);
+        Ok(encoded_size)
+    }
+
+    pub fn decode_with_value(source: &[u8]) -> Result<(Self, &[u8], usize), PhoenixFsError> {
+        if source.len() < OBJECT_LEAF_RECORD_HEADER_SIZE {
+            return Err(PhoenixFsError::InvalidObjectRecordSize);
+        }
+
+        let flags = read_u32(source, 12);
+        let reserved = read_u32(source, 28);
+        if flags != 0 {
+            return Err(PhoenixFsError::InvalidObjectRecordFlags(flags));
+        }
+        if reserved != 0 {
+            return Err(PhoenixFsError::InvalidReservedField);
+        }
+
+        let header = Self {
+            key: ObjectTreeKey {
+                object_id: read_u64(source, 0),
+                kind: ObjectRecordKind::from_raw(read_u32(source, 8))?,
+                offset: read_u64(source, 16),
+            },
+            value_bytes: read_u32(source, 24),
+        };
+        header.key.validate()?;
+
+        let encoded_size = header.encoded_size()?;
+        if source.len() < encoded_size {
+            return Err(PhoenixFsError::InvalidObjectRecordSize);
+        }
+
+        let value_end = OBJECT_LEAF_RECORD_HEADER_SIZE
+            .checked_add(header.value_bytes as usize)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+        let value = &source[OBJECT_LEAF_RECORD_HEADER_SIZE..value_end];
+
+        if source[value_end..encoded_size].iter().any(|byte| *byte != 0) {
+            return Err(PhoenixFsError::InvalidReservedField);
+        }
+
+        Ok((header, value, encoded_size))
+    }
+
+    pub fn encoded_size(&self) -> Result<usize, PhoenixFsError> {
+        let raw_size = OBJECT_LEAF_RECORD_HEADER_SIZE
+            .checked_add(self.value_bytes as usize)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+        align_up(raw_size, OBJECT_LEAF_RECORD_ALIGNMENT)
+    }
+}
+
+pub fn validate_object_leaf(block: &[u8]) -> Result<TreeNodeHeader, PhoenixFsError> {
+    let node = TreeNodeHeader::decode(block)?;
+    if node.metadata.kind != MetadataKind::ObjectTree || node.level != 0 {
+        return Err(PhoenixFsError::InvalidObjectLeafNode);
+    }
+
+    let entries_start = TreeNodeHeader::entries_offset();
+    let entries_size = usize::try_from(node.entries_bytes)
+        .map_err(|_| PhoenixFsError::InvalidTreeNodePayloadSize(node.entries_bytes))?;
+    let entries_end = entries_start
+        .checked_add(entries_size)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    if entries_end > block.len() {
+        return Err(PhoenixFsError::InvalidTreeNodePayloadSize(node.entries_bytes));
+    }
+
+    let mut cursor = entries_start;
+    let mut previous_key: Option<ObjectTreeKey> = None;
+
+    for _ in 0..node.item_count {
+        if cursor >= entries_end {
+            return Err(PhoenixFsError::InvalidObjectRecordSize);
+        }
+
+        let (record, _, encoded_size) =
+            ObjectLeafRecordHeader::decode_with_value(&block[cursor..entries_end])?;
+
+        if previous_key.is_some_and(|previous| previous >= record.key) {
+            return Err(PhoenixFsError::ObjectRecordsOutOfOrder);
+        }
+
+        previous_key = Some(record.key);
+        cursor = cursor
+            .checked_add(encoded_size)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    }
+
+    if cursor != entries_end {
+        return Err(PhoenixFsError::InvalidObjectRecordSize);
+    }
+
+    Ok(node)
+}
+
+fn align_up(value: usize, alignment: usize) -> Result<usize, PhoenixFsError> {
+    let mask = alignment
+        .checked_sub(1)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let adjusted = value
+        .checked_add(mask)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    Ok(adjusted & !mask)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -757,6 +950,88 @@ mod tests {
         assert_eq!(
             TreeNodeHeader::new(MetadataKind::ObjectTree, 2, 4, 0, 1, 0),
             Err(PhoenixFsError::InvalidTreeNodeItemCount)
+        );
+    }
+
+    #[test]
+    fn object_leaf_record_round_trip_preserves_key_and_value() {
+        let key = ObjectTreeKey::new(42, ObjectRecordKind::Metadata, 0);
+        let record = ObjectLeafRecordHeader::new(key, 5).unwrap();
+        let mut encoded = [0_u8; 64];
+
+        let size = record.encode_with_value(&mut encoded, b"hello").unwrap();
+        let (decoded, value, decoded_size) =
+            ObjectLeafRecordHeader::decode_with_value(&encoded[..size]).unwrap();
+
+        assert_eq!(decoded, record);
+        assert_eq!(value, b"hello");
+        assert_eq!(decoded_size, size);
+        assert_eq!(size % OBJECT_LEAF_RECORD_ALIGNMENT, 0);
+    }
+
+    #[test]
+    fn object_leaf_validates_strict_key_order() {
+        let first = ObjectLeafRecordHeader::new(
+            ObjectTreeKey::new(1, ObjectRecordKind::Metadata, 0),
+            3,
+        )
+        .unwrap();
+        let second = ObjectLeafRecordHeader::new(
+            ObjectTreeKey::new(1, ObjectRecordKind::Extent, 4096),
+            4,
+        )
+        .unwrap();
+
+        let mut block = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut cursor = TreeNodeHeader::entries_offset();
+        cursor += first
+            .encode_with_value(&mut block[cursor..], b"one")
+            .unwrap();
+        cursor += second
+            .encode_with_value(&mut block[cursor..], b"data")
+            .unwrap();
+
+        let entries_bytes = u32::try_from(cursor - TreeNodeHeader::entries_offset()).unwrap();
+        let node =
+            TreeNodeHeader::new(MetadataKind::ObjectTree, 5, 7, 0, 2, entries_bytes).unwrap();
+        node.seal(&mut block).unwrap();
+
+        assert_eq!(validate_object_leaf(&block), Ok(node));
+    }
+
+    #[test]
+    fn object_leaf_rejects_duplicate_or_unsorted_key() {
+        let key = ObjectTreeKey::new(9, ObjectRecordKind::DirectoryEntry, 0);
+        let record = ObjectLeafRecordHeader::new(key, 1).unwrap();
+
+        let mut block = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut cursor = TreeNodeHeader::entries_offset();
+        cursor += record
+            .encode_with_value(&mut block[cursor..], b"a")
+            .unwrap();
+        cursor += record
+            .encode_with_value(&mut block[cursor..], b"b")
+            .unwrap();
+
+        let entries_bytes = u32::try_from(cursor - TreeNodeHeader::entries_offset()).unwrap();
+        let node =
+            TreeNodeHeader::new(MetadataKind::ObjectTree, 3, 6, 0, 2, entries_bytes).unwrap();
+        node.seal(&mut block).unwrap();
+
+        assert_eq!(
+            validate_object_leaf(&block),
+            Err(PhoenixFsError::ObjectRecordsOutOfOrder)
+        );
+    }
+
+    #[test]
+    fn object_leaf_rejects_zero_object_id() {
+        assert_eq!(
+            ObjectLeafRecordHeader::new(
+                ObjectTreeKey::new(0, ObjectRecordKind::Metadata, 0),
+                0,
+            ),
+            Err(PhoenixFsError::InvalidObjectId)
         );
     }
 

@@ -3729,8 +3729,7 @@ fn commit_nonroot_leaf_split_insertions<D: BlockDevice>(
         return Err(PhoenixFsError::ObjectTreePathMismatch);
     }
 
-    let full_parent_count =
-        count_full_parent_chain(device, current, path, object_copy_buffer)?;
+    let full_parent_count = count_full_parent_chain(device, current, path, object_copy_buffer)?;
     let split_index = choose_object_leaf_split_index(current_leaf, insertions)?;
     let total_items = leaf.item_count as usize + insertions.len();
     let generation = current
@@ -3912,12 +3911,11 @@ fn commit_nonroot_leaf_split_insertions<D: BlockDevice>(
             .ok_or(PhoenixFsError::InvalidObjectTreeLevel)?;
         object_copy_buffer.fill(0);
         let start = TreeNodeHeader::entries_offset();
-        ObjectInternalRecord::new(left_key, left_child_block)?.encode(
-            &mut object_copy_buffer[start..start + OBJECT_INTERNAL_RECORD_SIZE],
-        )?;
+        ObjectInternalRecord::new(left_key, left_child_block)?
+            .encode(&mut object_copy_buffer[start..start + OBJECT_INTERNAL_RECORD_SIZE])?;
         ObjectInternalRecord::new(right_key, right_child_block)?.encode(
-            &mut object_copy_buffer[start + OBJECT_INTERNAL_RECORD_SIZE
-                ..start + 2 * OBJECT_INTERNAL_RECORD_SIZE],
+            &mut object_copy_buffer
+                [start + OBJECT_INTERNAL_RECORD_SIZE..start + 2 * OBJECT_INTERNAL_RECORD_SIZE],
         )?;
         let root = TreeNodeHeader::new(
             MetadataKind::ObjectTree,

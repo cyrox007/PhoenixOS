@@ -2638,7 +2638,7 @@ fn copy_object_parent_range<D: BlockDevice>(
         let copied_parent = TreeNodeHeader::decode(object_copy_buffer)?;
         child_first_key = first_object_node_key(object_copy_buffer, copied_parent)?;
         child_block = *next_block;
-        *next_block = next_block
+        *next_block = (*next_block)
             .checked_add(1)
             .ok_or(PhoenixFsError::ArithmeticOverflow)?;
     }
@@ -4816,6 +4816,143 @@ mod tests {
             ]),
             Err(PhoenixFsError::InvalidObjectMutationBatch)
         );
+    }
+
+    #[test]
+    fn atomic_create_spans_two_leaves_in_one_generation() {
+        let mut device = MemoryBlockDevice::<512, 1024>::new();
+        let current = ActiveSuperblock {
+            superblock: Superblock::new(5, 128, VOLUME_ID, TransactionRoots::new(8, 9)).unwrap(),
+            slot: SuperblockSlot::First,
+        };
+
+        let parent_metadata = ObjectMetadataValue::new(ObjectType::Directory, 0, 1, 1, 1);
+        let dummy_metadata = ObjectMetadataValue::new(ObjectType::File, 0, 1, 1, 1);
+        let mut parent_bytes = [0_u8; OBJECT_METADATA_VALUE_SIZE];
+        let mut dummy_bytes = [0_u8; OBJECT_METADATA_VALUE_SIZE];
+        parent_metadata.encode(&mut parent_bytes).unwrap();
+        dummy_metadata.encode(&mut dummy_bytes).unwrap();
+
+        let parent_key = ObjectTreeKey::new(1, ObjectRecordKind::Metadata, 0);
+        let dummy_key = ObjectTreeKey::new(5, ObjectRecordKind::Metadata, 0);
+
+        let mut left = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let start = TreeNodeHeader::entries_offset();
+        let left_size =
+            ObjectLeafRecordHeader::new(parent_key, OBJECT_METADATA_VALUE_SIZE as u32)
+                .unwrap()
+                .encode_with_value(&mut left[start..], &parent_bytes)
+                .unwrap();
+        TreeNodeHeader::new(MetadataKind::ObjectTree, 4, 10, 0, 1, left_size as u32)
+            .unwrap()
+            .seal(&mut left)
+            .unwrap();
+
+        let mut right = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let right_size =
+            ObjectLeafRecordHeader::new(dummy_key, OBJECT_METADATA_VALUE_SIZE as u32)
+                .unwrap()
+                .encode_with_value(&mut right[start..], &dummy_bytes)
+                .unwrap();
+        TreeNodeHeader::new(MetadataKind::ObjectTree, 4, 11, 0, 1, right_size as u32)
+            .unwrap()
+            .seal(&mut right)
+            .unwrap();
+
+        let mut root = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        ObjectInternalRecord::new(parent_key, 10)
+            .unwrap()
+            .encode(&mut root[start..start + OBJECT_INTERNAL_RECORD_SIZE])
+            .unwrap();
+        ObjectInternalRecord::new(dummy_key, 11)
+            .unwrap()
+            .encode(
+                &mut root
+                    [start + OBJECT_INTERNAL_RECORD_SIZE..start + 2 * OBJECT_INTERNAL_RECORD_SIZE],
+            )
+            .unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            5,
+            8,
+            1,
+            2,
+            (2 * OBJECT_INTERNAL_RECORD_SIZE) as u32,
+        )
+        .unwrap()
+        .seal(&mut root)
+        .unwrap();
+
+        let mut free_root = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        write_free_space_extent(&mut free_root, 0, FreeSpaceExtent::new(20, 40)).unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::FreeSpaceTree,
+            5,
+            9,
+            0,
+            1,
+            FREE_SPACE_RECORD_SIZE as u32,
+        )
+        .unwrap()
+        .seal(&mut free_root)
+        .unwrap();
+
+        write_filesystem_block(&mut device, 8, &root).unwrap();
+        write_filesystem_block(&mut device, 9, &free_root).unwrap();
+        write_filesystem_block(&mut device, 10, &left).unwrap();
+        write_filesystem_block(&mut device, 11, &right).unwrap();
+
+        let mut object_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut object_copy = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut current_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut next_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut superblock_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+
+        let result = commit_create_object(
+            &mut device,
+            current,
+            1,
+            1,
+            10,
+            "cross-leaf",
+            ObjectType::File,
+            20,
+            &mut object_buffer,
+            &mut object_copy,
+            &mut current_free,
+            &mut next_free,
+            &mut superblock_buffer,
+        )
+        .unwrap();
+
+        assert_eq!(result.active.superblock.generation, 6);
+        assert_eq!(result.active.superblock.roots.object_tree, 22);
+        assert_eq!(result.active.superblock.roots.free_space_tree, 23);
+        assert_eq!(result.retired_blocks(), &[8, 9, 10, 11]);
+
+        let entry = lookup_directory_entry(
+            &mut device,
+            result.active.superblock.roots.object_tree,
+            1,
+            "cross-leaf",
+            6,
+            &mut object_buffer,
+        )
+        .unwrap();
+        assert_eq!(entry.target_object_id, 10);
+
+        let mut metadata_bytes = [0_u8; OBJECT_METADATA_VALUE_SIZE];
+        let metadata = read_object_metadata(
+            &mut device,
+            result.active.superblock.roots.object_tree,
+            10,
+            6,
+            &mut object_buffer,
+            &mut metadata_bytes,
+        )
+        .unwrap();
+        assert_eq!(metadata.object_type, ObjectType::File);
+        assert_eq!(metadata.created_ns, 20);
     }
 
     #[test]

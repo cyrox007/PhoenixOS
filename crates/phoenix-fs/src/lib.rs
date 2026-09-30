@@ -1886,12 +1886,20 @@ impl<'a> ObjectLeafInsert<'a> {
 
 #[derive(Debug, Clone, Copy)]
 enum ObjectLeafMutation<'a> {
-    Replace { key: ObjectTreeKey, value: &'a [u8] },
-    Insert { key: ObjectTreeKey, value: &'a [u8] },
+    Replace {
+        key: ObjectTreeKey,
+        value: &'a [u8],
+    },
+    Insert {
+        key: ObjectTreeKey,
+        value: &'a [u8],
+    },
     InsertBatch {
         insertions: &'a [ObjectLeafInsert<'a>],
     },
-    Delete { key: ObjectTreeKey },
+    Delete {
+        key: ObjectTreeKey,
+    },
 }
 
 impl ObjectLeafMutation<'_> {
@@ -2194,9 +2202,7 @@ fn commit_object_leaf_mutation<D: BlockDevice>(
     })
 }
 
-fn validate_object_insertions(
-    insertions: &[ObjectLeafInsert<'_>],
-) -> Result<(), PhoenixFsError> {
+fn validate_object_insertions(insertions: &[ObjectLeafInsert<'_>]) -> Result<(), PhoenixFsError> {
     if insertions.is_empty() {
         return Err(PhoenixFsError::InvalidObjectMutationBatch);
     }
@@ -2324,9 +2330,7 @@ pub fn materialize_object_leaf_with_inserted_values(
         let (record, old_value, source_size) =
             ObjectLeafRecordHeader::decode_with_value(&current[source_cursor..entries_end])?;
 
-        while insertion_index < insertions.len()
-            && insertions[insertion_index].key < record.key
-        {
+        while insertion_index < insertions.len() && insertions[insertion_index].key < record.key {
             let insertion = insertions[insertion_index];
             let value_bytes = u32::try_from(insertion.value.len())
                 .map_err(|_| PhoenixFsError::InvalidObjectRecordSize)?;
@@ -2340,9 +2344,7 @@ pub fn materialize_object_leaf_with_inserted_values(
             insertion_index += 1;
         }
 
-        if insertion_index < insertions.len()
-            && insertions[insertion_index].key == record.key
-        {
+        if insertion_index < insertions.len() && insertions[insertion_index].key == record.key {
             return Err(PhoenixFsError::ObjectRecordAlreadyExists);
         }
 
@@ -4202,14 +4204,9 @@ mod tests {
             ObjectLeafInsert::new(last_key, b"b"),
         ];
         let mut next = [0_u8; FILESYSTEM_BLOCK_SIZE];
-        let node = materialize_object_leaf_with_inserted_values(
-            &current,
-            &mut next,
-            &insertions,
-            5,
-            20,
-        )
-        .unwrap();
+        let node =
+            materialize_object_leaf_with_inserted_values(&current, &mut next, &insertions, 5, 20)
+                .unwrap();
 
         assert_eq!(node.item_count, 3);
         let mut cursor = start;

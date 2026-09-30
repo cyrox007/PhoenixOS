@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 640" role="img" aria-labelledby="title">
+<title id="title">PhoenixOS — монохромный логотип</title>
+<rect width="1000" height="640" fill="#070B12"/>
+<g fill="#F4F7FA">
+<path d="M500 480C407 430 338 347 320 245c76 69 141 79 189 62-54-20-93-63-114-124 93 59 171 67 229 25-22 51-54 86-99 109 63 25 120 19 174-20-33 94-101 158-199 183Z"/>
+<path d="M493 468c23-86 58-145 112-185-47 7-87-6-121-36 7-61 42-109 102-144-7 56 0 98 20 123-45 14-77 41-95 81 34 42 40 95 18 161Z" fill="#BFC7CF"/>
+<path d="M606 187c35-7 68 3 97 29-32-7-59-3-82 9 18 3 34 12 50 28-36-11-68-4-95 20 3-33 13-61 30-86Z"/>
+</g>
+<text x="500" y="575" text-anchor="middle" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="72" letter-spacing="9" fill="#F4F7FA">PHOENIXOS</text>
+</svg>

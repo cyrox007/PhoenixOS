@@ -2535,7 +2535,7 @@ fn commit_object_leaf_mutation<D: BlockDevice>(
     let first_new_block = allocation.allocated.start_block;
 
     read_filesystem_block(device, path.leaf_block, object_buffer)?;
-    let leaf = validate_object_leaf(object_buffer)?;
+    validate_object_leaf(object_buffer)?;
     let deleted_items = match mutation {
         ObjectLeafMutation::Delete { .. } => 1,
         ObjectLeafMutation::DeleteBatch { deletions } => deletions.len(),

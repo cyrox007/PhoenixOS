@@ -3250,12 +3250,8 @@ mod tests {
         assert_eq!(metadata.object_type, ObjectType::Directory);
         assert_eq!(metadata.created_ns, 123);
 
-        read_filesystem_block(
-            &mut device,
-            INITIAL_FREE_SPACE_TREE_BLOCK,
-            &mut node_buffer,
-        )
-        .unwrap();
+        read_filesystem_block(&mut device, INITIAL_FREE_SPACE_TREE_BLOCK, &mut node_buffer)
+            .unwrap();
         validate_free_space_leaf(&node_buffer, active.superblock.total_blocks).unwrap();
         assert_eq!(
             free_space_extent_at(&node_buffer, 0).unwrap(),

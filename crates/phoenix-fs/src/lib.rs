@@ -2660,7 +2660,6 @@ fn commit_object_leaf_mutation<D: BlockDevice>(
     let leaf_node = TreeNodeHeader::decode(object_copy_buffer)?;
     write_filesystem_block(device, first_new_block, object_copy_buffer)?;
 
-
     let mut new_child_block = first_new_block;
     let mut new_child_first_key = if path.parent_count == 0 && leaf_node.item_count == 0 {
         None

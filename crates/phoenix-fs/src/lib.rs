@@ -727,13 +727,7 @@ pub fn read_object_record_value<D: BlockDevice>(
     node_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
     value_buffer: &mut [u8],
 ) -> Result<usize, PhoenixFsError> {
-    let path = find_object_tree_path(
-        device,
-        root_block,
-        key,
-        maximum_generation,
-        node_buffer,
-    )?;
+    let path = find_object_tree_path(device, root_block, key, maximum_generation, node_buffer)?;
     read_filesystem_block(device, path.leaf_block, node_buffer)?;
 
     let node = validate_object_leaf(node_buffer)?;
@@ -807,7 +801,8 @@ pub fn lookup_directory_entry<D: BlockDevice>(
         maximum_generation,
         node_buffer,
         |key, value| {
-            if key.object_id != directory_object_id || key.kind != ObjectRecordKind::DirectoryEntry {
+            if key.object_id != directory_object_id || key.kind != ObjectRecordKind::DirectoryEntry
+            {
                 return Ok(false);
             }
 
@@ -861,7 +856,8 @@ pub fn read_file_range<D: BlockDevice>(
             maximum_generation,
             total_blocks,
             node_buffer,
-        )? else {
+        )?
+        else {
             break;
         };
 
@@ -1012,7 +1008,8 @@ where
                 &mut depth,
                 maximum_generation,
                 node_buffer,
-            )? else {
+            )?
+            else {
                 return Ok(());
             };
             current_block = next_block;
@@ -1050,10 +1047,7 @@ fn validate_scanned_node(
     Ok(())
 }
 
-fn visit_leaf_records<F>(
-    block: &[u8],
-    visitor: &mut F,
-) -> Result<bool, PhoenixFsError>
+fn visit_leaf_records<F>(block: &[u8], visitor: &mut F) -> Result<bool, PhoenixFsError>
 where
     F: FnMut(ObjectTreeKey, &[u8]) -> Result<bool, PhoenixFsError>,
 {
@@ -1094,8 +1088,7 @@ fn advance_object_scan<D: BlockDevice>(
         validate_scanned_node(parent, frame.block_number, maximum_generation)?;
 
         if frame.next_child_index < parent.item_count {
-            let record =
-                object_internal_record_at(node_buffer, frame.next_child_index as usize)?;
+            let record = object_internal_record_at(node_buffer, frame.next_child_index as usize)?;
             stack[frame_index].next_child_index += 1;
             return Ok(Some(record.child_block));
         }
@@ -2951,15 +2944,9 @@ mod tests {
 
         let mut node_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
         let mut value_buffer = [0_u8; OBJECT_METADATA_VALUE_SIZE];
-        let decoded = read_object_metadata(
-            &mut device,
-            8,
-            7,
-            5,
-            &mut node_buffer,
-            &mut value_buffer,
-        )
-        .unwrap();
+        let decoded =
+            read_object_metadata(&mut device, 8, 7, 5, &mut node_buffer, &mut value_buffer)
+                .unwrap();
 
         assert_eq!(decoded, metadata);
     }
@@ -2985,15 +2972,8 @@ mod tests {
         write_filesystem_block(&mut device, 8, &leaf).unwrap();
 
         let mut node_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
-        let found = lookup_directory_entry(
-            &mut device,
-            8,
-            5,
-            "Документы",
-            5,
-            &mut node_buffer,
-        )
-        .unwrap();
+        let found =
+            lookup_directory_entry(&mut device, 8, 5, "Документы", 5, &mut node_buffer).unwrap();
 
         assert_eq!(found.entry_id, 99);
         assert_eq!(found.target_object_id, 42);

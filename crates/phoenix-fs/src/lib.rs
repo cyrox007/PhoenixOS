@@ -2075,18 +2075,12 @@ pub fn commit_create_object<D: BlockDevice>(
         Err(error) => return Err(error),
     }
 
-    let metadata = ObjectMetadataValue::new(
-        object_type,
-        0,
-        timestamp_ns,
-        timestamp_ns,
-        timestamp_ns,
-    );
+    let metadata =
+        ObjectMetadataValue::new(object_type, 0, timestamp_ns, timestamp_ns, timestamp_ns);
     metadata.encode(&mut metadata_buffer)?;
 
     let directory_entry = DirectoryEntryValue::new(new_object_id, object_type)?;
-    let mut directory_buffer =
-        [0_u8; DIRECTORY_ENTRY_VALUE_HEADER_SIZE + MAX_DIRECTORY_NAME_BYTES];
+    let mut directory_buffer = [0_u8; DIRECTORY_ENTRY_VALUE_HEADER_SIZE + MAX_DIRECTORY_NAME_BYTES];
     let directory_size = directory_entry.encode(name, &mut directory_buffer)?;
 
     let metadata_key = ObjectTreeKey::new(new_object_id, ObjectRecordKind::Metadata, 0);

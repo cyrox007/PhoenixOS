@@ -1026,9 +1026,8 @@ pub fn materialize_object_internal_after_child_copy(
                 .ok_or(PhoenixFsError::ArithmeticOverflow)?,
         )
         .ok_or(PhoenixFsError::ArithmeticOverflow)?;
-    ObjectInternalRecord::new(new_child_first_key, new_child_block)?.encode(
-        &mut destination[record_offset..record_offset + OBJECT_INTERNAL_RECORD_SIZE],
-    )?;
+    ObjectInternalRecord::new(new_child_first_key, new_child_block)?
+        .encode(&mut destination[record_offset..record_offset + OBJECT_INTERNAL_RECORD_SIZE])?;
 
     let next = TreeNodeHeader::new(
         MetadataKind::ObjectTree,
@@ -1056,8 +1055,7 @@ fn validate_rewrite_target(
     if new_generation != expected_generation {
         return Err(PhoenixFsError::GenerationSequence);
     }
-    if new_block_number < SUPERBLOCK_COPY_COUNT
-        || new_block_number == current.metadata.block_number
+    if new_block_number < SUPERBLOCK_COPY_COUNT || new_block_number == current.metadata.block_number
     {
         return Err(PhoenixFsError::InvalidObjectRewriteTarget);
     }
@@ -1128,10 +1126,7 @@ pub fn commit_transaction<'a, D: BlockDevice>(
     })
 }
 
-fn validate_retired_blocks(
-    next: Superblock,
-    retired_blocks: &[u64],
-) -> Result<(), PhoenixFsError> {
+fn validate_retired_blocks(next: Superblock, retired_blocks: &[u64]) -> Result<(), PhoenixFsError> {
     for (index, block) in retired_blocks.iter().copied().enumerate() {
         if block < SUPERBLOCK_COPY_COUNT || block >= next.total_blocks {
             return Err(PhoenixFsError::InvalidRetiredBlock(block));
@@ -1580,17 +1575,10 @@ mod tests {
         let size = record
             .encode_with_value(&mut current[start..], b"abc")
             .unwrap();
-        TreeNodeHeader::new(
-            MetadataKind::ObjectTree,
-            5,
-            8,
-            0,
-            1,
-            size as u32,
-        )
-        .unwrap()
-        .seal(&mut current)
-        .unwrap();
+        TreeNodeHeader::new(MetadataKind::ObjectTree, 5, 8, 0, 1, size as u32)
+            .unwrap()
+            .seal(&mut current)
+            .unwrap();
 
         let mut next = [0_u8; FILESYSTEM_BLOCK_SIZE];
         let node = materialize_object_leaf_copy(&current, &mut next, 6, 20).unwrap();
@@ -1631,21 +1619,11 @@ mod tests {
         .unwrap();
 
         let mut next = [0_u8; FILESYSTEM_BLOCK_SIZE];
-        materialize_object_internal_after_child_copy(
-            &current,
-            &mut next,
-            8,
-            40,
-            1,
-            50,
-            second_key,
-        )
-        .unwrap();
+        materialize_object_internal_after_child_copy(&current, &mut next, 8, 40, 1, 50, second_key)
+            .unwrap();
 
-        let first = ObjectInternalRecord::decode(
-            &next[start..start + OBJECT_INTERNAL_RECORD_SIZE],
-        )
-        .unwrap();
+        let first = ObjectInternalRecord::decode(&next[start..start + OBJECT_INTERNAL_RECORD_SIZE])
+            .unwrap();
         let second = ObjectInternalRecord::decode(
             &next[start + OBJECT_INTERNAL_RECORD_SIZE..start + 2 * OBJECT_INTERNAL_RECORD_SIZE],
         )
@@ -1664,11 +1642,7 @@ mod tests {
         let retired = [8, 20];
 
         assert_eq!(
-            TransactionCommitPlan::new(
-                current,
-                TransactionRoots::new(20, 21),
-                &retired,
-            ),
+            TransactionCommitPlan::new(current, TransactionRoots::new(20, 21), &retired,),
             Err(PhoenixFsError::RetiredBlockStillReferenced(20))
         );
     }
@@ -1681,18 +1655,17 @@ mod tests {
             slot: SuperblockSlot::First,
         };
         let retired = [8, 9];
-        let plan = TransactionCommitPlan::new(
-            current,
-            TransactionRoots::new(20, 21),
-            &retired,
-        )
-        .unwrap();
+        let plan =
+            TransactionCommitPlan::new(current, TransactionRoots::new(20, 21), &retired).unwrap();
         let mut buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
 
         let committed = commit_transaction(&mut device, current, plan, &mut buffer).unwrap();
 
         assert_eq!(committed.active.superblock.generation, 6);
-        assert_eq!(committed.active.superblock.roots, TransactionRoots::new(20, 21));
+        assert_eq!(
+            committed.active.superblock.roots,
+            TransactionRoots::new(20, 21)
+        );
         assert_eq!(committed.retired_blocks(), &retired);
     }
 

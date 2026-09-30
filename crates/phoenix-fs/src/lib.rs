@@ -848,6 +848,7 @@ pub fn read_file_range<D: BlockDevice>(
     let requested_end = file_offset
         .checked_add(destination.len() as u64)
         .ok_or(PhoenixFsError::InvalidReadRange)?;
+    let total_blocks = filesystem_block_count(device)?;
     let mut written = 0_usize;
     let mut next_logical_offset = file_offset;
 
@@ -858,6 +859,7 @@ pub fn read_file_range<D: BlockDevice>(
             object_id,
             next_logical_offset,
             maximum_generation,
+            total_blocks,
             node_buffer,
         )? else {
             break;
@@ -899,6 +901,7 @@ fn find_next_extent<D: BlockDevice>(
     object_id: u64,
     logical_offset: u64,
     maximum_generation: u64,
+    total_blocks: u64,
     node_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
 ) -> Result<Option<(ObjectTreeKey, ExtentValue)>, PhoenixFsError> {
     let mut best: Option<(ObjectTreeKey, ExtentValue)> = None;
@@ -914,6 +917,7 @@ fn find_next_extent<D: BlockDevice>(
             }
 
             let extent = ExtentValue::decode(value)?;
+            extent.validate_for_key(key, total_blocks)?;
             if key.offset <= logical_offset {
                 let end = key
                     .offset

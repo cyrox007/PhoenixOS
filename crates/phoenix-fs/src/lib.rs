@@ -2529,18 +2529,34 @@ fn commit_object_leaf_mutation<D: BlockDevice>(
         return Err(PhoenixFsError::ObjectNodeGenerationAhead);
     }
 
-    let requested_blocks =
-        u64::try_from(path.node_count() + 1).map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
-    let allocation = plan_cow_allocation(current_free_space, total_blocks, requested_blocks)?;
-    let first_new_block = allocation.allocated.start_block;
-
     read_filesystem_block(device, path.leaf_block, object_buffer)?;
-    validate_object_leaf(object_buffer)?;
+    let leaf = validate_object_leaf(object_buffer)?;
     let deleted_items = match mutation {
         ObjectLeafMutation::Delete { .. } => 1,
         ObjectLeafMutation::DeleteBatch { deletions } => deletions.len(),
         _ => 0,
     };
+    if path.parent_count > 0
+        && deleted_items != 0
+        && deleted_items == leaf.item_count as usize
+    {
+        return commit_empty_leaf_prune(
+            device,
+            current,
+            path,
+            object_buffer,
+            object_copy_buffer,
+            current_free_space,
+            next_free_space,
+            superblock_buffer,
+        );
+    }
+
+    let requested_blocks =
+        u64::try_from(path.node_count() + 1).map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
+    let allocation = plan_cow_allocation(current_free_space, total_blocks, requested_blocks)?;
+    let first_new_block = allocation.allocated.start_block;
+
     match mutation {
         ObjectLeafMutation::Replace { key, value } => {
             materialize_object_leaf_with_replaced_value(
@@ -2648,19 +2664,6 @@ fn commit_object_leaf_mutation<D: BlockDevice>(
         }
     }
     let leaf_node = TreeNodeHeader::decode(object_copy_buffer)?;
-    if deleted_items != 0 && leaf_node.item_count == 0 && path.parent_count > 0 {
-        return commit_empty_leaf_prune(
-            device,
-            current,
-            path,
-            object_buffer,
-            object_copy_buffer,
-            current_free_space,
-            next_free_space,
-            superblock_buffer,
-        );
-    }
-
     write_filesystem_block(device, first_new_block, object_copy_buffer)?;
 
 

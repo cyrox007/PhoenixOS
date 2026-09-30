@@ -85,6 +85,8 @@ pub enum PhoenixFsError {
     InvalidObjectFlags(u32),
     InvalidDirectoryName,
     InvalidExtent,
+    InvalidReadRange,
+    DirectoryEntryNotFound,
     UnsupportedFeatures(u64),
     InvalidReservedField,
     ChecksumMismatch,
@@ -697,6 +699,411 @@ pub fn validate_object_record_value(
             extent.validate_for_key(key, total_blocks)
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectoryLookupResult {
+    pub entry_id: u64,
+    pub target_object_id: u64,
+    pub target_type: ObjectType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ObjectScanFrame {
+    block_number: u64,
+    next_child_index: u32,
+}
+
+const EMPTY_OBJECT_SCAN_FRAME: ObjectScanFrame = ObjectScanFrame {
+    block_number: 0,
+    next_child_index: 0,
+};
+
+pub fn read_object_record_value<D: BlockDevice>(
+    device: &mut D,
+    root_block: u64,
+    key: ObjectTreeKey,
+    maximum_generation: u64,
+    node_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    value_buffer: &mut [u8],
+) -> Result<usize, PhoenixFsError> {
+    let path = find_object_tree_path(
+        device,
+        root_block,
+        key,
+        maximum_generation,
+        node_buffer,
+    )?;
+    read_filesystem_block(device, path.leaf_block, node_buffer)?;
+
+    let node = validate_object_leaf(node_buffer)?;
+    let entries_start = TreeNodeHeader::entries_offset();
+    let entries_end = entries_start
+        .checked_add(node.entries_bytes as usize)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let mut cursor = entries_start;
+
+    for _ in 0..node.item_count {
+        let (record, value, encoded_size) =
+            ObjectLeafRecordHeader::decode_with_value(&node_buffer[cursor..entries_end])?;
+        if record.key == key {
+            if value_buffer.len() < value.len() {
+                return Err(PhoenixFsError::BufferSize);
+            }
+            value_buffer[..value.len()].copy_from_slice(value);
+            return Ok(value.len());
+        }
+        if record.key > key {
+            break;
+        }
+        cursor = cursor
+            .checked_add(encoded_size)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    }
+
+    Err(PhoenixFsError::ObjectRecordNotFound)
+}
+
+pub fn read_object_metadata<D: BlockDevice>(
+    device: &mut D,
+    root_block: u64,
+    object_id: u64,
+    maximum_generation: u64,
+    node_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    value_buffer: &mut [u8; OBJECT_METADATA_VALUE_SIZE],
+) -> Result<ObjectMetadataValue, PhoenixFsError> {
+    let key = ObjectTreeKey::new(object_id, ObjectRecordKind::Metadata, 0);
+    let size = read_object_record_value(
+        device,
+        root_block,
+        key,
+        maximum_generation,
+        node_buffer,
+        value_buffer,
+    )?;
+    if size != OBJECT_METADATA_VALUE_SIZE {
+        return Err(PhoenixFsError::InvalidObjectValueSize);
+    }
+    ObjectMetadataValue::decode(value_buffer)
+}
+
+pub fn lookup_directory_entry<D: BlockDevice>(
+    device: &mut D,
+    root_block: u64,
+    directory_object_id: u64,
+    name: &str,
+    maximum_generation: u64,
+    node_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<DirectoryLookupResult, PhoenixFsError> {
+    validate_directory_name(name)?;
+    if directory_object_id == 0 {
+        return Err(PhoenixFsError::InvalidObjectId);
+    }
+
+    let mut result = None;
+    scan_object_tree_records(
+        device,
+        root_block,
+        maximum_generation,
+        node_buffer,
+        |key, value| {
+            if key.object_id != directory_object_id || key.kind != ObjectRecordKind::DirectoryEntry {
+                return Ok(false);
+            }
+
+            let (entry, entry_name) = DirectoryEntryValue::decode(value)?;
+            if entry_name != name {
+                return Ok(false);
+            }
+
+            result = Some(DirectoryLookupResult {
+                entry_id: key.offset,
+                target_object_id: entry.target_object_id,
+                target_type: entry.target_type,
+            });
+            Ok(true)
+        },
+    )?;
+
+    result.ok_or(PhoenixFsError::DirectoryEntryNotFound)
+}
+
+pub fn read_file_range<D: BlockDevice>(
+    device: &mut D,
+    root_block: u64,
+    object_id: u64,
+    file_offset: u64,
+    destination: &mut [u8],
+    maximum_generation: u64,
+    node_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    data_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<usize, PhoenixFsError> {
+    if object_id == 0 {
+        return Err(PhoenixFsError::InvalidObjectId);
+    }
+    if destination.is_empty() {
+        return Ok(0);
+    }
+
+    let requested_end = file_offset
+        .checked_add(destination.len() as u64)
+        .ok_or(PhoenixFsError::InvalidReadRange)?;
+    let total_blocks = filesystem_block_count(device)?;
+    let mut written = 0_usize;
+    let mut next_logical_offset = file_offset;
+
+    while next_logical_offset < requested_end {
+        let Some((extent_key, extent)) = find_next_extent(
+            device,
+            root_block,
+            object_id,
+            next_logical_offset,
+            maximum_generation,
+            total_blocks,
+            node_buffer,
+        )? else {
+            break;
+        };
+
+        let extent_start = extent_key.offset;
+        let extent_end = extent_start
+            .checked_add(extent.data_bytes)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+        if next_logical_offset < extent_start {
+            break;
+        }
+        if next_logical_offset >= extent_end {
+            next_logical_offset = extent_end;
+            continue;
+        }
+
+        let copy_end = core::cmp::min(extent_end, requested_end);
+        let bytes_to_copy = usize::try_from(copy_end - next_logical_offset)
+            .map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
+        read_extent_bytes(
+            device,
+            extent,
+            next_logical_offset - extent_start,
+            &mut destination[written..written + bytes_to_copy],
+            data_buffer,
+        )?;
+
+        written += bytes_to_copy;
+        next_logical_offset = copy_end;
+    }
+
+    Ok(written)
+}
+
+fn find_next_extent<D: BlockDevice>(
+    device: &mut D,
+    root_block: u64,
+    object_id: u64,
+    logical_offset: u64,
+    maximum_generation: u64,
+    total_blocks: u64,
+    node_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<Option<(ObjectTreeKey, ExtentValue)>, PhoenixFsError> {
+    let mut best: Option<(ObjectTreeKey, ExtentValue)> = None;
+
+    scan_object_tree_records(
+        device,
+        root_block,
+        maximum_generation,
+        node_buffer,
+        |key, value| {
+            if key.object_id != object_id || key.kind != ObjectRecordKind::Extent {
+                return Ok(false);
+            }
+
+            let extent = ExtentValue::decode(value)?;
+            extent.validate_for_key(key, total_blocks)?;
+            if key.offset <= logical_offset {
+                let end = key
+                    .offset
+                    .checked_add(extent.data_bytes)
+                    .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+                if logical_offset < end {
+                    best = Some((key, extent));
+                    return Ok(true);
+                }
+                return Ok(false);
+            }
+
+            if best.is_none() {
+                best = Some((key, extent));
+            }
+            Ok(false)
+        },
+    )?;
+
+    Ok(best)
+}
+
+fn read_extent_bytes<D: BlockDevice>(
+    device: &mut D,
+    extent: ExtentValue,
+    extent_offset: u64,
+    destination: &mut [u8],
+    block_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<(), PhoenixFsError> {
+    let end = extent_offset
+        .checked_add(destination.len() as u64)
+        .ok_or(PhoenixFsError::InvalidReadRange)?;
+    if end > extent.data_bytes {
+        return Err(PhoenixFsError::InvalidReadRange);
+    }
+
+    let mut copied = 0_usize;
+    let mut current_offset = extent_offset;
+    while copied < destination.len() {
+        let block_delta = current_offset / FILESYSTEM_BLOCK_SIZE as u64;
+        let block_number = extent
+            .physical_start_block
+            .checked_add(block_delta)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+        read_filesystem_block(device, block_number, block_buffer)?;
+
+        let in_block = (current_offset % FILESYSTEM_BLOCK_SIZE as u64) as usize;
+        let available = FILESYSTEM_BLOCK_SIZE - in_block;
+        let remaining = destination.len() - copied;
+        let copy_bytes = core::cmp::min(available, remaining);
+        destination[copied..copied + copy_bytes]
+            .copy_from_slice(&block_buffer[in_block..in_block + copy_bytes]);
+
+        copied += copy_bytes;
+        current_offset = current_offset
+            .checked_add(copy_bytes as u64)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    }
+
+    Ok(())
+}
+
+fn scan_object_tree_records<D, F>(
+    device: &mut D,
+    root_block: u64,
+    maximum_generation: u64,
+    node_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    mut visitor: F,
+) -> Result<(), PhoenixFsError>
+where
+    D: BlockDevice,
+    F: FnMut(ObjectTreeKey, &[u8]) -> Result<bool, PhoenixFsError>,
+{
+    let mut stack = [EMPTY_OBJECT_SCAN_FRAME; MAX_OBJECT_TREE_DEPTH];
+    let mut depth = 0_usize;
+    let mut current_block = root_block;
+
+    loop {
+        read_filesystem_block(device, current_block, node_buffer)?;
+        let node = TreeNodeHeader::decode(node_buffer)?;
+        validate_scanned_node(node, current_block, maximum_generation)?;
+
+        if node.level == 0 {
+            validate_object_leaf(node_buffer)?;
+            if visit_leaf_records(node_buffer, &mut visitor)? {
+                return Ok(());
+            }
+
+            let Some(next_block) = advance_object_scan(
+                device,
+                &mut stack,
+                &mut depth,
+                maximum_generation,
+                node_buffer,
+            )? else {
+                return Ok(());
+            };
+            current_block = next_block;
+            continue;
+        }
+
+        validate_object_internal(node_buffer)?;
+        if depth == MAX_OBJECT_TREE_DEPTH {
+            return Err(PhoenixFsError::ObjectTreeDepthExceeded);
+        }
+
+        let first = object_internal_record_at(node_buffer, 0)?;
+        stack[depth] = ObjectScanFrame {
+            block_number: current_block,
+            next_child_index: 1,
+        };
+        depth += 1;
+        current_block = first.child_block;
+    }
+}
+
+fn validate_scanned_node(
+    node: TreeNodeHeader,
+    expected_block: u64,
+    maximum_generation: u64,
+) -> Result<(), PhoenixFsError> {
+    if node.metadata.kind != MetadataKind::ObjectTree
+        || node.metadata.block_number != expected_block
+    {
+        return Err(PhoenixFsError::ObjectTreePathMismatch);
+    }
+    if node.metadata.generation > maximum_generation {
+        return Err(PhoenixFsError::ObjectNodeGenerationAhead);
+    }
+    Ok(())
+}
+
+fn visit_leaf_records<F>(
+    block: &[u8],
+    visitor: &mut F,
+) -> Result<bool, PhoenixFsError>
+where
+    F: FnMut(ObjectTreeKey, &[u8]) -> Result<bool, PhoenixFsError>,
+{
+    let node = validate_object_leaf(block)?;
+    let entries_start = TreeNodeHeader::entries_offset();
+    let entries_end = entries_start
+        .checked_add(node.entries_bytes as usize)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let mut cursor = entries_start;
+
+    for _ in 0..node.item_count {
+        let (record, value, encoded_size) =
+            ObjectLeafRecordHeader::decode_with_value(&block[cursor..entries_end])?;
+        if visitor(record.key, value)? {
+            return Ok(true);
+        }
+        cursor = cursor
+            .checked_add(encoded_size)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    }
+
+    Ok(false)
+}
+
+fn advance_object_scan<D: BlockDevice>(
+    device: &mut D,
+    stack: &mut [ObjectScanFrame; MAX_OBJECT_TREE_DEPTH],
+    depth: &mut usize,
+    maximum_generation: u64,
+    node_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<Option<u64>, PhoenixFsError> {
+    while *depth > 0 {
+        let frame_index = *depth - 1;
+        let frame = stack[frame_index];
+
+        read_filesystem_block(device, frame.block_number, node_buffer)?;
+        let parent = validate_object_internal(node_buffer)?;
+        validate_scanned_node(parent, frame.block_number, maximum_generation)?;
+
+        if frame.next_child_index < parent.item_count {
+            let record =
+                object_internal_record_at(node_buffer, frame.next_child_index as usize)?;
+            stack[frame_index].next_child_index += 1;
+            return Ok(Some(record.child_block));
+        }
+
+        *depth -= 1;
+    }
+
+    Ok(None)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2520,6 +2927,123 @@ mod tests {
             TreeNodeHeader::new(MetadataKind::ObjectTree, 2, 4, 0, 1, 0),
             Err(PhoenixFsError::InvalidTreeNodeItemCount)
         );
+    }
+
+    #[test]
+    fn reads_metadata_value_by_exact_tree_key() {
+        let mut device = MemoryBlockDevice::<512, 512>::new();
+        let key = ObjectTreeKey::new(7, ObjectRecordKind::Metadata, 0);
+        let metadata = ObjectMetadataValue::new(ObjectType::File, 123, 1, 2, 3);
+        let mut value = [0_u8; OBJECT_METADATA_VALUE_SIZE];
+        metadata.encode(&mut value).unwrap();
+
+        let mut leaf = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let start = TreeNodeHeader::entries_offset();
+        let header = ObjectLeafRecordHeader::new(key, OBJECT_METADATA_VALUE_SIZE as u32).unwrap();
+        let bytes = header
+            .encode_with_value(&mut leaf[start..], &value)
+            .unwrap();
+        TreeNodeHeader::new(MetadataKind::ObjectTree, 4, 8, 0, 1, bytes as u32)
+            .unwrap()
+            .seal(&mut leaf)
+            .unwrap();
+        write_filesystem_block(&mut device, 8, &leaf).unwrap();
+
+        let mut node_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut value_buffer = [0_u8; OBJECT_METADATA_VALUE_SIZE];
+        let decoded = read_object_metadata(
+            &mut device,
+            8,
+            7,
+            5,
+            &mut node_buffer,
+            &mut value_buffer,
+        )
+        .unwrap();
+
+        assert_eq!(decoded, metadata);
+    }
+
+    #[test]
+    fn directory_lookup_finds_utf8_name_without_hash_key() {
+        let mut device = MemoryBlockDevice::<512, 512>::new();
+        let key = ObjectTreeKey::new(5, ObjectRecordKind::DirectoryEntry, 99);
+        let entry = DirectoryEntryValue::new(42, ObjectType::Directory).unwrap();
+        let mut encoded_entry = [0_u8; 128];
+        let entry_size = entry.encode("Документы", &mut encoded_entry).unwrap();
+
+        let mut leaf = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let start = TreeNodeHeader::entries_offset();
+        let header = ObjectLeafRecordHeader::new(key, entry_size as u32).unwrap();
+        let bytes = header
+            .encode_with_value(&mut leaf[start..], &encoded_entry[..entry_size])
+            .unwrap();
+        TreeNodeHeader::new(MetadataKind::ObjectTree, 4, 8, 0, 1, bytes as u32)
+            .unwrap()
+            .seal(&mut leaf)
+            .unwrap();
+        write_filesystem_block(&mut device, 8, &leaf).unwrap();
+
+        let mut node_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let found = lookup_directory_entry(
+            &mut device,
+            8,
+            5,
+            "Документы",
+            5,
+            &mut node_buffer,
+        )
+        .unwrap();
+
+        assert_eq!(found.entry_id, 99);
+        assert_eq!(found.target_object_id, 42);
+        assert_eq!(found.target_type, ObjectType::Directory);
+    }
+
+    #[test]
+    fn file_range_reads_across_extent_block_boundary() {
+        let mut device = MemoryBlockDevice::<512, 512>::new();
+        let extent_key = ObjectTreeKey::new(7, ObjectRecordKind::Extent, 0);
+        let extent = ExtentValue::new(20, 2, 8192);
+        let mut extent_bytes = [0_u8; EXTENT_VALUE_SIZE];
+        extent.encode(&mut extent_bytes).unwrap();
+
+        let mut leaf = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let start = TreeNodeHeader::entries_offset();
+        let header = ObjectLeafRecordHeader::new(extent_key, EXTENT_VALUE_SIZE as u32).unwrap();
+        let bytes = header
+            .encode_with_value(&mut leaf[start..], &extent_bytes)
+            .unwrap();
+        TreeNodeHeader::new(MetadataKind::ObjectTree, 4, 8, 0, 1, bytes as u32)
+            .unwrap()
+            .seal(&mut leaf)
+            .unwrap();
+        write_filesystem_block(&mut device, 8, &leaf).unwrap();
+
+        let first = [0x11_u8; FILESYSTEM_BLOCK_SIZE];
+        let second = [0x22_u8; FILESYSTEM_BLOCK_SIZE];
+        write_filesystem_block(&mut device, 20, &first).unwrap();
+        write_filesystem_block(&mut device, 21, &second).unwrap();
+
+        let mut node_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut data_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut destination = [0_u8; 32];
+
+        let read = read_file_range(
+            &mut device,
+            8,
+            7,
+            FILESYSTEM_BLOCK_SIZE as u64 - 16,
+            &mut destination,
+            5,
+            &mut node_buffer,
+            &mut data_buffer,
+        )
+        .unwrap();
+
+        assert_eq!(read, 32);
+        assert_eq!(&destination[..16], &[0x11; 16]);
+        assert_eq!(&destination[16..], &[0x22; 16]);
     }
 
     #[test]

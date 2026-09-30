@@ -2508,8 +2508,8 @@ fn materialize_merged_object_leaves(
 ) -> Result<TreeNodeHeader, PhoenixFsError> {
     let left_node = validate_object_leaf(left)?;
     let right_node = validate_object_leaf(right)?;
-    if new_generation <= left_node.metadata.generation
-        || new_generation <= right_node.metadata.generation
+    if new_generation < left_node.metadata.generation
+        || new_generation < right_node.metadata.generation
         || new_block_number < SUPERBLOCK_COPY_COUNT
     {
         return Err(PhoenixFsError::InvalidObjectRewriteTarget);
@@ -2665,6 +2665,11 @@ fn try_commit_leaf_merge_after_delete<D: BlockDevice>(
     if sibling_node.metadata.generation > current.superblock.generation {
         return Err(PhoenixFsError::ObjectNodeGenerationAhead);
     }
+    if sibling_node.metadata.block_number != sibling.child_block
+        || first_object_node_key(&sibling_buffer, sibling_node)? != sibling.key
+    {
+        return Err(PhoenixFsError::ObjectTreePathMismatch);
+    }
 
     let capacity = FILESYSTEM_BLOCK_SIZE
         .checked_sub(TreeNodeHeader::entries_offset())
@@ -2682,10 +2687,10 @@ fn try_commit_leaf_merge_after_delete<D: BlockDevice>(
         .checked_add(1)
         .ok_or(PhoenixFsError::ArithmeticOverflow)?;
     let merged_block = allocation.allocated.start_block;
-    let (left, right) = if child_index < sibling_index {
-        (modified_leaf.as_slice(), sibling_buffer.as_slice())
+    let (left, right): (&[u8], &[u8]) = if child_index < sibling_index {
+        (&modified_leaf[..], &sibling_buffer[..])
     } else {
-        (sibling_buffer.as_slice(), modified_leaf.as_slice())
+        (&sibling_buffer[..], &modified_leaf[..])
     };
     let merged = materialize_merged_object_leaves(
         left,

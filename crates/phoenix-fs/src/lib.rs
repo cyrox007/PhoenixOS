@@ -6312,9 +6312,9 @@ mod tests {
 
     #[test]
     fn nonroot_leaf_split_inserts_second_child_into_parent() {
-        let mut device = MemoryBlockDevice::<512, 2048>::new();
+        let mut device = MemoryBlockDevice::<512, 512>::new();
         let current = ActiveSuperblock {
-            superblock: Superblock::new(5, 256, VOLUME_ID, TransactionRoots::new(8, 9)).unwrap(),
+            superblock: Superblock::new(5, 64, VOLUME_ID, TransactionRoots::new(8, 9)).unwrap(),
             slot: SuperblockSlot::First,
         };
 
@@ -6361,7 +6361,7 @@ mod tests {
         .unwrap();
 
         let mut free_root = [0_u8; FILESYSTEM_BLOCK_SIZE];
-        write_free_space_extent(&mut free_root, 0, FreeSpaceExtent::new(20, 120)).unwrap();
+        write_free_space_extent(&mut free_root, 0, FreeSpaceExtent::new(20, 40)).unwrap();
         TreeNodeHeader::new(
             MetadataKind::FreeSpaceTree,
             5,

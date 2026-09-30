@@ -1140,9 +1140,10 @@ fn insert_reclaimed_block(
         Some(free_space_extent_at(block, index)?)
     };
 
-    let joins_previous = previous
-        .map(|extent| extent.end_block_exclusive() == Ok(reclaimed))
-        .unwrap_or(false);
+    let joins_previous = match previous {
+        Some(extent) => extent.end_block_exclusive()? == reclaimed,
+        None => false,
+    };
     let joins_next = next
         .map(|extent| reclaimed.checked_add(1) == Some(extent.start_block))
         .unwrap_or(false);
@@ -1151,7 +1152,10 @@ fn insert_reclaimed_block(
         let previous = previous.ok_or(PhoenixFsError::InvalidFreeSpaceRange)?;
         let next = next.ok_or(PhoenixFsError::InvalidFreeSpaceRange)?;
         let next_end = next.end_block_exclusive()?;
-        let merged = FreeSpaceExtent::new(previous.start_block, next_end - previous.start_block);
+        let merged_count = next_end
+            .checked_sub(previous.start_block)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+        let merged = FreeSpaceExtent::new(previous.start_block, merged_count);
         write_free_space_extent(block, index - 1, merged)?;
         remove_free_space_extent(block, item_count, index)?;
         return Ok(());
@@ -1159,13 +1163,21 @@ fn insert_reclaimed_block(
 
     if joins_previous {
         let previous = previous.ok_or(PhoenixFsError::InvalidFreeSpaceRange)?;
-        let merged = FreeSpaceExtent::new(previous.start_block, previous.block_count + 1);
+        let block_count = previous
+            .block_count
+            .checked_add(1)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+        let merged = FreeSpaceExtent::new(previous.start_block, block_count);
         return write_free_space_extent(block, index - 1, merged);
     }
 
     if joins_next {
         let next = next.ok_or(PhoenixFsError::InvalidFreeSpaceRange)?;
-        let merged = FreeSpaceExtent::new(reclaimed, next.block_count + 1);
+        let block_count = next
+            .block_count
+            .checked_add(1)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+        let merged = FreeSpaceExtent::new(reclaimed, block_count);
         return write_free_space_extent(block, index, merged);
     }
 

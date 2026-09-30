@@ -1018,6 +1018,9 @@ pub fn find_object_tree_path<D: BlockDevice>(
     target_key.validate()?;
     let mut path = ObjectTreePath::new();
     let mut current_block = root_block;
+    let mut expected_key = None;
+    let mut expected_parent_level = None;
+    let mut expected_parent_generation = None;
 
     loop {
         read_filesystem_block(device, current_block, buffer)?;
@@ -1030,6 +1033,22 @@ pub fn find_object_tree_path<D: BlockDevice>(
         }
         if node.metadata.generation > maximum_generation {
             return Err(PhoenixFsError::ObjectNodeGenerationAhead);
+        }
+
+        if let Some(parent_level) = expected_parent_level {
+            if node.level.checked_add(1) != Some(parent_level) {
+                return Err(PhoenixFsError::ObjectTreePathMismatch);
+            }
+        }
+        if let Some(parent_generation) = expected_parent_generation {
+            if node.metadata.generation > parent_generation {
+                return Err(PhoenixFsError::ObjectNodeGenerationAhead);
+            }
+        }
+        if let Some(key) = expected_key {
+            if first_object_node_key(buffer, node)? != key {
+                return Err(PhoenixFsError::ObjectTreePathMismatch);
+            }
         }
 
         if node.level == 0 {
@@ -1051,6 +1070,9 @@ pub fn find_object_tree_path<D: BlockDevice>(
             child_key: child_record.key,
         };
         path.parent_count += 1;
+        expected_key = Some(child_record.key);
+        expected_parent_level = Some(node.level);
+        expected_parent_generation = Some(node.metadata.generation);
         current_block = child_record.child_block;
     }
 }
@@ -2264,6 +2286,58 @@ mod tests {
         assert_eq!(
             select_object_child(&root, node, target).unwrap().0,
             1
+        );
+    }
+
+    #[test]
+    fn object_path_rejects_child_with_wrong_separator_key() {
+        let mut device = MemoryBlockDevice::<512, 512>::new();
+        let separator = ObjectTreeKey::new(7, ObjectRecordKind::Metadata, 0);
+        let actual = ObjectTreeKey::new(8, ObjectRecordKind::Metadata, 0);
+
+        let mut leaf = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let leaf_start = TreeNodeHeader::entries_offset();
+        let record = ObjectLeafRecordHeader::new(actual, 1).unwrap();
+        let leaf_bytes = record
+            .encode_with_value(&mut leaf[leaf_start..], b"x")
+            .unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            3,
+            10,
+            0,
+            1,
+            leaf_bytes as u32,
+        )
+        .unwrap()
+        .seal(&mut leaf)
+        .unwrap();
+
+        let mut root = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let root_start = TreeNodeHeader::entries_offset();
+        ObjectInternalRecord::new(separator, 10)
+            .unwrap()
+            .encode(&mut root[root_start..root_start + OBJECT_INTERNAL_RECORD_SIZE])
+            .unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            4,
+            8,
+            1,
+            1,
+            OBJECT_INTERNAL_RECORD_SIZE as u32,
+        )
+        .unwrap()
+        .seal(&mut root)
+        .unwrap();
+
+        write_filesystem_block(&mut device, 8, &root).unwrap();
+        write_filesystem_block(&mut device, 10, &leaf).unwrap();
+
+        let mut buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        assert_eq!(
+            find_object_tree_path(&mut device, 8, actual, 5, &mut buffer),
+            Err(PhoenixFsError::ObjectTreePathMismatch)
         );
     }
 

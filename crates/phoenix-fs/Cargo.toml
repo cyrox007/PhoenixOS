@@ -9,3 +9,4 @@ path = "src/lib.rs"
 
 [dependencies]
 phoenix-block = { path = "../block-storage" }
+phoenix-vfs = { path = "../vfs" }

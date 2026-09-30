@@ -3357,12 +3357,10 @@ fn choose_object_leaf_split_index(
         } else {
             let (record, _, source_size) =
                 ObjectLeafRecordHeader::decode_with_value(&current[source_cursor..entries_end])?;
-            let use_insertion = insertion_index < insertions.len()
-                && insertions[insertion_index].key < record.key;
+            let use_insertion =
+                insertion_index < insertions.len() && insertions[insertion_index].key < record.key;
 
-            if insertion_index < insertions.len()
-                && insertions[insertion_index].key == record.key
-            {
+            if insertion_index < insertions.len() && insertions[insertion_index].key == record.key {
                 return Err(PhoenixFsError::ObjectRecordAlreadyExists);
             }
 
@@ -3485,8 +3483,8 @@ fn materialize_object_leaf_insert_split_side(
         }
     }
 
-    let item_count = u32::try_from(range_end - range_start)
-        .map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
+    let item_count =
+        u32::try_from(range_end - range_start).map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
     seal_object_leaf_rewrite(
         destination,
         current_node,
@@ -3520,11 +3518,7 @@ fn commit_root_leaf_split_insertions<D: BlockDevice>(
         .generation
         .checked_add(1)
         .ok_or(PhoenixFsError::ArithmeticOverflow)?;
-    let allocation = plan_cow_allocation(
-        current_free_space,
-        current.superblock.total_blocks,
-        4,
-    )?;
+    let allocation = plan_cow_allocation(current_free_space, current.superblock.total_blocks, 4)?;
 
     let left_block = allocation.allocated.start_block;
     let right_block = left_block

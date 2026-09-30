@@ -83,6 +83,8 @@ pub enum PhoenixFsError {
     ObjectRecordNotFound,
     ObjectRecordAlreadyExists,
     ObjectLeafWouldBecomeEmpty,
+    InvalidObjectMutationBatch,
+    ObjectMutationBatchSpansLeaves,
     InvalidReclaimedBlock(u64),
     ReclaimedBlockAlreadyFree(u64),
     ObjectTreeDepthExceeded,
@@ -1872,6 +1874,18 @@ impl DeepRecordUpdateResult {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub struct ObjectLeafInsert<'a> {
+    pub key: ObjectTreeKey,
+    pub value: &'a [u8],
+}
+
+impl<'a> ObjectLeafInsert<'a> {
+    pub const fn new(key: ObjectTreeKey, value: &'a [u8]) -> Self {
+        Self { key, value }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 enum ObjectLeafMutation<'a> {
     Replace {
         key: ObjectTreeKey,
@@ -1881,20 +1895,27 @@ enum ObjectLeafMutation<'a> {
         key: ObjectTreeKey,
         value: &'a [u8],
     },
+    InsertBatch {
+        insertions: &'a [ObjectLeafInsert<'a>],
+    },
     Delete {
         key: ObjectTreeKey,
     },
 }
 
 impl ObjectLeafMutation<'_> {
-    const fn key(self) -> ObjectTreeKey {
+    fn key(self) -> Result<ObjectTreeKey, PhoenixFsError> {
         match self {
-            Self::Replace { key, .. } | Self::Insert { key, .. } | Self::Delete { key } => key,
+            Self::Replace { key, .. } | Self::Insert { key, .. } | Self::Delete { key } => Ok(key),
+            Self::InsertBatch { insertions } => insertions
+                .first()
+                .map(|insertion| insertion.key)
+                .ok_or(PhoenixFsError::InvalidObjectMutationBatch),
         }
     }
 
     const fn is_insertion(self) -> bool {
-        matches!(self, Self::Insert { .. })
+        matches!(self, Self::Insert { .. } | Self::InsertBatch { .. })
     }
 }
 
@@ -1947,6 +1968,29 @@ pub fn commit_object_record_insert<D: BlockDevice>(
     )
 }
 
+pub fn commit_object_record_insertions<D: BlockDevice>(
+    device: &mut D,
+    current: ActiveSuperblock,
+    insertions: &[ObjectLeafInsert<'_>],
+    object_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    object_copy_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    current_free_space: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    next_free_space: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    superblock_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<DeepRecordUpdateResult, PhoenixFsError> {
+    validate_object_insertions(insertions)?;
+    commit_object_leaf_mutation(
+        device,
+        current,
+        ObjectLeafMutation::InsertBatch { insertions },
+        object_buffer,
+        object_copy_buffer,
+        current_free_space,
+        next_free_space,
+        superblock_buffer,
+    )
+}
+
 pub fn commit_object_record_delete<D: BlockDevice>(
     device: &mut D,
     current: ActiveSuperblock,
@@ -1985,9 +2029,17 @@ fn commit_object_leaf_mutation<D: BlockDevice>(
         .generation
         .checked_add(1)
         .ok_or(PhoenixFsError::ArithmeticOverflow)?;
-    let key = mutation.key();
+    let key = mutation.key()?;
 
-    let path = if mutation.is_insertion() {
+    let path = if let ObjectLeafMutation::InsertBatch { insertions } = mutation {
+        find_shared_insertion_path(
+            device,
+            current.superblock.roots.object_tree,
+            insertions,
+            current.superblock.generation,
+            object_buffer,
+        )?
+    } else if mutation.is_insertion() {
         find_object_tree_path_for_insertion(
             device,
             current.superblock.roots.object_tree,
@@ -2049,6 +2101,15 @@ fn commit_object_leaf_mutation<D: BlockDevice>(
                 object_copy_buffer,
                 key,
                 value,
+                generation,
+                first_new_block,
+            )?;
+        }
+        ObjectLeafMutation::InsertBatch { insertions } => {
+            materialize_object_leaf_with_inserted_values(
+                object_buffer,
+                object_copy_buffer,
+                insertions,
                 generation,
                 first_new_block,
             )?;
@@ -2142,6 +2203,60 @@ fn commit_object_leaf_mutation<D: BlockDevice>(
     })
 }
 
+fn validate_object_insertions(
+    insertions: &[ObjectLeafInsert<'_>],
+) -> Result<(), PhoenixFsError> {
+    if insertions.is_empty() {
+        return Err(PhoenixFsError::InvalidObjectMutationBatch);
+    }
+
+    let mut previous_key = None;
+    for insertion in insertions {
+        insertion.key.validate()?;
+        let value_bytes = u32::try_from(insertion.value.len())
+            .map_err(|_| PhoenixFsError::InvalidObjectRecordSize)?;
+        ObjectLeafRecordHeader::new(insertion.key, value_bytes)?;
+
+        if previous_key.is_some_and(|previous| previous >= insertion.key) {
+            return Err(PhoenixFsError::InvalidObjectMutationBatch);
+        }
+        previous_key = Some(insertion.key);
+    }
+    Ok(())
+}
+
+fn find_shared_insertion_path<D: BlockDevice>(
+    device: &mut D,
+    root_block: u64,
+    insertions: &[ObjectLeafInsert<'_>],
+    maximum_generation: u64,
+    buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<ObjectTreePath, PhoenixFsError> {
+    validate_object_insertions(insertions)?;
+
+    let first = find_object_tree_path_for_insertion(
+        device,
+        root_block,
+        insertions[0].key,
+        maximum_generation,
+        buffer,
+    )?;
+
+    for insertion in &insertions[1..] {
+        let candidate = find_object_tree_path_for_insertion(
+            device,
+            root_block,
+            insertion.key,
+            maximum_generation,
+            buffer,
+        )?;
+        if candidate != first {
+            return Err(PhoenixFsError::ObjectMutationBatchSpansLeaves);
+        }
+    }
+    Ok(first)
+}
+
 fn object_internal_record_at(
     block: &[u8],
     index: usize,
@@ -2183,13 +2298,27 @@ pub fn materialize_object_leaf_with_inserted_value(
     new_generation: u64,
     new_block_number: u64,
 ) -> Result<TreeNodeHeader, PhoenixFsError> {
+    let insertion = [ObjectLeafInsert::new(key, value)];
+    materialize_object_leaf_with_inserted_values(
+        current,
+        destination,
+        &insertion,
+        new_generation,
+        new_block_number,
+    )
+}
+
+pub fn materialize_object_leaf_with_inserted_values(
+    current: &[u8],
+    destination: &mut [u8],
+    insertions: &[ObjectLeafInsert<'_>],
+    new_generation: u64,
+    new_block_number: u64,
+) -> Result<TreeNodeHeader, PhoenixFsError> {
     let current_node = validate_object_leaf(current)?;
     validate_rewrite_target(current_node, new_generation, new_block_number)?;
-    key.validate()?;
+    validate_object_insertions(insertions)?;
 
-    let value_bytes =
-        u32::try_from(value.len()).map_err(|_| PhoenixFsError::InvalidObjectRecordSize)?;
-    let inserted_record = ObjectLeafRecordHeader::new(key, value_bytes)?;
     let entries_start = TreeNodeHeader::entries_offset();
     let entries_end = entries_start
         .checked_add(current_node.entries_bytes as usize)
@@ -2198,19 +2327,32 @@ pub fn materialize_object_leaf_with_inserted_value(
     destination.fill(0);
     let mut source_cursor = entries_start;
     let mut destination_cursor = entries_start;
-    let mut inserted = false;
+    let mut insertion_index = 0_usize;
 
     for _ in 0..current_node.item_count {
         let (record, old_value, source_size) =
             ObjectLeafRecordHeader::decode_with_value(&current[source_cursor..entries_end])?;
 
-        if record.key == key {
-            return Err(PhoenixFsError::ObjectRecordAlreadyExists);
+        while insertion_index < insertions.len()
+            && insertions[insertion_index].key < record.key
+        {
+            let insertion = insertions[insertion_index];
+            let value_bytes = u32::try_from(insertion.value.len())
+                .map_err(|_| PhoenixFsError::InvalidObjectRecordSize)?;
+            let inserted_record = ObjectLeafRecordHeader::new(insertion.key, value_bytes)?;
+            destination_cursor = encode_leaf_record_at(
+                destination,
+                destination_cursor,
+                inserted_record,
+                insertion.value,
+            )?;
+            insertion_index += 1;
         }
-        if !inserted && record.key > key {
-            destination_cursor =
-                encode_leaf_record_at(destination, destination_cursor, inserted_record, value)?;
-            inserted = true;
+
+        if insertion_index < insertions.len()
+            && insertions[insertion_index].key == record.key
+        {
+            return Err(PhoenixFsError::ObjectRecordAlreadyExists);
         }
 
         destination_cursor =
@@ -2220,20 +2362,33 @@ pub fn materialize_object_leaf_with_inserted_value(
             .ok_or(PhoenixFsError::ArithmeticOverflow)?;
     }
 
-    if !inserted {
-        destination_cursor =
-            encode_leaf_record_at(destination, destination_cursor, inserted_record, value)?;
+    while insertion_index < insertions.len() {
+        let insertion = insertions[insertion_index];
+        let value_bytes = u32::try_from(insertion.value.len())
+            .map_err(|_| PhoenixFsError::InvalidObjectRecordSize)?;
+        let inserted_record = ObjectLeafRecordHeader::new(insertion.key, value_bytes)?;
+        destination_cursor = encode_leaf_record_at(
+            destination,
+            destination_cursor,
+            inserted_record,
+            insertion.value,
+        )?;
+        insertion_index += 1;
     }
+
+    let inserted_count =
+        u32::try_from(insertions.len()).map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
+    let item_count = current_node
+        .item_count
+        .checked_add(inserted_count)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
 
     seal_object_leaf_rewrite(
         destination,
         current_node,
         new_generation,
         new_block_number,
-        current_node
-            .item_count
-            .checked_add(1)
-            .ok_or(PhoenixFsError::ArithmeticOverflow)?,
+        item_count,
         destination_cursor,
     )
 }
@@ -4028,6 +4183,70 @@ mod tests {
         assert_eq!(
             find_object_tree_path(&mut device, 8, actual, 5, &mut buffer),
             Err(PhoenixFsError::ObjectTreePathMismatch)
+        );
+    }
+
+    #[test]
+    fn object_leaf_batch_insertion_merges_sorted_keys_atomically() {
+        let existing_key = ObjectTreeKey::new(10, ObjectRecordKind::Metadata, 0);
+        let first_key = ObjectTreeKey::new(5, ObjectRecordKind::Metadata, 0);
+        let last_key = ObjectTreeKey::new(15, ObjectRecordKind::Metadata, 0);
+
+        let mut current = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let start = TreeNodeHeader::entries_offset();
+        let record = ObjectLeafRecordHeader::new(existing_key, 1).unwrap();
+        let size = record
+            .encode_with_value(&mut current[start..], b"x")
+            .unwrap();
+        TreeNodeHeader::new(MetadataKind::ObjectTree, 4, 8, 0, 1, size as u32)
+            .unwrap()
+            .seal(&mut current)
+            .unwrap();
+
+        let insertions = [
+            ObjectLeafInsert::new(first_key, b"a"),
+            ObjectLeafInsert::new(last_key, b"b"),
+        ];
+        let mut next = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let node = materialize_object_leaf_with_inserted_values(
+            &current,
+            &mut next,
+            &insertions,
+            5,
+            20,
+        )
+        .unwrap();
+
+        assert_eq!(node.item_count, 3);
+        let mut cursor = start;
+        let mut keys = [existing_key; 3];
+        for key in &mut keys {
+            let (record, _, bytes) =
+                ObjectLeafRecordHeader::decode_with_value(&next[cursor..]).unwrap();
+            *key = record.key;
+            cursor += bytes;
+        }
+        assert_eq!(keys, [first_key, existing_key, last_key]);
+    }
+
+    #[test]
+    fn object_leaf_batch_rejects_unsorted_or_duplicate_input() {
+        let key = ObjectTreeKey::new(5, ObjectRecordKind::Metadata, 0);
+        let later = ObjectTreeKey::new(10, ObjectRecordKind::Metadata, 0);
+
+        assert_eq!(
+            validate_object_insertions(&[
+                ObjectLeafInsert::new(later, b"a"),
+                ObjectLeafInsert::new(key, b"b"),
+            ]),
+            Err(PhoenixFsError::InvalidObjectMutationBatch)
+        );
+        assert_eq!(
+            validate_object_insertions(&[
+                ObjectLeafInsert::new(key, b"a"),
+                ObjectLeafInsert::new(key, b"b"),
+            ]),
+            Err(PhoenixFsError::InvalidObjectMutationBatch)
         );
     }
 

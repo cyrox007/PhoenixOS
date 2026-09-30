@@ -47,6 +47,7 @@ pub enum PhoenixFsError {
     InvalidObjectRecordKind(u32),
     InvalidObjectRecordFlags(u32),
     InvalidObjectRecordSize,
+    InvalidObjectLeafNode,
     ObjectRecordsOutOfOrder,
     UnsupportedFeatures(u64),
     InvalidReservedField,
@@ -245,7 +246,9 @@ impl MetadataBlockHeader {
         let payload_size = usize::try_from(self.payload_bytes)
             .map_err(|_| PhoenixFsError::InvalidMetadataPayloadSize(self.payload_bytes))?;
         if payload_size > capacity {
-            return Err(PhoenixFsError::InvalidMetadataPayloadSize(self.payload_bytes));
+            return Err(PhoenixFsError::InvalidMetadataPayloadSize(
+                self.payload_bytes,
+            ));
         }
         Ok(())
     }
@@ -272,12 +275,7 @@ impl TreeNodeHeader {
             .checked_add(entries_bytes)
             .ok_or(PhoenixFsError::ArithmeticOverflow)?;
         let node = Self {
-            metadata: MetadataBlockHeader::new(
-                kind,
-                generation,
-                block_number,
-                payload_bytes,
-            ),
+            metadata: MetadataBlockHeader::new(kind, generation, block_number, payload_bytes),
             level,
             item_count,
             entries_bytes,
@@ -340,7 +338,9 @@ impl TreeNodeHeader {
         let entries_size = usize::try_from(self.entries_bytes)
             .map_err(|_| PhoenixFsError::InvalidTreeNodePayloadSize(self.entries_bytes))?;
         if entries_size > entries_capacity {
-            return Err(PhoenixFsError::InvalidTreeNodePayloadSize(self.entries_bytes));
+            return Err(PhoenixFsError::InvalidTreeNodePayloadSize(
+                self.entries_bytes,
+            ));
         }
 
         if self.item_count == 0 && self.entries_bytes != 0 {
@@ -487,7 +487,7 @@ impl ObjectLeafRecordHeader {
 pub fn validate_object_leaf(block: &[u8]) -> Result<TreeNodeHeader, PhoenixFsError> {
     let node = TreeNodeHeader::decode(block)?;
     if node.metadata.kind != MetadataKind::ObjectTree || node.level != 0 {
-        return Err(PhoenixFsError::InvalidMetadataKind(node.metadata.kind as u32));
+        return Err(PhoenixFsError::InvalidObjectLeafNode);
     }
 
     let entries_start = TreeNodeHeader::entries_offset();
@@ -813,11 +813,7 @@ fn write_filesystem_block<D: BlockDevice>(
 }
 
 fn superblock_crc32c(bytes: &[u8]) -> u32 {
-    crc32c_with_zeroed_range(
-        bytes,
-        SUPERBLOCK_CHECKSUM_OFFSET,
-        SUPERBLOCK_CHECKSUM_END,
-    )
+    crc32c_with_zeroed_range(bytes, SUPERBLOCK_CHECKSUM_OFFSET, SUPERBLOCK_CHECKSUM_END)
 }
 
 fn metadata_crc32c(bytes: &[u8]) -> u32 {

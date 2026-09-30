@@ -5065,6 +5065,165 @@ pub fn materialize_object_internal_without_child(
     Ok(next)
 }
 
+pub fn materialize_object_leaf_merge(
+    left: &[u8],
+    right: &[u8],
+    destination: &mut [u8],
+    new_generation: u64,
+    new_block_number: u64,
+) -> Result<TreeNodeHeader, PhoenixFsError> {
+    let left_node = validate_object_leaf(left)?;
+    let right_node = validate_object_leaf(right)?;
+
+    if left_node.item_count == 0 || right_node.item_count == 0 {
+        return Err(PhoenixFsError::InvalidObjectMutationBatch);
+    }
+    if new_generation <= left_node.metadata.generation
+        || new_generation <= right_node.metadata.generation
+        || new_block_number < SUPERBLOCK_COPY_COUNT
+        || new_block_number == left_node.metadata.block_number
+        || new_block_number == right_node.metadata.block_number
+    {
+        return Err(PhoenixFsError::InvalidObjectRewriteTarget);
+    }
+
+    let left_last_key = last_object_leaf_key(left)?;
+    let right_first_key = first_object_node_key(right, right_node)?;
+    if left_last_key >= right_first_key {
+        return Err(PhoenixFsError::ObjectRecordsOutOfOrder);
+    }
+
+    let left_bytes = left_node.entries_bytes as usize;
+    let right_bytes = right_node.entries_bytes as usize;
+    let entries_bytes = left_bytes
+        .checked_add(right_bytes)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let capacity = FILESYSTEM_BLOCK_SIZE
+        .checked_sub(TreeNodeHeader::entries_offset())
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    if entries_bytes > capacity {
+        return Err(PhoenixFsError::BufferSize);
+    }
+
+    let item_count = left_node
+        .item_count
+        .checked_add(right_node.item_count)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    destination.fill(0);
+    let start = TreeNodeHeader::entries_offset();
+    let left_end = start
+        .checked_add(left_bytes)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let right_end = left_end
+        .checked_add(right_bytes)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    destination[start..left_end].copy_from_slice(&left[start..start + left_bytes]);
+    destination[left_end..right_end].copy_from_slice(&right[start..start + right_bytes]);
+
+    let next = TreeNodeHeader::new(
+        MetadataKind::ObjectTree,
+        new_generation,
+        new_block_number,
+        0,
+        item_count,
+        entries_bytes as u32,
+    )?;
+    next.seal(destination)?;
+    validate_object_leaf(destination)?;
+    Ok(next)
+}
+
+fn last_object_leaf_key(block: &[u8]) -> Result<ObjectTreeKey, PhoenixFsError> {
+    let node = validate_object_leaf(block)?;
+    if node.item_count == 0 {
+        return Err(PhoenixFsError::InvalidObjectLeafNode);
+    }
+
+    let start = TreeNodeHeader::entries_offset();
+    let end = start
+        .checked_add(node.entries_bytes as usize)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let mut cursor = start;
+    let mut last = None;
+
+    for _ in 0..node.item_count {
+        let (record, _, encoded_size) =
+            ObjectLeafRecordHeader::decode_with_value(&block[cursor..end])?;
+        last = Some(record.key);
+        cursor = cursor
+            .checked_add(encoded_size)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    }
+
+    last.ok_or(PhoenixFsError::InvalidObjectLeafNode)
+}
+
+pub fn materialize_object_internal_after_child_merge(
+    current: &[u8],
+    destination: &mut [u8],
+    new_generation: u64,
+    new_block_number: u64,
+    left_child_index: usize,
+    merged_child_block: u64,
+    merged_first_key: ObjectTreeKey,
+) -> Result<TreeNodeHeader, PhoenixFsError> {
+    let current_node = validate_object_internal(current)?;
+    validate_rewrite_target(current_node, new_generation, new_block_number)?;
+
+    let right_child_index = left_child_index
+        .checked_add(1)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    if right_child_index >= current_node.item_count as usize || current_node.item_count <= 1 {
+        return Err(PhoenixFsError::InvalidObjectRewriteTarget);
+    }
+    validate_object_child_block(merged_child_block)?;
+    merged_first_key.validate()?;
+    if merged_child_block == new_block_number {
+        return Err(PhoenixFsError::InvalidObjectRewriteTarget);
+    }
+
+    destination.fill(0);
+    let start = TreeNodeHeader::entries_offset();
+    let mut output_index = 0_usize;
+
+    for input_index in 0..current_node.item_count as usize {
+        if input_index == left_child_index {
+            ObjectInternalRecord::new(merged_first_key, merged_child_block)?.encode(
+                &mut destination[start + output_index * OBJECT_INTERNAL_RECORD_SIZE
+                    ..start + (output_index + 1) * OBJECT_INTERNAL_RECORD_SIZE],
+            )?;
+            output_index += 1;
+            continue;
+        }
+        if input_index == right_child_index {
+            continue;
+        }
+
+        let record = object_internal_record_at(current, input_index)?;
+        record.encode(
+            &mut destination[start + output_index * OBJECT_INTERNAL_RECORD_SIZE
+                ..start + (output_index + 1) * OBJECT_INTERNAL_RECORD_SIZE],
+        )?;
+        output_index += 1;
+    }
+
+    let item_count = current_node.item_count - 1;
+    let entries_bytes = output_index
+        .checked_mul(OBJECT_INTERNAL_RECORD_SIZE)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let next = TreeNodeHeader::new(
+        MetadataKind::ObjectTree,
+        new_generation,
+        new_block_number,
+        current_node.level,
+        item_count,
+        entries_bytes as u32,
+    )?;
+    next.seal(destination)?;
+    validate_object_internal(destination)?;
+    Ok(next)
+}
+
 fn validate_rewrite_target(
     current: TreeNodeHeader,
     new_generation: u64,
@@ -6760,6 +6919,108 @@ mod tests {
             ),
             Err(PhoenixFsError::ObjectNotEmpty)
         );
+    }
+
+    #[test]
+    fn leaf_merge_preserves_sorted_records_when_both_sides_fit() {
+        let first_key = ObjectTreeKey::new(1, ObjectRecordKind::Metadata, 0);
+        let second_key = ObjectTreeKey::new(2, ObjectRecordKind::Metadata, 0);
+        let start = TreeNodeHeader::entries_offset();
+
+        let mut left = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let left_size = ObjectLeafRecordHeader::new(first_key, 1)
+            .unwrap()
+            .encode_with_value(&mut left[start..], b"a")
+            .unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            4,
+            10,
+            0,
+            1,
+            left_size as u32,
+        )
+        .unwrap()
+        .seal(&mut left)
+        .unwrap();
+
+        let mut right = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let right_size = ObjectLeafRecordHeader::new(second_key, 1)
+            .unwrap()
+            .encode_with_value(&mut right[start..], b"b")
+            .unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            4,
+            11,
+            0,
+            1,
+            right_size as u32,
+        )
+        .unwrap()
+        .seal(&mut right)
+        .unwrap();
+
+        let mut merged = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let node = materialize_object_leaf_merge(&left, &right, &mut merged, 5, 20).unwrap();
+
+        assert_eq!(node.item_count, 2);
+        find_object_leaf_record(&merged, first_key).unwrap();
+        find_object_leaf_record(&merged, second_key).unwrap();
+        assert_eq!(last_object_leaf_key(&merged), Ok(second_key));
+    }
+
+    #[test]
+    fn parent_merge_replaces_two_adjacent_children_with_one() {
+        let first_key = ObjectTreeKey::new(1, ObjectRecordKind::Metadata, 0);
+        let second_key = ObjectTreeKey::new(2, ObjectRecordKind::Metadata, 0);
+        let third_key = ObjectTreeKey::new(3, ObjectRecordKind::Metadata, 0);
+        let start = TreeNodeHeader::entries_offset();
+        let mut parent = [0_u8; FILESYSTEM_BLOCK_SIZE];
+
+        for (index, record) in [
+            ObjectInternalRecord::new(first_key, 10).unwrap(),
+            ObjectInternalRecord::new(second_key, 11).unwrap(),
+            ObjectInternalRecord::new(third_key, 12).unwrap(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            record
+                .encode(
+                    &mut parent[start + index * OBJECT_INTERNAL_RECORD_SIZE
+                        ..start + (index + 1) * OBJECT_INTERNAL_RECORD_SIZE],
+                )
+                .unwrap();
+        }
+
+        TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            4,
+            8,
+            1,
+            3,
+            (3 * OBJECT_INTERNAL_RECORD_SIZE) as u32,
+        )
+        .unwrap()
+        .seal(&mut parent)
+        .unwrap();
+
+        let mut next = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let node = materialize_object_internal_after_child_merge(
+            &parent,
+            &mut next,
+            5,
+            20,
+            0,
+            30,
+            first_key,
+        )
+        .unwrap();
+
+        assert_eq!(node.item_count, 2);
+        assert_eq!(object_internal_record_at(&next, 0).unwrap().child_block, 30);
+        assert_eq!(object_internal_record_at(&next, 1).unwrap().child_block, 12);
     }
 
     #[test]

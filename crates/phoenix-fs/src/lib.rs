@@ -1664,7 +1664,7 @@ mod tests {
 
     #[test]
     fn committed_transaction_exposes_retired_blocks_only_after_commit() {
-        let mut device = MemoryBlockDevice::<512, 512>::new().unwrap();
+        let mut device = MemoryBlockDevice::<512, 512>::new();
         let current = ActiveSuperblock {
             superblock: Superblock::new(5, 64, VOLUME_ID, TransactionRoots::new(8, 9)).unwrap(),
             slot: SuperblockSlot::First,

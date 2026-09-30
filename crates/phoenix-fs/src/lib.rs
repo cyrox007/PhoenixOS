@@ -2010,6 +2010,95 @@ mod tests {
     }
 
     #[test]
+    fn root_leaf_update_commits_new_roots_and_preserves_old_blocks() {
+        let mut device = MemoryBlockDevice::<{ FILESYSTEM_BLOCK_SIZE * 64 }>::new(512).unwrap();
+        let current = ActiveSuperblock {
+            superblock: Superblock::new(5, 64, VOLUME_ID, TransactionRoots::new(8, 9)).unwrap(),
+            slot: SuperblockSlot::First,
+        };
+        let key = ObjectTreeKey::new(7, ObjectRecordKind::Metadata, 0);
+
+        let mut object_root = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let start = TreeNodeHeader::entries_offset();
+        let record = ObjectLeafRecordHeader::new(key, 3).unwrap();
+        let object_bytes = record
+            .encode_with_value(&mut object_root[start..], b"old")
+            .unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            3,
+            8,
+            0,
+            1,
+            object_bytes as u32,
+        )
+        .unwrap()
+        .seal(&mut object_root)
+        .unwrap();
+
+        let mut free_root = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        write_free_space_extent(&mut free_root, 0, FreeSpaceExtent::new(20, 10)).unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::FreeSpaceTree,
+            5,
+            9,
+            0,
+            1,
+            FREE_SPACE_RECORD_SIZE as u32,
+        )
+        .unwrap()
+        .seal(&mut free_root)
+        .unwrap();
+
+        write_filesystem_block(&mut device, 8, &object_root).unwrap();
+        write_filesystem_block(&mut device, 9, &free_root).unwrap();
+
+        let old_object = object_root;
+        let mut current_object = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut current_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut next_object = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut next_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut superblock_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+
+        let result = commit_root_leaf_record_update(
+            &mut device,
+            current,
+            key,
+            b"new-value",
+            &mut current_object,
+            &mut current_free,
+            &mut next_object,
+            &mut next_free,
+            &mut superblock_buffer,
+        )
+        .unwrap();
+
+        assert_eq!(result.active.superblock.generation, 6);
+        assert_eq!(
+            result.active.superblock.roots,
+            TransactionRoots::new(20, 21)
+        );
+        assert_eq!(result.retired_blocks, [8, 9]);
+
+        let mut persisted_object = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        read_filesystem_block(&mut device, 20, &mut persisted_object).unwrap();
+        let (_, value, _) =
+            ObjectLeafRecordHeader::decode_with_value(&persisted_object[start..]).unwrap();
+        assert_eq!(value, b"new-value");
+
+        let mut persisted_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        read_filesystem_block(&mut device, 21, &mut persisted_free).unwrap();
+        assert_eq!(
+            free_space_extent_at(&persisted_free, 0).unwrap(),
+            FreeSpaceExtent::new(22, 8)
+        );
+
+        let mut unchanged_old_object = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        read_filesystem_block(&mut device, 8, &mut unchanged_old_object).unwrap();
+        assert_eq!(unchanged_old_object, old_object);
+    }
+
+    #[test]
     fn object_leaf_copy_moves_node_to_next_generation() {
         let key = ObjectTreeKey::new(4, ObjectRecordKind::Metadata, 0);
         let record = ObjectLeafRecordHeader::new(key, 3).unwrap();

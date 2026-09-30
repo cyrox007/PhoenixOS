@@ -2311,6 +2311,31 @@ mod tests {
     }
 
     #[test]
+    fn free_space_copy_accepts_older_shared_generation() {
+        let mut current = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        write_free_space_extent(&mut current, 0, FreeSpaceExtent::new(10, 8)).unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::FreeSpaceTree,
+            2,
+            7,
+            0,
+            1,
+            FREE_SPACE_RECORD_SIZE as u32,
+        )
+        .unwrap()
+        .seal(&mut current)
+        .unwrap();
+
+        let plan = plan_cow_allocation(&current, 64, 2).unwrap();
+        let mut next = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let node =
+            materialize_free_space_leaf_after_allocation(&current, &mut next, 64, 6, 10, plan)
+                .unwrap();
+
+        assert_eq!(node.metadata.generation, 6);
+    }
+
+    #[test]
     fn cow_allocation_rejects_target_outside_reserved_range() {
         let mut current = [0_u8; FILESYSTEM_BLOCK_SIZE];
         write_free_space_extent(&mut current, 0, FreeSpaceExtent::new(10, 10)).unwrap();

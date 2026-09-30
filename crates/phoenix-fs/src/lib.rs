@@ -1103,10 +1103,7 @@ fn select_object_child(
     selected.ok_or(PhoenixFsError::ObjectRecordNotFound)
 }
 
-fn find_object_leaf_record(
-    block: &[u8],
-    target_key: ObjectTreeKey,
-) -> Result<(), PhoenixFsError> {
+fn find_object_leaf_record(block: &[u8], target_key: ObjectTreeKey) -> Result<(), PhoenixFsError> {
     let node = validate_object_leaf(block)?;
     let entries_start = TreeNodeHeader::entries_offset();
     let entries_end = entries_start
@@ -1184,8 +1181,8 @@ pub fn commit_object_record_update<D: BlockDevice>(
         return Err(PhoenixFsError::ObjectNodeGenerationAhead);
     }
 
-    let requested_blocks = u64::try_from(path.node_count() + 1)
-        .map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
+    let requested_blocks =
+        u64::try_from(path.node_count() + 1).map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
     let allocation = plan_cow_allocation(current_free_space, total_blocks, requested_blocks)?;
     let first_new_block = allocation.allocated.start_block;
 
@@ -1260,11 +1257,7 @@ pub fn commit_object_record_update<D: BlockDevice>(
     sort_u64_prefix(&mut retired_blocks, retired_count);
 
     let roots = TransactionRoots::new(new_child_block, free_space_block);
-    let plan = TransactionCommitPlan::new(
-        current,
-        roots,
-        &retired_blocks[..retired_count],
-    )?;
+    let plan = TransactionCommitPlan::new(current, roots, &retired_blocks[..retired_count])?;
     let committed = commit_transaction(device, current, plan, superblock_buffer)?;
 
     Ok(DeepRecordUpdateResult {
@@ -2283,10 +2276,7 @@ mod tests {
         .unwrap();
         node.seal(&mut root).unwrap();
 
-        assert_eq!(
-            select_object_child(&root, node, target).unwrap().0,
-            1
-        );
+        assert_eq!(select_object_child(&root, node, target).unwrap().0, 1);
     }
 
     #[test]
@@ -2301,17 +2291,10 @@ mod tests {
         let leaf_bytes = record
             .encode_with_value(&mut leaf[leaf_start..], b"x")
             .unwrap();
-        TreeNodeHeader::new(
-            MetadataKind::ObjectTree,
-            3,
-            10,
-            0,
-            1,
-            leaf_bytes as u32,
-        )
-        .unwrap()
-        .seal(&mut leaf)
-        .unwrap();
+        TreeNodeHeader::new(MetadataKind::ObjectTree, 3, 10, 0, 1, leaf_bytes as u32)
+            .unwrap()
+            .seal(&mut leaf)
+            .unwrap();
 
         let mut root = [0_u8; FILESYSTEM_BLOCK_SIZE];
         let root_start = TreeNodeHeader::entries_offset();
@@ -2356,17 +2339,10 @@ mod tests {
         let leaf_bytes = leaf_record
             .encode_with_value(&mut leaf[leaf_start..], b"old")
             .unwrap();
-        TreeNodeHeader::new(
-            MetadataKind::ObjectTree,
-            3,
-            10,
-            0,
-            1,
-            leaf_bytes as u32,
-        )
-        .unwrap()
-        .seal(&mut leaf)
-        .unwrap();
+        TreeNodeHeader::new(MetadataKind::ObjectTree, 3, 10, 0, 1, leaf_bytes as u32)
+            .unwrap()
+            .seal(&mut leaf)
+            .unwrap();
 
         let mut root = [0_u8; FILESYSTEM_BLOCK_SIZE];
         let root_start = TreeNodeHeader::entries_offset();

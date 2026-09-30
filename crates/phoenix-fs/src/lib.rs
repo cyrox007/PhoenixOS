@@ -2510,17 +2510,17 @@ fn align_up(value: usize, alignment: usize) -> Result<usize, PhoenixFsError> {
     Ok(adjusted & !mask)
 }
 
-pub struct PhoenixVfs<'a, D: BlockDevice> {
-    device: RefCell<&'a mut D>,
+pub struct PhoenixVfs<D: BlockDevice> {
+    device: RefCell<D>,
     active: ActiveSuperblock,
     node_buffer: RefCell<[u8; FILESYSTEM_BLOCK_SIZE]>,
     data_buffer: RefCell<[u8; FILESYSTEM_BLOCK_SIZE]>,
     metadata_buffer: RefCell<[u8; OBJECT_METADATA_VALUE_SIZE]>,
 }
 
-impl<'a, D: BlockDevice> PhoenixVfs<'a, D> {
-    pub fn new(device: &'a mut D, active: ActiveSuperblock) -> Result<Self, PhoenixFsError> {
-        let total_blocks = filesystem_block_count(device)?;
+impl<D: BlockDevice> PhoenixVfs<D> {
+    pub fn new(device: D, active: ActiveSuperblock) -> Result<Self, PhoenixFsError> {
+        let total_blocks = filesystem_block_count(&device)?;
         if active.superblock.total_blocks != total_blocks {
             return Err(PhoenixFsError::InvalidVolumeGeometry);
         }
@@ -2538,6 +2538,10 @@ impl<'a, D: BlockDevice> PhoenixVfs<'a, D> {
         self.active
     }
 
+    pub fn into_device(self) -> D {
+        self.device.into_inner()
+    }
+
     fn object_metadata(&self, object_id: u64) -> Result<ObjectMetadataValue, VfsError> {
         let mut device = self
             .device
@@ -2553,7 +2557,7 @@ impl<'a, D: BlockDevice> PhoenixVfs<'a, D> {
             .map_err(|_| VfsError::Storage)?;
 
         read_object_metadata(
-            &mut **device,
+            &mut *device,
             self.active.superblock.roots.object_tree,
             object_id,
             self.active.superblock.generation,
@@ -2564,7 +2568,7 @@ impl<'a, D: BlockDevice> PhoenixVfs<'a, D> {
     }
 }
 
-impl<D: BlockDevice> FileSystem for PhoenixVfs<'_, D> {
+impl<D: BlockDevice> FileSystem for PhoenixVfs<D> {
     fn root_node(&self) -> Result<NodeId, VfsError> {
         let metadata = self.object_metadata(ROOT_OBJECT_ID)?;
         if metadata.object_type != ObjectType::Directory {
@@ -2602,7 +2606,7 @@ impl<D: BlockDevice> FileSystem for PhoenixVfs<'_, D> {
             .map_err(|_| VfsError::Storage)?;
 
         let entry = lookup_directory_entry(
-            &mut **device,
+            &mut *device,
             self.active.superblock.roots.object_tree,
             parent.0,
             name,
@@ -2649,7 +2653,7 @@ impl<D: BlockDevice> FileSystem for PhoenixVfs<'_, D> {
             .map_err(|_| VfsError::Storage)?;
 
         read_file_range(
-            &mut **device,
+            &mut *device,
             self.active.superblock.roots.object_tree,
             node.0,
             offset,
@@ -3169,7 +3173,7 @@ mod tests {
             superblock: Superblock::new(5, 64, VOLUME_ID, TransactionRoots::new(8, 9)).unwrap(),
             slot: SuperblockSlot::First,
         };
-        let filesystem = PhoenixVfs::new(&mut device, active).unwrap();
+        let filesystem = PhoenixVfs::new(device, active).unwrap();
 
         assert_eq!(filesystem.root_node(), Ok(NodeId(1)));
         assert_eq!(resolve_path(&filesystem, "/hello"), Ok(NodeId(2)));
@@ -3195,7 +3199,7 @@ mod tests {
             superblock: Superblock::new(5, 64, VOLUME_ID, TransactionRoots::new(8, 9)).unwrap(),
             slot: SuperblockSlot::First,
         };
-        let mut filesystem = PhoenixVfs::new(&mut device, active).unwrap();
+        let mut filesystem = PhoenixVfs::new(device, active).unwrap();
 
         assert_eq!(
             filesystem.create_node(NodeId(1), b"x", NodeKind::File),

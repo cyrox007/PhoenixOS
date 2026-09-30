@@ -1980,10 +1980,34 @@ pub fn commit_object_record_insertions<D: BlockDevice>(
     superblock_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
 ) -> Result<DeepRecordUpdateResult, PhoenixFsError> {
     validate_object_insertions(insertions)?;
-    commit_object_leaf_mutation(
+    let paths = classify_insertion_paths(
+        device,
+        current.superblock.roots.object_tree,
+        insertions,
+        current.superblock.generation,
+        object_buffer,
+    )?;
+
+    let Some(second_path) = paths.second else {
+        return commit_object_leaf_mutation(
+            device,
+            current,
+            ObjectLeafMutation::InsertBatch { insertions },
+            object_buffer,
+            object_copy_buffer,
+            current_free_space,
+            next_free_space,
+            superblock_buffer,
+        );
+    };
+
+    commit_two_leaf_insertions(
         device,
         current,
-        ObjectLeafMutation::InsertBatch { insertions },
+        paths.first,
+        second_path,
+        &insertions[..paths.split_index],
+        &insertions[paths.split_index..],
         object_buffer,
         object_copy_buffer,
         current_free_space,
@@ -2300,6 +2324,401 @@ fn commit_object_leaf_mutation<D: BlockDevice>(
         retired_count,
         allocated: allocation.allocated,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ObjectInsertionPaths {
+    first: ObjectTreePath,
+    split_index: usize,
+    second: Option<ObjectTreePath>,
+}
+
+fn classify_insertion_paths<D: BlockDevice>(
+    device: &mut D,
+    root_block: u64,
+    insertions: &[ObjectLeafInsert<'_>],
+    maximum_generation: u64,
+    buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<ObjectInsertionPaths, PhoenixFsError> {
+    validate_object_insertions(insertions)?;
+
+    let first = find_object_tree_path_for_insertion(
+        device,
+        root_block,
+        insertions[0].key,
+        maximum_generation,
+        buffer,
+    )?;
+    let mut second = None;
+    let mut split_index = insertions.len();
+
+    for (index, insertion) in insertions.iter().enumerate().skip(1) {
+        let candidate = find_object_tree_path_for_insertion(
+            device,
+            root_block,
+            insertion.key,
+            maximum_generation,
+            buffer,
+        )?;
+
+        match second {
+            None if candidate == first => {}
+            None => {
+                second = Some(candidate);
+                split_index = index;
+            }
+            Some(existing) if candidate == existing => {}
+            Some(_) => return Err(PhoenixFsError::ObjectMutationBatchSpansLeaves),
+        }
+    }
+
+    Ok(ObjectInsertionPaths {
+        first,
+        split_index,
+        second,
+    })
+}
+
+fn commit_two_leaf_insertions<D: BlockDevice>(
+    device: &mut D,
+    current: ActiveSuperblock,
+    first_path: ObjectTreePath,
+    second_path: ObjectTreePath,
+    first_insertions: &[ObjectLeafInsert<'_>],
+    second_insertions: &[ObjectLeafInsert<'_>],
+    object_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    object_copy_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    current_free_space: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    next_free_space: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    superblock_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<DeepRecordUpdateResult, PhoenixFsError> {
+    if first_insertions.is_empty() || second_insertions.is_empty() {
+        return Err(PhoenixFsError::InvalidObjectMutationBatch);
+    }
+    let divergence = object_path_divergence(first_path, second_path)?;
+
+    let mut retired_blocks = [0_u64; MAX_OBJECT_TRANSACTION_RETIRED_BLOCKS];
+    let retired_count = collect_two_path_retired_blocks(
+        first_path,
+        second_path,
+        current.superblock.roots.free_space_tree,
+        &mut retired_blocks,
+    )?;
+    let requested_blocks =
+        u64::try_from(retired_count).map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
+
+    let total_blocks = current.superblock.total_blocks;
+    read_filesystem_block(
+        device,
+        current.superblock.roots.free_space_tree,
+        current_free_space,
+    )?;
+    let free_node = validate_free_space_leaf(current_free_space, total_blocks)?;
+    if free_node.metadata.block_number != current.superblock.roots.free_space_tree {
+        return Err(PhoenixFsError::InvalidTransactionRoots);
+    }
+    if free_node.metadata.generation > current.superblock.generation {
+        return Err(PhoenixFsError::ObjectNodeGenerationAhead);
+    }
+
+    let allocation = plan_cow_allocation(current_free_space, total_blocks, requested_blocks)?;
+    let generation = current
+        .superblock
+        .generation
+        .checked_add(1)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let mut next_block = allocation.allocated.start_block;
+
+    let first_leaf = copy_inserted_leaf(
+        device,
+        first_path.leaf_block,
+        first_insertions,
+        generation,
+        next_block,
+        object_buffer,
+        object_copy_buffer,
+    )?;
+    next_block = next_block
+        .checked_add(1)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+
+    let second_leaf = copy_inserted_leaf(
+        device,
+        second_path.leaf_block,
+        second_insertions,
+        generation,
+        next_block,
+        object_buffer,
+        object_copy_buffer,
+    )?;
+    next_block = next_block
+        .checked_add(1)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+
+    let first_branch = copy_object_parent_range(
+        device,
+        current,
+        first_path,
+        divergence + 1,
+        first_path.parent_count,
+        first_leaf.0,
+        first_leaf.1,
+        generation,
+        &mut next_block,
+        object_buffer,
+        object_copy_buffer,
+    )?;
+    let second_branch = copy_object_parent_range(
+        device,
+        current,
+        second_path,
+        divergence + 1,
+        second_path.parent_count,
+        second_leaf.0,
+        second_leaf.1,
+        generation,
+        &mut next_block,
+        object_buffer,
+        object_copy_buffer,
+    )?;
+
+    let divergence_step = first_path.parents[divergence];
+    let second_divergence_step = second_path.parents[divergence];
+    if divergence_step.block_number != second_divergence_step.block_number {
+        return Err(PhoenixFsError::ObjectTreePathMismatch);
+    }
+
+    read_filesystem_block(device, divergence_step.block_number, object_buffer)?;
+    let parent = validate_object_internal(object_buffer)?;
+    if parent.metadata.generation > current.superblock.generation {
+        return Err(PhoenixFsError::ObjectNodeGenerationAhead);
+    }
+    validate_path_pointer(object_buffer, divergence_step)?;
+    validate_path_pointer(object_buffer, second_divergence_step)?;
+
+    let mut rewrites = [
+        ObjectChildRewrite::new(
+            divergence_step.child_index,
+            first_branch.0,
+            first_branch.1,
+        ),
+        ObjectChildRewrite::new(
+            second_divergence_step.child_index,
+            second_branch.0,
+            second_branch.1,
+        ),
+    ];
+    if rewrites[0].child_index > rewrites[1].child_index {
+        rewrites.swap(0, 1);
+    }
+
+    materialize_object_internal_after_child_rewrites(
+        object_buffer,
+        object_copy_buffer,
+        generation,
+        next_block,
+        &rewrites,
+    )?;
+    write_filesystem_block(device, next_block, object_copy_buffer)?;
+    let divergence_node = TreeNodeHeader::decode(object_copy_buffer)?;
+    let common_key = first_object_node_key(object_copy_buffer, divergence_node)?;
+    let common_block = next_block;
+    next_block = next_block
+        .checked_add(1)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+
+    let root = copy_object_parent_range(
+        device,
+        current,
+        first_path,
+        0,
+        divergence,
+        common_block,
+        common_key,
+        generation,
+        &mut next_block,
+        object_buffer,
+        object_copy_buffer,
+    )?;
+
+    let free_space_block = next_block;
+    let allocation_end = allocation.allocated.end_block_exclusive()?;
+    if free_space_block
+        .checked_add(1)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?
+        != allocation_end
+    {
+        return Err(PhoenixFsError::InvalidTransactionRoots);
+    }
+
+    materialize_free_space_leaf_after_allocation(
+        current_free_space,
+        next_free_space,
+        total_blocks,
+        generation,
+        free_space_block,
+        allocation,
+    )?;
+    write_filesystem_block(device, free_space_block, next_free_space)?;
+
+    sort_u64_prefix(&mut retired_blocks, retired_count);
+    let roots = TransactionRoots::new(root.0, free_space_block);
+    let plan = TransactionCommitPlan::new(current, roots, &retired_blocks[..retired_count])?;
+    let committed = commit_transaction(device, current, plan, superblock_buffer)?;
+
+    Ok(DeepRecordUpdateResult {
+        active: committed.active,
+        retired_blocks,
+        retired_count,
+        allocated: allocation.allocated,
+    })
+}
+
+fn copy_inserted_leaf<D: BlockDevice>(
+    device: &mut D,
+    source_block: u64,
+    insertions: &[ObjectLeafInsert<'_>],
+    generation: u64,
+    destination_block: u64,
+    object_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    object_copy_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<(u64, ObjectTreeKey), PhoenixFsError> {
+    read_filesystem_block(device, source_block, object_buffer)?;
+    materialize_object_leaf_with_inserted_values(
+        object_buffer,
+        object_copy_buffer,
+        insertions,
+        generation,
+        destination_block,
+    )?;
+    write_filesystem_block(device, destination_block, object_copy_buffer)?;
+    let node = TreeNodeHeader::decode(object_copy_buffer)?;
+    let first_key = first_object_node_key(object_copy_buffer, node)?;
+    Ok((destination_block, first_key))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn copy_object_parent_range<D: BlockDevice>(
+    device: &mut D,
+    current: ActiveSuperblock,
+    path: ObjectTreePath,
+    range_start: usize,
+    range_end: usize,
+    mut child_block: u64,
+    mut child_first_key: ObjectTreeKey,
+    generation: u64,
+    next_block: &mut u64,
+    object_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    object_copy_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<(u64, ObjectTreeKey), PhoenixFsError> {
+    if range_start > range_end || range_end > path.parent_count {
+        return Err(PhoenixFsError::ObjectTreePathMismatch);
+    }
+
+    for parent_position in (range_start..range_end).rev() {
+        let step = path.parents[parent_position];
+        read_filesystem_block(device, step.block_number, object_buffer)?;
+        let parent = validate_object_internal(object_buffer)?;
+        if parent.metadata.generation > current.superblock.generation {
+            return Err(PhoenixFsError::ObjectNodeGenerationAhead);
+        }
+        validate_path_pointer(object_buffer, step)?;
+
+        materialize_object_internal_after_child_copy(
+            object_buffer,
+            object_copy_buffer,
+            generation,
+            *next_block,
+            step.child_index as usize,
+            child_block,
+            child_first_key,
+        )?;
+        write_filesystem_block(device, *next_block, object_copy_buffer)?;
+
+        let copied_parent = TreeNodeHeader::decode(object_copy_buffer)?;
+        child_first_key = first_object_node_key(object_copy_buffer, copied_parent)?;
+        child_block = *next_block;
+        *next_block = next_block
+            .checked_add(1)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    }
+
+    Ok((child_block, child_first_key))
+}
+
+fn validate_path_pointer(
+    block: &[u8],
+    step: ObjectPathStep,
+) -> Result<(), PhoenixFsError> {
+    let pointer = object_internal_record_at(block, step.child_index as usize)?;
+    if pointer.key != step.child_key {
+        return Err(PhoenixFsError::ObjectTreePathMismatch);
+    }
+    Ok(())
+}
+
+fn object_path_divergence(
+    first: ObjectTreePath,
+    second: ObjectTreePath,
+) -> Result<usize, PhoenixFsError> {
+    if first.leaf_block == second.leaf_block
+        || first.parent_count == 0
+        || first.parent_count != second.parent_count
+    {
+        return Err(PhoenixFsError::ObjectTreePathMismatch);
+    }
+
+    for index in 0..first.parent_count {
+        let first_step = first.parents[index];
+        let second_step = second.parents[index];
+        if first_step.block_number != second_step.block_number {
+            return Err(PhoenixFsError::ObjectTreePathMismatch);
+        }
+        if first_step.child_index != second_step.child_index {
+            return Ok(index);
+        }
+        if first_step.child_key != second_step.child_key {
+            return Err(PhoenixFsError::ObjectTreePathMismatch);
+        }
+    }
+
+    Err(PhoenixFsError::ObjectTreePathMismatch)
+}
+
+fn collect_two_path_retired_blocks(
+    first: ObjectTreePath,
+    second: ObjectTreePath,
+    free_space_root: u64,
+    retired: &mut [u64; MAX_OBJECT_TRANSACTION_RETIRED_BLOCKS],
+) -> Result<usize, PhoenixFsError> {
+    let mut count = 0_usize;
+    push_unique_retired(retired, &mut count, first.leaf_block)?;
+    push_unique_retired(retired, &mut count, second.leaf_block)?;
+
+    for index in 0..first.parent_count {
+        push_unique_retired(retired, &mut count, first.parents[index].block_number)?;
+    }
+    for index in 0..second.parent_count {
+        push_unique_retired(retired, &mut count, second.parents[index].block_number)?;
+    }
+    push_unique_retired(retired, &mut count, free_space_root)?;
+    Ok(count)
+}
+
+fn push_unique_retired(
+    retired: &mut [u64; MAX_OBJECT_TRANSACTION_RETIRED_BLOCKS],
+    count: &mut usize,
+    block: u64,
+) -> Result<(), PhoenixFsError> {
+    if retired[..*count].contains(&block) {
+        return Ok(());
+    }
+    if *count == retired.len() {
+        return Err(PhoenixFsError::ObjectTreeDepthExceeded);
+    }
+    retired[*count] = block;
+    *count += 1;
+    Ok(())
 }
 
 fn validate_object_insertions(insertions: &[ObjectLeafInsert<'_>]) -> Result<(), PhoenixFsError> {

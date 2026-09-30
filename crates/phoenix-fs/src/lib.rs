@@ -2161,6 +2161,94 @@ pub fn commit_create_object<D: BlockDevice>(
     )
 }
 
+pub fn commit_remove_object<D: BlockDevice>(
+    device: &mut D,
+    current: ActiveSuperblock,
+    parent_object_id: u64,
+    name: &str,
+    object_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    object_copy_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    current_free_space: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    next_free_space: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    superblock_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<DeepRecordUpdateResult, PhoenixFsError> {
+    validate_directory_name(name)?;
+    if parent_object_id == 0 {
+        return Err(PhoenixFsError::InvalidObjectId);
+    }
+
+    let mut metadata_buffer = [0_u8; OBJECT_METADATA_VALUE_SIZE];
+    let parent_metadata = read_object_metadata(
+        device,
+        current.superblock.roots.object_tree,
+        parent_object_id,
+        current.superblock.generation,
+        object_buffer,
+        &mut metadata_buffer,
+    )?;
+    if parent_metadata.object_type != ObjectType::Directory {
+        return Err(PhoenixFsError::ParentNotDirectory);
+    }
+
+    let entry = lookup_directory_entry(
+        device,
+        current.superblock.roots.object_tree,
+        parent_object_id,
+        name,
+        current.superblock.generation,
+        object_buffer,
+    )?;
+    if entry.target_object_id == ROOT_OBJECT_ID {
+        return Err(PhoenixFsError::CannotRemoveRootObject);
+    }
+
+    let target_metadata = read_object_metadata(
+        device,
+        current.superblock.roots.object_tree,
+        entry.target_object_id,
+        current.superblock.generation,
+        object_buffer,
+        &mut metadata_buffer,
+    )?;
+    if target_metadata.object_type != entry.target_type {
+        return Err(PhoenixFsError::DirectoryEntryTargetMismatch);
+    }
+
+    ensure_object_has_no_payload_records(
+        device,
+        current.superblock.roots.object_tree,
+        entry.target_object_id,
+        current.superblock.generation,
+        object_buffer,
+    )?;
+
+    let metadata_key =
+        ObjectTreeKey::new(entry.target_object_id, ObjectRecordKind::Metadata, 0);
+    let directory_key = ObjectTreeKey::new(
+        parent_object_id,
+        ObjectRecordKind::DirectoryEntry,
+        entry.entry_id,
+    );
+    let metadata_delete = ObjectLeafDelete::new(metadata_key);
+    let directory_delete = ObjectLeafDelete::new(directory_key);
+    let deletions = if metadata_key < directory_key {
+        [metadata_delete, directory_delete]
+    } else {
+        [directory_delete, metadata_delete]
+    };
+
+    commit_object_record_deletions(
+        device,
+        current,
+        &deletions,
+        object_buffer,
+        object_copy_buffer,
+        current_free_space,
+        next_free_space,
+        superblock_buffer,
+    )
+}
+
 pub fn commit_object_record_deletions<D: BlockDevice>(
     device: &mut D,
     current: ActiveSuperblock,
@@ -5417,6 +5505,136 @@ mod tests {
         .unwrap();
         assert_eq!(metadata.object_type, ObjectType::File);
         assert_eq!(metadata.created_ns, 20);
+    }
+
+    #[test]
+    fn atomic_remove_deletes_empty_object_and_directory_entry_together() {
+        let mut device = MemoryBlockDevice::<512, 128>::new();
+        let mut format_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let current = format_volume(&mut device, VOLUME_ID, 10, &mut format_buffer).unwrap();
+
+        let mut object_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut object_copy = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut current_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut next_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut superblock_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+
+        let created = commit_create_object(
+            &mut device,
+            current,
+            ROOT_OBJECT_ID,
+            1,
+            2,
+            "gone",
+            ObjectType::File,
+            20,
+            &mut object_buffer,
+            &mut object_copy,
+            &mut current_free,
+            &mut next_free,
+            &mut superblock_buffer,
+        )
+        .unwrap();
+
+        let removed = commit_remove_object(
+            &mut device,
+            created.active,
+            ROOT_OBJECT_ID,
+            "gone",
+            &mut object_buffer,
+            &mut object_copy,
+            &mut current_free,
+            &mut next_free,
+            &mut superblock_buffer,
+        )
+        .unwrap();
+
+        assert_eq!(removed.active.superblock.generation, 3);
+        assert_eq!(
+            lookup_directory_entry(
+                &mut device,
+                removed.active.superblock.roots.object_tree,
+                ROOT_OBJECT_ID,
+                "gone",
+                removed.active.superblock.generation,
+                &mut object_buffer,
+            ),
+            Err(PhoenixFsError::DirectoryEntryNotFound)
+        );
+
+        let mut metadata = [0_u8; OBJECT_METADATA_VALUE_SIZE];
+        assert_eq!(
+            read_object_metadata(
+                &mut device,
+                removed.active.superblock.roots.object_tree,
+                2,
+                removed.active.superblock.generation,
+                &mut object_buffer,
+                &mut metadata,
+            ),
+            Err(PhoenixFsError::ObjectRecordNotFound)
+        );
+    }
+
+    #[test]
+    fn atomic_remove_rejects_non_empty_directory() {
+        let mut device = MemoryBlockDevice::<512, 192>::new();
+        let mut format_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let current = format_volume(&mut device, VOLUME_ID, 10, &mut format_buffer).unwrap();
+
+        let mut object_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut object_copy = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut current_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut next_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut superblock_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+
+        let directory = commit_create_object(
+            &mut device,
+            current,
+            ROOT_OBJECT_ID,
+            1,
+            2,
+            "dir",
+            ObjectType::Directory,
+            20,
+            &mut object_buffer,
+            &mut object_copy,
+            &mut current_free,
+            &mut next_free,
+            &mut superblock_buffer,
+        )
+        .unwrap();
+        let child = commit_create_object(
+            &mut device,
+            directory.active,
+            2,
+            1,
+            3,
+            "child",
+            ObjectType::File,
+            30,
+            &mut object_buffer,
+            &mut object_copy,
+            &mut current_free,
+            &mut next_free,
+            &mut superblock_buffer,
+        )
+        .unwrap();
+
+        assert_eq!(
+            commit_remove_object(
+                &mut device,
+                child.active,
+                ROOT_OBJECT_ID,
+                "dir",
+                &mut object_buffer,
+                &mut object_copy,
+                &mut current_free,
+                &mut next_free,
+                &mut superblock_buffer,
+            ),
+            Err(PhoenixFsError::ObjectNotEmpty)
+        );
     }
 
     #[test]

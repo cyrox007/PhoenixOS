@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+<title id="title">Системная иконка PhoenixOS</title>
+<defs>
+  <linearGradient id="g1" x1="0" y1="1" x2="1" y2="0">
+    <stop offset="0" stop-color="#E74614"/>
+    <stop offset=".55" stop-color="#FF7A18"/>
+    <stop offset="1" stop-color="#FFC14D"/>
+  </linearGradient>
+  <linearGradient id="g2" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#DCE7F2"/>
+    <stop offset=".5" stop-color="#4AB8FF"/>
+    <stop offset="1" stop-color="#176BCE"/>
+  </linearGradient>
+</defs>
+<rect x="24" y="24" width="464" height="464" rx="112" fill="#070B12"/>
+<circle cx="256" cy="246" r="177" fill="none" stroke="#FF8A22" stroke-opacity=".48" stroke-width="7"/>
+<path d="M256 411c-77-35-132-101-147-190 61 56 115 66 158 48-46-16-79-51-95-101 74 45 138 50 188 13-17 44-45 76-83 95 54 19 103 13 148-20-25 78-82 130-169 155Z" fill="url(#g1)"/>
+<path d="M250 397c17-70 47-119 89-151-39 5-71-6-98-31 8-52 36-92 85-121-5 47 1 82 17 102-37 13-63 35-78 68 26 33 31 77 13 133Z" fill="url(#g2)"/>
+<path d="M337 137c31-4 58 4 82 25-28-6-51-3-70 8 15 2 29 9 42 23-31-9-56-3-78 16 3-27 11-51 24-72Z" fill="#FFC14D"/>
+</svg>

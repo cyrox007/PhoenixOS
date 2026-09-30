@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2560 1440" role="img" aria-labelledby="title">
+<title id="title">PhoenixOS — концепция обоев рабочего стола</title>
+<defs>
+  <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#03070E"/>
+    <stop offset=".48" stop-color="#0B1A2D"/>
+    <stop offset="1" stop-color="#120905"/>
+  </linearGradient>
+  <linearGradient id="blue" x1="0" x2="1">
+    <stop offset="0" stop-color="#176BCE" stop-opacity="0"/>
+    <stop offset=".45" stop-color="#2EA8FF"/>
+    <stop offset="1" stop-color="#DCE7F2" stop-opacity=".15"/>
+  </linearGradient>
+  <linearGradient id="orange" x1="0" x2="1">
+    <stop offset="0" stop-color="#FFC14D" stop-opacity=".08"/>
+    <stop offset=".55" stop-color="#FF7A18"/>
+    <stop offset="1" stop-color="#E74614" stop-opacity="0"/>
+  </linearGradient>
+  <filter id="blur"><feGaussianBlur stdDeviation="18"/></filter>
+</defs>
+<rect width="2560" height="1440" fill="url(#bg)"/>
+<path d="M-160 1170C430 690 820 1260 1400 775S2210 300 2780 610" fill="none" stroke="url(#blue)" stroke-width="130" opacity=".34" filter="url(#blur)"/>
+<path d="M-180 1210C470 745 820 1315 1430 820S2200 350 2780 650" fill="none" stroke="url(#blue)" stroke-width="25" opacity=".95"/>
+<path d="M-120 1330C500 890 960 1420 1540 950S2260 490 2760 710" fill="none" stroke="url(#orange)" stroke-width="150" opacity=".26" filter="url(#blur)"/>
+<path d="M-100 1320C500 900 955 1410 1545 960S2260 500 2760 720" fill="none" stroke="url(#orange)" stroke-width="28" opacity=".92"/>
+<circle cx="1910" cy="430" r="225" fill="none" stroke="#FF8A22" stroke-opacity=".18" stroke-width="3"/>
+<circle cx="1910" cy="430" r="145" fill="none" stroke="#2EA8FF" stroke-opacity=".12" stroke-width="2"/>
+</svg>

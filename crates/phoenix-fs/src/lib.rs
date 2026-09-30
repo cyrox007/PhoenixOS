@@ -7455,6 +7455,154 @@ mod tests {
     }
 
     #[test]
+    fn deleting_from_sparse_leaf_rebalances_with_adjacent_sibling() {
+        let mut device = MemoryBlockDevice::<512, 1024>::new();
+        let current = ActiveSuperblock {
+            superblock: Superblock::new(5, 128, VOLUME_ID, TransactionRoots::new(8, 9)).unwrap(),
+            slot: SuperblockSlot::First,
+        };
+        let start = TreeNodeHeader::entries_offset();
+
+        let first_key = ObjectTreeKey::new(1, ObjectRecordKind::Metadata, 0);
+        let deleted_key = ObjectTreeKey::new(2, ObjectRecordKind::Metadata, 0);
+        let mut first_leaf = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let small_payload = [0x11_u8; 512];
+        let mut cursor = start;
+        cursor += ObjectLeafRecordHeader::new(first_key, small_payload.len() as u32)
+            .unwrap()
+            .encode_with_value(&mut first_leaf[cursor..], &small_payload)
+            .unwrap();
+        cursor += ObjectLeafRecordHeader::new(deleted_key, small_payload.len() as u32)
+            .unwrap()
+            .encode_with_value(&mut first_leaf[cursor..], &small_payload)
+            .unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            4,
+            10,
+            0,
+            2,
+            (cursor - start) as u32,
+        )
+        .unwrap()
+        .seal(&mut first_leaf)
+        .unwrap();
+
+        let mut second_leaf = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let large_payload = [0x22_u8; 850];
+        let mut second_cursor = start;
+        for object_id in 3..=6_u64 {
+            let key = ObjectTreeKey::new(object_id, ObjectRecordKind::Metadata, 0);
+            second_cursor += ObjectLeafRecordHeader::new(key, large_payload.len() as u32)
+                .unwrap()
+                .encode_with_value(&mut second_leaf[second_cursor..], &large_payload)
+                .unwrap();
+        }
+        let second_first_key = ObjectTreeKey::new(3, ObjectRecordKind::Metadata, 0);
+        TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            4,
+            11,
+            0,
+            4,
+            (second_cursor - start) as u32,
+        )
+        .unwrap()
+        .seal(&mut second_leaf)
+        .unwrap();
+
+        let mut root = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        ObjectInternalRecord::new(first_key, 10)
+            .unwrap()
+            .encode(&mut root[start..start + OBJECT_INTERNAL_RECORD_SIZE])
+            .unwrap();
+        ObjectInternalRecord::new(second_first_key, 11)
+            .unwrap()
+            .encode(
+                &mut root
+                    [start + OBJECT_INTERNAL_RECORD_SIZE..start + 2 * OBJECT_INTERNAL_RECORD_SIZE],
+            )
+            .unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::ObjectTree,
+            5,
+            8,
+            1,
+            2,
+            (2 * OBJECT_INTERNAL_RECORD_SIZE) as u32,
+        )
+        .unwrap()
+        .seal(&mut root)
+        .unwrap();
+
+        let mut free_root = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        write_free_space_extent(&mut free_root, 0, FreeSpaceExtent::new(20, 80)).unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::FreeSpaceTree,
+            5,
+            9,
+            0,
+            1,
+            FREE_SPACE_RECORD_SIZE as u32,
+        )
+        .unwrap()
+        .seal(&mut free_root)
+        .unwrap();
+
+        write_filesystem_block(&mut device, 8, &root).unwrap();
+        write_filesystem_block(&mut device, 10, &first_leaf).unwrap();
+        write_filesystem_block(&mut device, 11, &second_leaf).unwrap();
+        write_filesystem_block(&mut device, 9, &free_root).unwrap();
+
+        let mut object_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut object_copy = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut current_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut next_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut superblock_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+
+        let result = commit_object_record_delete(
+            &mut device,
+            current,
+            deleted_key,
+            &mut object_buffer,
+            &mut object_copy,
+            &mut current_free,
+            &mut next_free,
+            &mut superblock_buffer,
+        )
+        .unwrap();
+
+        let mut new_root = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        read_filesystem_block(
+            &mut device,
+            result.active.superblock.roots.object_tree,
+            &mut new_root,
+        )
+        .unwrap();
+        let root_node = validate_object_internal(&new_root).unwrap();
+        assert_eq!(root_node.item_count, 2);
+
+        let left_pointer = object_internal_record_at(&new_root, 0).unwrap();
+        let right_pointer = object_internal_record_at(&new_root, 1).unwrap();
+        let mut left_leaf = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut right_leaf = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        read_filesystem_block(&mut device, left_pointer.child_block, &mut left_leaf).unwrap();
+        read_filesystem_block(&mut device, right_pointer.child_block, &mut right_leaf).unwrap();
+
+        let left_node = validate_object_leaf(&left_leaf).unwrap();
+        let right_node = validate_object_leaf(&right_leaf).unwrap();
+        assert!(left_node.item_count > 1);
+        assert!(right_node.item_count > 1);
+        find_object_leaf_record(&left_leaf, first_key).unwrap();
+        assert_eq!(
+            find_object_leaf_record(&left_leaf, deleted_key),
+            Err(PhoenixFsError::ObjectRecordNotFound)
+        );
+        find_object_leaf_record(&right_leaf, ObjectTreeKey::new(6, ObjectRecordKind::Metadata, 0))
+            .unwrap();
+    }
+
+    #[test]
     fn deleting_from_leaf_merges_adjacent_sibling_when_combined_fit() {
         let mut device = MemoryBlockDevice::<512, 1024>::new();
         let current = ActiveSuperblock {

@@ -5961,7 +5961,7 @@ mod tests {
 
     #[test]
     fn root_leaf_split_creates_internal_root_when_insert_overflows_leaf() {
-        let mut device = MemoryBlockDevice::<512, 256>::new();
+        let mut device = MemoryBlockDevice::<512, 1024>::new();
         let current = ActiveSuperblock {
             superblock: Superblock::new(5, 128, VOLUME_ID, TransactionRoots::new(8, 9)).unwrap(),
             slot: SuperblockSlot::First,
@@ -5972,7 +5972,7 @@ mod tests {
         let mut cursor = start;
         let payload = [0x5a_u8; 192];
 
-        for object_id in 1..=17_u64 {
+        for object_id in 1..=18_u64 {
             let key = ObjectTreeKey::new(object_id, ObjectRecordKind::Metadata, 0);
             let record = ObjectLeafRecordHeader::new(key, payload.len() as u32).unwrap();
             cursor += record
@@ -5984,7 +5984,7 @@ mod tests {
             5,
             8,
             0,
-            17,
+            18,
             (cursor - start) as u32,
         )
         .unwrap()
@@ -6008,7 +6008,7 @@ mod tests {
         write_filesystem_block(&mut device, 8, &root).unwrap();
         write_filesystem_block(&mut device, 9, &free_root).unwrap();
 
-        let inserted_key = ObjectTreeKey::new(18, ObjectRecordKind::Metadata, 0);
+        let inserted_key = ObjectTreeKey::new(19, ObjectRecordKind::Metadata, 0);
         let mut object_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
         let mut object_copy = [0_u8; FILESYSTEM_BLOCK_SIZE];
         let mut current_free = [0_u8; FILESYSTEM_BLOCK_SIZE];

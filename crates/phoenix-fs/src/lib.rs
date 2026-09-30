@@ -2017,12 +2017,8 @@ pub fn materialize_object_leaf_with_inserted_value(
             return Err(PhoenixFsError::ObjectRecordAlreadyExists);
         }
         if !inserted && record.key > key {
-            destination_cursor = encode_leaf_record_at(
-                destination,
-                destination_cursor,
-                inserted_record,
-                value,
-            )?;
+            destination_cursor =
+                encode_leaf_record_at(destination, destination_cursor, inserted_record, value)?;
             inserted = true;
         }
 

@@ -2499,6 +2499,27 @@ fn last_object_leaf_key(block: &[u8]) -> Result<ObjectTreeKey, PhoenixFsError> {
     last.ok_or(PhoenixFsError::InvalidObjectLeafNode)
 }
 
+fn read_validated_leaf_child<D: BlockDevice>(
+    device: &mut D,
+    current: ActiveSuperblock,
+    parent: &[u8],
+    child_index: usize,
+    buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<(ObjectInternalRecord, TreeNodeHeader), PhoenixFsError> {
+    let record = object_internal_record_at(parent, child_index)?;
+    read_filesystem_block(device, record.child_block, buffer)?;
+    let node = validate_object_leaf(buffer)?;
+    if node.metadata.generation > current.superblock.generation {
+        return Err(PhoenixFsError::ObjectNodeGenerationAhead);
+    }
+    if node.metadata.block_number != record.child_block
+        || first_object_node_key(buffer, node)? != record.key
+    {
+        return Err(PhoenixFsError::ObjectTreePathMismatch);
+    }
+    Ok((record, node))
+}
+
 fn materialize_merged_object_leaves(
     left: &[u8],
     right: &[u8],
@@ -2647,39 +2668,40 @@ fn try_commit_leaf_merge_after_delete<D: BlockDevice>(
     }
 
     let child_index = step.child_index as usize;
-    let sibling_index = if child_index + 1 < parent.item_count as usize {
-        child_index + 1
-    } else {
-        child_index
-            .checked_sub(1)
-            .ok_or(PhoenixFsError::ObjectTreePathMismatch)?
-    };
-    let left_index = core::cmp::min(child_index, sibling_index);
-    let sibling = object_internal_record_at(object_buffer, sibling_index)?;
     let mut parent_source = [0_u8; FILESYSTEM_BLOCK_SIZE];
     parent_source.copy_from_slice(object_buffer);
-
-    let mut sibling_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
-    read_filesystem_block(device, sibling.child_block, &mut sibling_buffer)?;
-    let sibling_node = validate_object_leaf(&sibling_buffer)?;
-    if sibling_node.metadata.generation > current.superblock.generation {
-        return Err(PhoenixFsError::ObjectNodeGenerationAhead);
-    }
-    if sibling_node.metadata.block_number != sibling.child_block
-        || first_object_node_key(&sibling_buffer, sibling_node)? != sibling.key
-    {
-        return Err(PhoenixFsError::ObjectTreePathMismatch);
-    }
 
     let capacity = FILESYSTEM_BLOCK_SIZE
         .checked_sub(TreeNodeHeader::entries_offset())
         .ok_or(PhoenixFsError::ArithmeticOverflow)?;
-    let combined_bytes = (modified_node.entries_bytes as usize)
-        .checked_add(sibling_node.entries_bytes as usize)
-        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
-    if combined_bytes > capacity {
-        return Ok(None);
+    let mut sibling_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+    let mut selected_sibling = None;
+    let candidates = [
+        (child_index + 1 < parent.item_count as usize).then_some(child_index + 1),
+        child_index.checked_sub(1),
+    ];
+
+    for sibling_index in candidates.into_iter().flatten() {
+        let (sibling, sibling_node) = read_validated_leaf_child(
+            device,
+            current,
+            &parent_source,
+            sibling_index,
+            &mut sibling_buffer,
+        )?;
+        let combined_bytes = (modified_node.entries_bytes as usize)
+            .checked_add(sibling_node.entries_bytes as usize)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+        if combined_bytes <= capacity {
+            selected_sibling = Some((sibling_index, sibling));
+            break;
+        }
     }
+
+    let Some((sibling_index, sibling)) = selected_sibling else {
+        return Ok(None);
+    };
+    let left_index = core::cmp::min(child_index, sibling_index);
 
     let generation = current
         .superblock

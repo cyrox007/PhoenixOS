@@ -2491,11 +2491,7 @@ fn commit_two_leaf_insertions<D: BlockDevice>(
     validate_path_pointer(object_buffer, second_divergence_step)?;
 
     let mut rewrites = [
-        ObjectChildRewrite::new(
-            divergence_step.child_index,
-            first_branch.0,
-            first_branch.1,
-        ),
+        ObjectChildRewrite::new(divergence_step.child_index, first_branch.0, first_branch.1),
         ObjectChildRewrite::new(
             second_divergence_step.child_index,
             second_branch.0,
@@ -2640,10 +2636,7 @@ fn copy_object_parent_range<D: BlockDevice>(
     Ok((child_block, child_first_key))
 }
 
-fn validate_path_pointer(
-    block: &[u8],
-    step: ObjectPathStep,
-) -> Result<(), PhoenixFsError> {
+fn validate_path_pointer(block: &[u8], step: ObjectPathStep) -> Result<(), PhoenixFsError> {
     let pointer = object_internal_record_at(block, step.child_index as usize)?;
     if pointer.key != step.child_key {
         return Err(PhoenixFsError::ObjectTreePathMismatch);
@@ -3382,11 +3375,7 @@ pub struct ObjectChildRewrite {
 }
 
 impl ObjectChildRewrite {
-    pub const fn new(
-        child_index: u32,
-        child_block: u64,
-        child_first_key: ObjectTreeKey,
-    ) -> Self {
+    pub const fn new(child_index: u32, child_block: u64, child_first_key: ObjectTreeKey) -> Self {
         Self {
             child_index,
             child_block,
@@ -3465,9 +3454,8 @@ pub fn materialize_object_internal_after_child_rewrites(
                     .ok_or(PhoenixFsError::ArithmeticOverflow)?,
             )
             .ok_or(PhoenixFsError::ArithmeticOverflow)?;
-        ObjectInternalRecord::new(rewrite.child_first_key, rewrite.child_block)?.encode(
-            &mut destination[record_offset..record_offset + OBJECT_INTERNAL_RECORD_SIZE],
-        )?;
+        ObjectInternalRecord::new(rewrite.child_first_key, rewrite.child_block)?
+            .encode(&mut destination[record_offset..record_offset + OBJECT_INTERNAL_RECORD_SIZE])?;
     }
 
     let next = TreeNodeHeader::new(
@@ -4832,22 +4820,20 @@ mod tests {
 
         let mut left = [0_u8; FILESYSTEM_BLOCK_SIZE];
         let start = TreeNodeHeader::entries_offset();
-        let left_size =
-            ObjectLeafRecordHeader::new(parent_key, OBJECT_METADATA_VALUE_SIZE as u32)
-                .unwrap()
-                .encode_with_value(&mut left[start..], &parent_bytes)
-                .unwrap();
+        let left_size = ObjectLeafRecordHeader::new(parent_key, OBJECT_METADATA_VALUE_SIZE as u32)
+            .unwrap()
+            .encode_with_value(&mut left[start..], &parent_bytes)
+            .unwrap();
         TreeNodeHeader::new(MetadataKind::ObjectTree, 4, 10, 0, 1, left_size as u32)
             .unwrap()
             .seal(&mut left)
             .unwrap();
 
         let mut right = [0_u8; FILESYSTEM_BLOCK_SIZE];
-        let right_size =
-            ObjectLeafRecordHeader::new(dummy_key, OBJECT_METADATA_VALUE_SIZE as u32)
-                .unwrap()
-                .encode_with_value(&mut right[start..], &dummy_bytes)
-                .unwrap();
+        let right_size = ObjectLeafRecordHeader::new(dummy_key, OBJECT_METADATA_VALUE_SIZE as u32)
+            .unwrap()
+            .encode_with_value(&mut right[start..], &dummy_bytes)
+            .unwrap();
         TreeNodeHeader::new(MetadataKind::ObjectTree, 4, 11, 0, 1, right_size as u32)
             .unwrap()
             .seal(&mut right)

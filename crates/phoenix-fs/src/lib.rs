@@ -2222,8 +2222,7 @@ pub fn commit_remove_object<D: BlockDevice>(
         object_buffer,
     )?;
 
-    let metadata_key =
-        ObjectTreeKey::new(entry.target_object_id, ObjectRecordKind::Metadata, 0);
+    let metadata_key = ObjectTreeKey::new(entry.target_object_id, ObjectRecordKind::Metadata, 0);
     let directory_key = ObjectTreeKey::new(
         parent_object_id,
         ObjectRecordKind::DirectoryEntry,
@@ -2554,13 +2553,8 @@ fn classify_deletion_paths<D: BlockDevice>(
     let mut split_index = deletions.len();
 
     for (index, deletion) in deletions.iter().enumerate().skip(1) {
-        let candidate = find_object_tree_path(
-            device,
-            root_block,
-            deletion.key,
-            maximum_generation,
-            buffer,
-        )?;
+        let candidate =
+            find_object_tree_path(device, root_block, deletion.key, maximum_generation, buffer)?;
 
         match second {
             None if candidate == first => {}
@@ -2587,13 +2581,7 @@ fn find_shared_deletion_path<D: BlockDevice>(
     maximum_generation: u64,
     buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
 ) -> Result<ObjectTreePath, PhoenixFsError> {
-    let paths = classify_deletion_paths(
-        device,
-        root_block,
-        deletions,
-        maximum_generation,
-        buffer,
-    )?;
+    let paths = classify_deletion_paths(device, root_block, deletions, maximum_generation, buffer)?;
     if paths.second.is_some() {
         return Err(PhoenixFsError::ObjectMutationBatchSpansLeaves);
     }

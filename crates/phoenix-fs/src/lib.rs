@@ -99,6 +99,9 @@ pub enum PhoenixFsError {
     InvalidReadRange,
     DirectoryEntryNotFound,
     ParentNotDirectory,
+    ObjectNotEmpty,
+    CannotRemoveRootObject,
+    DirectoryEntryTargetMismatch,
     UnsupportedFeatures(u64),
     InvalidReservedField,
     ChecksumMismatch,
@@ -833,6 +836,38 @@ pub fn lookup_directory_entry<D: BlockDevice>(
     )?;
 
     result.ok_or(PhoenixFsError::DirectoryEntryNotFound)
+}
+
+fn ensure_object_has_no_payload_records<D: BlockDevice>(
+    device: &mut D,
+    root_block: u64,
+    object_id: u64,
+    maximum_generation: u64,
+    node_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<(), PhoenixFsError> {
+    if object_id == 0 {
+        return Err(PhoenixFsError::InvalidObjectId);
+    }
+
+    let mut has_payload = false;
+    scan_object_tree_records(
+        device,
+        root_block,
+        maximum_generation,
+        node_buffer,
+        |key, _| {
+            if key.object_id == object_id && key.kind != ObjectRecordKind::Metadata {
+                has_payload = true;
+                return Ok(true);
+            }
+            Ok(false)
+        },
+    )?;
+
+    if has_payload {
+        return Err(PhoenixFsError::ObjectNotEmpty);
+    }
+    Ok(())
 }
 
 pub fn read_file_range<D: BlockDevice>(
@@ -1886,6 +1921,17 @@ impl<'a> ObjectLeafInsert<'a> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectLeafDelete {
+    pub key: ObjectTreeKey,
+}
+
+impl ObjectLeafDelete {
+    pub const fn new(key: ObjectTreeKey) -> Self {
+        Self { key }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum ObjectLeafMutation<'a> {
     Replace {
@@ -1902,6 +1948,9 @@ enum ObjectLeafMutation<'a> {
     Delete {
         key: ObjectTreeKey,
     },
+    DeleteBatch {
+        deletions: &'a [ObjectLeafDelete],
+    },
 }
 
 impl ObjectLeafMutation<'_> {
@@ -1911,6 +1960,10 @@ impl ObjectLeafMutation<'_> {
             Self::InsertBatch { insertions } => insertions
                 .first()
                 .map(|insertion| insertion.key)
+                .ok_or(PhoenixFsError::InvalidObjectMutationBatch),
+            Self::DeleteBatch { deletions } => deletions
+                .first()
+                .map(|deletion| deletion.key)
                 .ok_or(PhoenixFsError::InvalidObjectMutationBatch),
         }
     }
@@ -2108,6 +2161,140 @@ pub fn commit_create_object<D: BlockDevice>(
     )
 }
 
+pub fn commit_remove_object<D: BlockDevice>(
+    device: &mut D,
+    current: ActiveSuperblock,
+    parent_object_id: u64,
+    name: &str,
+    object_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    object_copy_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    current_free_space: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    next_free_space: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    superblock_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<DeepRecordUpdateResult, PhoenixFsError> {
+    validate_directory_name(name)?;
+    if parent_object_id == 0 {
+        return Err(PhoenixFsError::InvalidObjectId);
+    }
+
+    let mut metadata_buffer = [0_u8; OBJECT_METADATA_VALUE_SIZE];
+    let parent_metadata = read_object_metadata(
+        device,
+        current.superblock.roots.object_tree,
+        parent_object_id,
+        current.superblock.generation,
+        object_buffer,
+        &mut metadata_buffer,
+    )?;
+    if parent_metadata.object_type != ObjectType::Directory {
+        return Err(PhoenixFsError::ParentNotDirectory);
+    }
+
+    let entry = lookup_directory_entry(
+        device,
+        current.superblock.roots.object_tree,
+        parent_object_id,
+        name,
+        current.superblock.generation,
+        object_buffer,
+    )?;
+    if entry.target_object_id == ROOT_OBJECT_ID {
+        return Err(PhoenixFsError::CannotRemoveRootObject);
+    }
+
+    let target_metadata = read_object_metadata(
+        device,
+        current.superblock.roots.object_tree,
+        entry.target_object_id,
+        current.superblock.generation,
+        object_buffer,
+        &mut metadata_buffer,
+    )?;
+    if target_metadata.object_type != entry.target_type {
+        return Err(PhoenixFsError::DirectoryEntryTargetMismatch);
+    }
+
+    ensure_object_has_no_payload_records(
+        device,
+        current.superblock.roots.object_tree,
+        entry.target_object_id,
+        current.superblock.generation,
+        object_buffer,
+    )?;
+
+    let metadata_key = ObjectTreeKey::new(entry.target_object_id, ObjectRecordKind::Metadata, 0);
+    let directory_key = ObjectTreeKey::new(
+        parent_object_id,
+        ObjectRecordKind::DirectoryEntry,
+        entry.entry_id,
+    );
+    let metadata_delete = ObjectLeafDelete::new(metadata_key);
+    let directory_delete = ObjectLeafDelete::new(directory_key);
+    let deletions = if metadata_key < directory_key {
+        [metadata_delete, directory_delete]
+    } else {
+        [directory_delete, metadata_delete]
+    };
+
+    commit_object_record_deletions(
+        device,
+        current,
+        &deletions,
+        object_buffer,
+        object_copy_buffer,
+        current_free_space,
+        next_free_space,
+        superblock_buffer,
+    )
+}
+
+pub fn commit_object_record_deletions<D: BlockDevice>(
+    device: &mut D,
+    current: ActiveSuperblock,
+    deletions: &[ObjectLeafDelete],
+    object_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    object_copy_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    current_free_space: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    next_free_space: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    superblock_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<DeepRecordUpdateResult, PhoenixFsError> {
+    validate_object_deletions(deletions)?;
+    let paths = classify_deletion_paths(
+        device,
+        current.superblock.roots.object_tree,
+        deletions,
+        current.superblock.generation,
+        object_buffer,
+    )?;
+
+    let Some(second_path) = paths.second else {
+        return commit_object_leaf_mutation(
+            device,
+            current,
+            ObjectLeafMutation::DeleteBatch { deletions },
+            object_buffer,
+            object_copy_buffer,
+            current_free_space,
+            next_free_space,
+            superblock_buffer,
+        );
+    };
+
+    commit_two_leaf_deletions(
+        device,
+        current,
+        paths.first,
+        second_path,
+        &deletions[..paths.split_index],
+        &deletions[paths.split_index..],
+        object_buffer,
+        object_copy_buffer,
+        current_free_space,
+        next_free_space,
+        superblock_buffer,
+    )
+}
+
 pub fn commit_object_record_delete<D: BlockDevice>(
     device: &mut D,
     current: ActiveSuperblock,
@@ -2156,6 +2343,14 @@ fn commit_object_leaf_mutation<D: BlockDevice>(
             current.superblock.generation,
             object_buffer,
         )?
+    } else if let ObjectLeafMutation::DeleteBatch { deletions } = mutation {
+        find_shared_deletion_path(
+            device,
+            current.superblock.roots.object_tree,
+            deletions,
+            current.superblock.generation,
+            object_buffer,
+        )?
     } else if mutation.is_insertion() {
         find_object_tree_path_for_insertion(
             device,
@@ -2194,10 +2389,12 @@ fn commit_object_leaf_mutation<D: BlockDevice>(
 
     read_filesystem_block(device, path.leaf_block, object_buffer)?;
     let leaf = validate_object_leaf(object_buffer)?;
-    if matches!(mutation, ObjectLeafMutation::Delete { .. })
-        && path.parent_count > 0
-        && leaf.item_count == 1
-    {
+    let deleted_items = match mutation {
+        ObjectLeafMutation::Delete { .. } => 1,
+        ObjectLeafMutation::DeleteBatch { deletions } => deletions.len(),
+        _ => 0,
+    };
+    if path.parent_count > 0 && deleted_items != 0 && deleted_items >= leaf.item_count as usize {
         return Err(PhoenixFsError::ObjectLeafWouldBecomeEmpty);
     }
 
@@ -2236,6 +2433,15 @@ fn commit_object_leaf_mutation<D: BlockDevice>(
                 object_buffer,
                 object_copy_buffer,
                 key,
+                generation,
+                first_new_block,
+            )?;
+        }
+        ObjectLeafMutation::DeleteBatch { deletions } => {
+            materialize_object_leaf_without_keys(
+                object_buffer,
+                object_copy_buffer,
+                deletions,
                 generation,
                 first_new_block,
             )?;
@@ -2318,6 +2524,68 @@ fn commit_object_leaf_mutation<D: BlockDevice>(
         retired_count,
         allocated: allocation.allocated,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ObjectDeletionPaths {
+    first: ObjectTreePath,
+    split_index: usize,
+    second: Option<ObjectTreePath>,
+}
+
+fn classify_deletion_paths<D: BlockDevice>(
+    device: &mut D,
+    root_block: u64,
+    deletions: &[ObjectLeafDelete],
+    maximum_generation: u64,
+    buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<ObjectDeletionPaths, PhoenixFsError> {
+    validate_object_deletions(deletions)?;
+
+    let first = find_object_tree_path(
+        device,
+        root_block,
+        deletions[0].key,
+        maximum_generation,
+        buffer,
+    )?;
+    let mut second = None;
+    let mut split_index = deletions.len();
+
+    for (index, deletion) in deletions.iter().enumerate().skip(1) {
+        let candidate =
+            find_object_tree_path(device, root_block, deletion.key, maximum_generation, buffer)?;
+
+        match second {
+            None if candidate == first => {}
+            None => {
+                second = Some(candidate);
+                split_index = index;
+            }
+            Some(existing) if candidate == existing => {}
+            Some(_) => return Err(PhoenixFsError::ObjectMutationBatchSpansLeaves),
+        }
+    }
+
+    Ok(ObjectDeletionPaths {
+        first,
+        split_index,
+        second,
+    })
+}
+
+fn find_shared_deletion_path<D: BlockDevice>(
+    device: &mut D,
+    root_block: u64,
+    deletions: &[ObjectLeafDelete],
+    maximum_generation: u64,
+    buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<ObjectTreePath, PhoenixFsError> {
+    let paths = classify_deletion_paths(device, root_block, deletions, maximum_generation, buffer)?;
+    if paths.second.is_some() {
+        return Err(PhoenixFsError::ObjectMutationBatchSpansLeaves);
+    }
+    Ok(paths.first)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2562,6 +2830,220 @@ fn commit_two_leaf_insertions<D: BlockDevice>(
         retired_count,
         allocated: allocation.allocated,
     })
+}
+
+fn commit_two_leaf_deletions<D: BlockDevice>(
+    device: &mut D,
+    current: ActiveSuperblock,
+    first_path: ObjectTreePath,
+    second_path: ObjectTreePath,
+    first_deletions: &[ObjectLeafDelete],
+    second_deletions: &[ObjectLeafDelete],
+    object_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    object_copy_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    current_free_space: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    next_free_space: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    superblock_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<DeepRecordUpdateResult, PhoenixFsError> {
+    if first_deletions.is_empty() || second_deletions.is_empty() {
+        return Err(PhoenixFsError::InvalidObjectMutationBatch);
+    }
+    let divergence = object_path_divergence(first_path, second_path)?;
+
+    let mut retired_blocks = [0_u64; MAX_OBJECT_TRANSACTION_RETIRED_BLOCKS];
+    let retired_count = collect_two_path_retired_blocks(
+        first_path,
+        second_path,
+        current.superblock.roots.free_space_tree,
+        &mut retired_blocks,
+    )?;
+    let requested_blocks =
+        u64::try_from(retired_count).map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
+
+    let total_blocks = current.superblock.total_blocks;
+    read_filesystem_block(
+        device,
+        current.superblock.roots.free_space_tree,
+        current_free_space,
+    )?;
+    let free_node = validate_free_space_leaf(current_free_space, total_blocks)?;
+    if free_node.metadata.block_number != current.superblock.roots.free_space_tree {
+        return Err(PhoenixFsError::InvalidTransactionRoots);
+    }
+    if free_node.metadata.generation > current.superblock.generation {
+        return Err(PhoenixFsError::ObjectNodeGenerationAhead);
+    }
+
+    let allocation = plan_cow_allocation(current_free_space, total_blocks, requested_blocks)?;
+    let generation = current
+        .superblock
+        .generation
+        .checked_add(1)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let mut next_block = allocation.allocated.start_block;
+
+    let first_leaf = copy_deleted_leaf(
+        device,
+        first_path.leaf_block,
+        first_deletions,
+        generation,
+        next_block,
+        object_buffer,
+        object_copy_buffer,
+    )?;
+    next_block = next_block
+        .checked_add(1)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+
+    let second_leaf = copy_deleted_leaf(
+        device,
+        second_path.leaf_block,
+        second_deletions,
+        generation,
+        next_block,
+        object_buffer,
+        object_copy_buffer,
+    )?;
+    next_block = next_block
+        .checked_add(1)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+
+    let first_branch = copy_object_parent_range(
+        device,
+        current,
+        first_path,
+        divergence + 1,
+        first_path.parent_count,
+        first_leaf.0,
+        first_leaf.1,
+        generation,
+        &mut next_block,
+        object_buffer,
+        object_copy_buffer,
+    )?;
+    let second_branch = copy_object_parent_range(
+        device,
+        current,
+        second_path,
+        divergence + 1,
+        second_path.parent_count,
+        second_leaf.0,
+        second_leaf.1,
+        generation,
+        &mut next_block,
+        object_buffer,
+        object_copy_buffer,
+    )?;
+
+    let first_step = first_path.parents[divergence];
+    let second_step = second_path.parents[divergence];
+    if first_step.block_number != second_step.block_number {
+        return Err(PhoenixFsError::ObjectTreePathMismatch);
+    }
+
+    read_filesystem_block(device, first_step.block_number, object_buffer)?;
+    let parent = validate_object_internal(object_buffer)?;
+    if parent.metadata.generation > current.superblock.generation {
+        return Err(PhoenixFsError::ObjectNodeGenerationAhead);
+    }
+    validate_path_pointer(object_buffer, first_step)?;
+    validate_path_pointer(object_buffer, second_step)?;
+
+    let mut rewrites = [
+        ObjectChildRewrite::new(first_step.child_index, first_branch.0, first_branch.1),
+        ObjectChildRewrite::new(second_step.child_index, second_branch.0, second_branch.1),
+    ];
+    if rewrites[0].child_index > rewrites[1].child_index {
+        rewrites.swap(0, 1);
+    }
+
+    materialize_object_internal_after_child_rewrites(
+        object_buffer,
+        object_copy_buffer,
+        generation,
+        next_block,
+        &rewrites,
+    )?;
+    write_filesystem_block(device, next_block, object_copy_buffer)?;
+    let divergence_node = TreeNodeHeader::decode(object_copy_buffer)?;
+    let common_key = first_object_node_key(object_copy_buffer, divergence_node)?;
+    let common_block = next_block;
+    next_block = next_block
+        .checked_add(1)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+
+    let root = copy_object_parent_range(
+        device,
+        current,
+        first_path,
+        0,
+        divergence,
+        common_block,
+        common_key,
+        generation,
+        &mut next_block,
+        object_buffer,
+        object_copy_buffer,
+    )?;
+
+    let free_space_block = next_block;
+    let allocation_end = allocation.allocated.end_block_exclusive()?;
+    if free_space_block
+        .checked_add(1)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?
+        != allocation_end
+    {
+        return Err(PhoenixFsError::InvalidTransactionRoots);
+    }
+
+    materialize_free_space_leaf_after_allocation(
+        current_free_space,
+        next_free_space,
+        total_blocks,
+        generation,
+        free_space_block,
+        allocation,
+    )?;
+    write_filesystem_block(device, free_space_block, next_free_space)?;
+
+    sort_u64_prefix(&mut retired_blocks, retired_count);
+    let roots = TransactionRoots::new(root.0, free_space_block);
+    let plan = TransactionCommitPlan::new(current, roots, &retired_blocks[..retired_count])?;
+    let committed = commit_transaction(device, current, plan, superblock_buffer)?;
+
+    Ok(DeepRecordUpdateResult {
+        active: committed.active,
+        retired_blocks,
+        retired_count,
+        allocated: allocation.allocated,
+    })
+}
+
+fn copy_deleted_leaf<D: BlockDevice>(
+    device: &mut D,
+    source_block: u64,
+    deletions: &[ObjectLeafDelete],
+    generation: u64,
+    destination_block: u64,
+    object_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    object_copy_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<(u64, ObjectTreeKey), PhoenixFsError> {
+    read_filesystem_block(device, source_block, object_buffer)?;
+    materialize_object_leaf_without_keys(
+        object_buffer,
+        object_copy_buffer,
+        deletions,
+        generation,
+        destination_block,
+    )?;
+    let node = TreeNodeHeader::decode(object_copy_buffer)?;
+    if node.item_count == 0 {
+        return Err(PhoenixFsError::ObjectLeafWouldBecomeEmpty);
+    }
+
+    write_filesystem_block(device, destination_block, object_copy_buffer)?;
+    let first_key = first_object_node_key(object_copy_buffer, node)?;
+    Ok((destination_block, first_key))
 }
 
 fn copy_inserted_leaf<D: BlockDevice>(
@@ -2890,6 +3372,84 @@ pub fn materialize_object_leaf_with_inserted_values(
         item_count,
         destination_cursor,
     )
+}
+
+pub fn materialize_object_leaf_without_keys(
+    current: &[u8],
+    destination: &mut [u8],
+    deletions: &[ObjectLeafDelete],
+    new_generation: u64,
+    new_block_number: u64,
+) -> Result<TreeNodeHeader, PhoenixFsError> {
+    let current_node = validate_object_leaf(current)?;
+    validate_rewrite_target(current_node, new_generation, new_block_number)?;
+    validate_object_deletions(deletions)?;
+
+    let entries_start = TreeNodeHeader::entries_offset();
+    let entries_end = entries_start
+        .checked_add(current_node.entries_bytes as usize)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+
+    destination.fill(0);
+    let mut source_cursor = entries_start;
+    let mut destination_cursor = entries_start;
+    let mut deletion_index = 0_usize;
+
+    for _ in 0..current_node.item_count {
+        let (record, value, source_size) =
+            ObjectLeafRecordHeader::decode_with_value(&current[source_cursor..entries_end])?;
+
+        while deletion_index < deletions.len() && deletions[deletion_index].key < record.key {
+            return Err(PhoenixFsError::ObjectRecordNotFound);
+        }
+
+        if deletion_index < deletions.len() && deletions[deletion_index].key == record.key {
+            deletion_index += 1;
+        } else {
+            destination_cursor =
+                encode_leaf_record_at(destination, destination_cursor, record, value)?;
+        }
+
+        source_cursor = source_cursor
+            .checked_add(source_size)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    }
+
+    if deletion_index != deletions.len() {
+        return Err(PhoenixFsError::ObjectRecordNotFound);
+    }
+
+    let deleted_count =
+        u32::try_from(deletions.len()).map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
+    let item_count = current_node
+        .item_count
+        .checked_sub(deleted_count)
+        .ok_or(PhoenixFsError::InvalidObjectMutationBatch)?;
+
+    seal_object_leaf_rewrite(
+        destination,
+        current_node,
+        new_generation,
+        new_block_number,
+        item_count,
+        destination_cursor,
+    )
+}
+
+fn validate_object_deletions(deletions: &[ObjectLeafDelete]) -> Result<(), PhoenixFsError> {
+    if deletions.is_empty() {
+        return Err(PhoenixFsError::InvalidObjectMutationBatch);
+    }
+
+    let mut previous_key = None;
+    for deletion in deletions {
+        deletion.key.validate()?;
+        if previous_key.is_some_and(|previous| previous >= deletion.key) {
+            return Err(PhoenixFsError::InvalidObjectMutationBatch);
+        }
+        previous_key = Some(deletion.key);
+    }
+    Ok(())
 }
 
 pub fn materialize_object_leaf_without_key(
@@ -4933,6 +5493,136 @@ mod tests {
         .unwrap();
         assert_eq!(metadata.object_type, ObjectType::File);
         assert_eq!(metadata.created_ns, 20);
+    }
+
+    #[test]
+    fn atomic_remove_deletes_empty_object_and_directory_entry_together() {
+        let mut device = MemoryBlockDevice::<512, 128>::new();
+        let mut format_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let current = format_volume(&mut device, VOLUME_ID, 10, &mut format_buffer).unwrap();
+
+        let mut object_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut object_copy = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut current_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut next_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut superblock_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+
+        let created = commit_create_object(
+            &mut device,
+            current,
+            ROOT_OBJECT_ID,
+            1,
+            2,
+            "gone",
+            ObjectType::File,
+            20,
+            &mut object_buffer,
+            &mut object_copy,
+            &mut current_free,
+            &mut next_free,
+            &mut superblock_buffer,
+        )
+        .unwrap();
+
+        let removed = commit_remove_object(
+            &mut device,
+            created.active,
+            ROOT_OBJECT_ID,
+            "gone",
+            &mut object_buffer,
+            &mut object_copy,
+            &mut current_free,
+            &mut next_free,
+            &mut superblock_buffer,
+        )
+        .unwrap();
+
+        assert_eq!(removed.active.superblock.generation, 3);
+        assert_eq!(
+            lookup_directory_entry(
+                &mut device,
+                removed.active.superblock.roots.object_tree,
+                ROOT_OBJECT_ID,
+                "gone",
+                removed.active.superblock.generation,
+                &mut object_buffer,
+            ),
+            Err(PhoenixFsError::DirectoryEntryNotFound)
+        );
+
+        let mut metadata = [0_u8; OBJECT_METADATA_VALUE_SIZE];
+        assert_eq!(
+            read_object_metadata(
+                &mut device,
+                removed.active.superblock.roots.object_tree,
+                2,
+                removed.active.superblock.generation,
+                &mut object_buffer,
+                &mut metadata,
+            ),
+            Err(PhoenixFsError::ObjectRecordNotFound)
+        );
+    }
+
+    #[test]
+    fn atomic_remove_rejects_non_empty_directory() {
+        let mut device = MemoryBlockDevice::<512, 192>::new();
+        let mut format_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let current = format_volume(&mut device, VOLUME_ID, 10, &mut format_buffer).unwrap();
+
+        let mut object_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut object_copy = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut current_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut next_free = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut superblock_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+
+        let directory = commit_create_object(
+            &mut device,
+            current,
+            ROOT_OBJECT_ID,
+            1,
+            2,
+            "dir",
+            ObjectType::Directory,
+            20,
+            &mut object_buffer,
+            &mut object_copy,
+            &mut current_free,
+            &mut next_free,
+            &mut superblock_buffer,
+        )
+        .unwrap();
+        let child = commit_create_object(
+            &mut device,
+            directory.active,
+            2,
+            1,
+            3,
+            "child",
+            ObjectType::File,
+            30,
+            &mut object_buffer,
+            &mut object_copy,
+            &mut current_free,
+            &mut next_free,
+            &mut superblock_buffer,
+        )
+        .unwrap();
+
+        assert_eq!(
+            commit_remove_object(
+                &mut device,
+                child.active,
+                ROOT_OBJECT_ID,
+                "dir",
+                &mut object_buffer,
+                &mut object_copy,
+                &mut current_free,
+                &mut next_free,
+                &mut superblock_buffer,
+            ),
+            Err(PhoenixFsError::ObjectNotEmpty)
+        );
     }
 
     #[test]

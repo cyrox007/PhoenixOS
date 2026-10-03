@@ -17,6 +17,8 @@ jobs:
           ref: feature/phoenix-fs-internal-rebalance-v1
       - name: Применить изменение
         run: python3 tools/internal_rebalance_apply.py
+      - name: Уменьшить тестовое устройство
+        run: python3 tools/internal_rebalance_fix_test.py
       - name: Форматировать
         run: cargo fmt --all
       - name: Проверить PhoenixFS

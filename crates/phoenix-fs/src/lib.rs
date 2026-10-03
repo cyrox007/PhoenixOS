@@ -2403,8 +2403,8 @@ fn commit_empty_leaf_prune<D: BlockDevice>(
         });
     }
 
-    let requested_blocks = u64::try_from(anchor_position + 2)
-        .map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
+    let requested_blocks =
+        u64::try_from(anchor_position + 2).map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
     let allocation = plan_cow_allocation(
         current_free_space,
         current.superblock.total_blocks,
@@ -2806,10 +2806,7 @@ fn try_commit_leaf_merge_after_delete<D: BlockDevice>(
     }))
 }
 
-fn choose_two_leaf_rebalance_index(
-    left: &[u8],
-    right: &[u8],
-) -> Result<usize, PhoenixFsError> {
+fn choose_two_leaf_rebalance_index(left: &[u8], right: &[u8]) -> Result<usize, PhoenixFsError> {
     let left_node = validate_object_leaf(left)?;
     let right_node = validate_object_leaf(right)?;
     let capacity = FILESYSTEM_BLOCK_SIZE
@@ -3017,8 +3014,8 @@ fn try_commit_leaf_rebalance_after_delete<D: BlockDevice>(
     let right_node = validate_object_leaf(right)?;
     let total_items = left_node.item_count as usize + right_node.item_count as usize;
 
-    let requested_blocks = u64::try_from(path.node_count() + 2)
-        .map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
+    let requested_blocks =
+        u64::try_from(path.node_count() + 2).map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
     let allocation = plan_cow_allocation(
         current_free_space,
         current.superblock.total_blocks,
@@ -3374,7 +3371,6 @@ fn commit_object_leaf_mutation<D: BlockDevice>(
     }
 
     write_filesystem_block(device, first_new_block, object_copy_buffer)?;
-
 
     let mut new_child_block = first_new_block;
     let mut new_child_first_key = if path.parent_count == 0 && leaf_node.item_count == 0 {
@@ -4438,8 +4434,7 @@ fn commit_nonroot_leaf_split_insertions<D: BlockDevice>(
         return Err(PhoenixFsError::ObjectTreePathMismatch);
     }
 
-    let full_parent_count =
-        count_full_parent_chain(device, current, path, object_copy_buffer)?;
+    let full_parent_count = count_full_parent_chain(device, current, path, object_copy_buffer)?;
     let split_index = choose_object_leaf_split_index(current_leaf, insertions)?;
     let total_items = leaf.item_count as usize + insertions.len();
     let generation = current
@@ -4621,12 +4616,11 @@ fn commit_nonroot_leaf_split_insertions<D: BlockDevice>(
             .ok_or(PhoenixFsError::InvalidObjectTreeLevel)?;
         object_copy_buffer.fill(0);
         let start = TreeNodeHeader::entries_offset();
-        ObjectInternalRecord::new(left_key, left_child_block)?.encode(
-            &mut object_copy_buffer[start..start + OBJECT_INTERNAL_RECORD_SIZE],
-        )?;
+        ObjectInternalRecord::new(left_key, left_child_block)?
+            .encode(&mut object_copy_buffer[start..start + OBJECT_INTERNAL_RECORD_SIZE])?;
         ObjectInternalRecord::new(right_key, right_child_block)?.encode(
-            &mut object_copy_buffer[start + OBJECT_INTERNAL_RECORD_SIZE
-                ..start + 2 * OBJECT_INTERNAL_RECORD_SIZE],
+            &mut object_copy_buffer
+                [start + OBJECT_INTERNAL_RECORD_SIZE..start + 2 * OBJECT_INTERNAL_RECORD_SIZE],
         )?;
         let root = TreeNodeHeader::new(
             MetadataKind::ObjectTree,
@@ -7618,8 +7612,11 @@ mod tests {
             find_object_leaf_record(&left_leaf, deleted_key),
             Err(PhoenixFsError::ObjectRecordNotFound)
         );
-        find_object_leaf_record(&right_leaf, ObjectTreeKey::new(6, ObjectRecordKind::Metadata, 0))
-            .unwrap();
+        find_object_leaf_record(
+            &right_leaf,
+            ObjectTreeKey::new(6, ObjectRecordKind::Metadata, 0),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -7782,34 +7779,20 @@ mod tests {
             .unwrap()
             .encode_with_value(&mut removed_leaf[start..], b"a")
             .unwrap();
-        TreeNodeHeader::new(
-            MetadataKind::ObjectTree,
-            4,
-            12,
-            0,
-            1,
-            removed_size as u32,
-        )
-        .unwrap()
-        .seal(&mut removed_leaf)
-        .unwrap();
+        TreeNodeHeader::new(MetadataKind::ObjectTree, 4, 12, 0, 1, removed_size as u32)
+            .unwrap()
+            .seal(&mut removed_leaf)
+            .unwrap();
 
         let mut remaining_leaf = [0_u8; FILESYSTEM_BLOCK_SIZE];
         let remaining_size = ObjectLeafRecordHeader::new(remaining_key, 1)
             .unwrap()
             .encode_with_value(&mut remaining_leaf[start..], b"b")
             .unwrap();
-        TreeNodeHeader::new(
-            MetadataKind::ObjectTree,
-            4,
-            11,
-            0,
-            1,
-            remaining_size as u32,
-        )
-        .unwrap()
-        .seal(&mut remaining_leaf)
-        .unwrap();
+        TreeNodeHeader::new(MetadataKind::ObjectTree, 4, 11, 0, 1, remaining_size as u32)
+            .unwrap()
+            .seal(&mut remaining_leaf)
+            .unwrap();
 
         let mut single_parent = [0_u8; FILESYSTEM_BLOCK_SIZE];
         ObjectInternalRecord::new(removed_key, 12)
@@ -7936,8 +7919,8 @@ mod tests {
         ObjectInternalRecord::new(second_key, 11)
             .unwrap()
             .encode(
-                &mut root[start + OBJECT_INTERNAL_RECORD_SIZE
-                    ..start + 2 * OBJECT_INTERNAL_RECORD_SIZE],
+                &mut root
+                    [start + OBJECT_INTERNAL_RECORD_SIZE..start + 2 * OBJECT_INTERNAL_RECORD_SIZE],
             )
             .unwrap();
         TreeNodeHeader::new(

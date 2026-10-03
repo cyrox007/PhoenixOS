@@ -1,0 +1,33 @@
+name: Применение перераспределения внутренних узлов PhoenixFS
+
+on:
+  push:
+    branches:
+      - feature/phoenix-fs-internal-rebalance-v1
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: feature/phoenix-fs-internal-rebalance-v1
+      - name: Применить изменение
+        run: python3 tools/internal_rebalance_apply.py
+      - name: Форматировать
+        run: cargo fmt --all
+      - name: Проверить PhoenixFS
+        run: cargo test -p phoenix-fs
+      - name: Зафиксировать рабочие файлы
+        run: |
+          if git diff --quiet -- crates/phoenix-fs/src/lib.rs docs/phoenix-fs.md STATUS.md ROADMAP.md; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/phoenix-fs/src/lib.rs docs/phoenix-fs.md STATUS.md ROADMAP.md
+          git commit -m "Добавить перераспределение внутренних узлов PhoenixFS"
+          git push origin HEAD:feature/phoenix-fs-internal-rebalance-v1

@@ -6,6 +6,7 @@ on:
       - feature/phoenix-fs-internal-rebalance
     paths:
       - tools/apply-internal-rebalance.py
+      - tools/adjust-internal-rebalance-fixture.py
       - .github/workflows/apply-internal-rebalance.yml
 
 permissions:
@@ -23,6 +24,9 @@ jobs:
           ref: feature/phoenix-fs-internal-rebalance
           fetch-depth: 0
 
+      - name: Исправить тестовую фикстуру
+        run: python3 tools/adjust-internal-rebalance-fixture.py
+
       - name: Применить изменение
         run: python3 tools/apply-internal-rebalance.py
 
@@ -35,6 +39,7 @@ jobs:
       - name: Удалить временные файлы применения
         run: |
           rm tools/apply-internal-rebalance.py
+          rm tools/adjust-internal-rebalance-fixture.py
           rm .github/workflows/apply-internal-rebalance.yml
 
       - name: Зафиксировать изменение

@@ -1,0 +1,46 @@
+name: Применить перераспределение внутренних узлов
+
+on:
+  push:
+    branches:
+      - feature/phoenix-fs-internal-rebalance
+    paths:
+      - tools/apply-internal-rebalance.py
+      - .github/workflows/apply-internal-rebalance.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: feature/phoenix-fs-internal-rebalance
+          fetch-depth: 0
+
+      - name: Применить изменение
+        run: python3 tools/apply-internal-rebalance.py
+
+      - name: Отформатировать Rust
+        run: cargo fmt --all
+
+      - name: Проверить пакет PhoenixFS
+        run: cargo test -p phoenix-fs
+
+      - name: Удалить временные файлы применения
+        run: |
+          rm tools/apply-internal-rebalance.py
+          rm .github/workflows/apply-internal-rebalance.yml
+
+      - name: Зафиксировать изменение
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Реализовать перераспределение внутренних узлов PhoenixFS"
+          git push origin HEAD:feature/phoenix-fs-internal-rebalance

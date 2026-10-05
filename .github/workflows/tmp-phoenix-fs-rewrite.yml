@@ -21,7 +21,21 @@ jobs:
         shell: bash
         run: |
           python3 .github/tmp_phoenix_fs_rewrite.py
-          sed -i 's/MemoryBlockDevice::<512, 1024>::new()/MemoryBlockDevice::<512, 128>::new()/' crates/phoenix-fs/src/lib.rs
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('crates/phoenix-fs/src/lib.rs')
+          text = path.read_text()
+          start = text.index('    fn phoenix_vfs_rewrites_existing_file_atomically() {')
+          end = text.index('    #[test]', start + 1)
+          fragment = text[start:end]
+          fragment = fragment.replace(
+              'MemoryBlockDevice::<512, 1024>::new()',
+              'MemoryBlockDevice::<512, 128>::new()',
+              1,
+          )
+          text = text[:start] + fragment + text[end:]
+          path.write_text(text)
+          PY
 
       - name: Привести код к формату
         run: cargo fmt --all

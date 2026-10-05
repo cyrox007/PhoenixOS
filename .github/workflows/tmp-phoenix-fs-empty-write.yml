@@ -20,6 +20,9 @@ jobs:
       - name: Применить изменение
         run: python3 .github/tmp_apply_phoenix_fs_write.py
 
+      - name: Привести код к формату
+        run: cargo fmt --all
+
       - name: Проверить форматирование
         run: cargo fmt --all -- --check
 

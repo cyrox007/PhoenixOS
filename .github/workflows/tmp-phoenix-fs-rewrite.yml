@@ -18,7 +18,10 @@ jobs:
           fetch-depth: 0
 
       - name: Применить изменение
-        run: python3 .github/tmp_phoenix_fs_rewrite.py
+        shell: bash
+        run: |
+          python3 .github/tmp_phoenix_fs_rewrite.py
+          sed -i 's/MemoryBlockDevice::<512, 1024>::new()/MemoryBlockDevice::<512, 128>::new()/' crates/phoenix-fs/src/lib.rs
 
       - name: Привести код к формату
         run: cargo fmt --all

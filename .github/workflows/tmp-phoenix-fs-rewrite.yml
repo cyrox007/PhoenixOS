@@ -1,0 +1,44 @@
+name: Временная проверка перезаписи PhoenixFS
+
+on:
+  push:
+    branches:
+      - feature/phoenix-fs-rewrite-file
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: feature/phoenix-fs-rewrite-file
+          fetch-depth: 0
+
+      - name: Применить изменение
+        run: python3 .github/tmp_phoenix_fs_rewrite.py
+
+      - name: Привести код к формату
+        run: cargo fmt --all
+
+      - name: Проверить форматирование
+        run: cargo fmt --all -- --check
+
+      - name: Проверить PhoenixFS
+        run: cargo test -p phoenix-fs
+
+      - name: Проверить ВФС
+        run: cargo test -p phoenix-vfs
+
+      - name: Зафиксировать результат
+        shell: bash
+        run: |
+          rm -f .github/tmp_phoenix_fs_rewrite.py .github/workflows/tmp-phoenix-fs-rewrite.yml Cargo.lock
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/phoenix-fs/src/lib.rs ROADMAP.md STATUS.md .github
+          git diff --cached --quiet && exit 0
+          git commit -m 'Добавить атомарную перезапись существующего файла PhoenixFS'
+          git push origin HEAD:feature/phoenix-fs-rewrite-file

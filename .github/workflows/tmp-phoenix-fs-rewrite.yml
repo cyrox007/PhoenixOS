@@ -36,15 +36,13 @@ jobs:
           cat .github/tmp_phoenix_fs_rewrite.log
           exit $code
 
-      - name: Сохранить диагностику ошибки
-        if: failure() && steps.phoenixfs.outcome == 'failure'
-        shell: bash
-        run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add .github/tmp_phoenix_fs_rewrite.log
-          git commit -m 'diag: сохранить ошибку PhoenixFS [skip ci]'
-          git push origin HEAD:feature/phoenix-fs-rewrite-file
+      - name: Сохранить журнал проверки
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phoenix-fs-rewrite-log
+          path: .github/tmp_phoenix_fs_rewrite.log
+          if-no-files-found: ignore
 
       - name: Проверить ВФС
         if: success()

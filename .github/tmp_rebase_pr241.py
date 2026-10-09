@@ -108,10 +108,36 @@ new = '''    let data_len = u64::try_from(data.len()).map_err(|_| PhoenixFsError
 '''
 text = replace_once(text, old, new, "проверка границ диапазона")
 
-old = '''    let data_start_block = allocation.allocated.start_block;
+old = '''    let data_blocks = old_extent.block_count;
+    let metadata_blocks = u64::try_from(metadata_path.node_count() + 1)
+        .map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
+    let requested_blocks = data_blocks
+        .checked_add(metadata_blocks)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let allocation = plan_cow_allocation(current_free_space, total_blocks, requested_blocks)?;
+    let generation = current
+        .superblock
+        .generation
+        .checked_add(1)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+
+    let data_start_block = allocation.allocated.start_block;
     let written_blocks = write_data_extent(device, data_start_block, data, data_buffer)?;
 '''
-new = '''    let data_start_block = allocation.allocated.start_block;
+new = '''    let data_blocks = old_extent.block_count;
+    let metadata_blocks = u64::try_from(metadata_path.node_count() + 1)
+        .map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
+    let requested_blocks = data_blocks
+        .checked_add(metadata_blocks)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let allocation = plan_cow_allocation(current_free_space, total_blocks, requested_blocks)?;
+    let generation = current
+        .superblock
+        .generation
+        .checked_add(1)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+
+    let data_start_block = allocation.allocated.start_block;
     let written_blocks = rewrite_data_extent_range(
         device,
         old_extent,

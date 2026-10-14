@@ -13,4 +13,20 @@ for name in [
         assert plain in s
         s = s.replace(plain, marked, 1)
 
+obsolete_shrink = '''        assert_eq!(
+            filesystem.truncate_node(file, 6),
+            Err(VfsError::InvalidOffset)
+        );
+'''
+assert obsolete_shrink in s
+s = s.replace(obsolete_shrink, '', 1)
+
+obsolete_zero = '''        assert_eq!(
+            filesystem.truncate_node(file, 1),
+            Err(VfsError::InvalidOffset)
+        );
+'''
+assert obsolete_zero in s
+s = s.replace(obsolete_zero, '', 1)
+
 p.write_text(s)

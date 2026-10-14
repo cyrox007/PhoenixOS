@@ -29,7 +29,7 @@ test = r'''    #[test]
         const LARGE_BLOCKS: usize = MAX_OBJECT_TRANSACTION_RETIRED_BLOCKS + 2;
         const LARGE_BYTES: usize = FILESYSTEM_BLOCK_SIZE * LARGE_BLOCKS;
 
-        let device = MemoryBlockDevice::<512, 4096>::new();
+        let device = MemoryBlockDevice::<512, 1024>::new();
         let mut buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
         let mut filesystem = PhoenixVfs::format_new(device, VOLUME_ID, 1, &mut buffer).unwrap();
         let root = filesystem.root_node().unwrap();

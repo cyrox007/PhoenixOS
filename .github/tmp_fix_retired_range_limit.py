@@ -28,7 +28,7 @@ test = r'''    #[test]
             .create_node(root, b"large.bin", NodeKind::File)
             .unwrap();
 
-        let payload = [0x41_u8; LARGE_BYTES];
+        let payload = std::vec![0x41_u8; LARGE_BYTES];
         assert_eq!(filesystem.write_node(file, 0, &payload).unwrap(), payload.len());
         let generation_before = filesystem.active_superblock().superblock.generation;
 
@@ -46,7 +46,7 @@ test = r'''    #[test]
         let device = filesystem.into_device();
         let mut first_superblock_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
         let mut second_superblock_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
-        let mut remounted = PhoenixVfs::mount(
+        let remounted = PhoenixVfs::mount(
             device,
             &mut first_superblock_buffer,
             &mut second_superblock_buffer,

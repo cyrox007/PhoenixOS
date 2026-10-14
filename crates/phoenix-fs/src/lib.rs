@@ -7059,6 +7059,56 @@ fn append_retired_extent_blocks(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn copy_truncated_data_extent<D: BlockDevice>(
+    device: &mut D,
+    old_extent: ExtentValue,
+    new_start_block: u64,
+    new_data_bytes: u64,
+    block_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<u64, PhoenixFsError> {
+    if new_data_bytes == 0 || new_data_bytes > old_extent.data_bytes {
+        return Err(PhoenixFsError::InvalidExtent);
+    }
+
+    let block_size = FILESYSTEM_BLOCK_SIZE as u64;
+    let rounded_bytes = new_data_bytes
+        .checked_add(block_size - 1)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let new_block_count = rounded_bytes / block_size;
+    if new_block_count == 0 || new_block_count > old_extent.block_count {
+        return Err(PhoenixFsError::InvalidExtent);
+    }
+
+    for block_index in 0..new_block_count {
+        let old_block = old_extent
+            .physical_start_block
+            .checked_add(block_index)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+        read_filesystem_block(device, old_block, block_buffer)?;
+
+        if block_index + 1 == new_block_count {
+            let block_start = block_index
+                .checked_mul(block_size)
+                .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+            let retained = new_data_bytes
+                .checked_sub(block_start)
+                .ok_or(PhoenixFsError::InvalidExtent)?;
+            let retained =
+                usize::try_from(retained).map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
+            if retained < FILESYSTEM_BLOCK_SIZE {
+                block_buffer[retained..].fill(0);
+            }
+        }
+
+        let new_block = new_start_block
+            .checked_add(block_index)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+        write_filesystem_block(device, new_block, block_buffer)?;
+    }
+
+    Ok(new_block_count)
+}
+
 fn rewrite_data_extent_range<D: BlockDevice>(
     device: &mut D,
     old_extent: ExtentValue,
@@ -7249,6 +7299,237 @@ pub fn commit_rewrite_single_extent_range<D: BlockDevice>(
     validate_object_record_value(metadata_key, &metadata_bytes, total_blocks)?;
 
     let next_extent = ExtentValue::new(data_start_block, data_blocks, old_extent.data_bytes);
+    let mut extent_bytes = [0_u8; EXTENT_VALUE_SIZE];
+    next_extent.encode(&mut extent_bytes)?;
+    validate_object_record_value(extent_key, &extent_bytes, total_blocks)?;
+
+    read_filesystem_block(device, metadata_path.leaf_block, object_buffer)?;
+    let object_block = data_start_block
+        .checked_add(data_blocks)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let leaf = materialize_object_leaf_with_two_replacements(
+        object_buffer,
+        object_copy_buffer,
+        metadata_key,
+        &metadata_bytes,
+        extent_key,
+        &extent_bytes,
+        generation,
+        object_block,
+    )?;
+    write_filesystem_block(device, object_block, object_copy_buffer)?;
+
+    let mut new_child_block = object_block;
+    let mut new_child_first_key = first_object_node_key(object_copy_buffer, leaf)?;
+    let mut next_block = object_block
+        .checked_add(1)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+
+    for parent_position in (0..metadata_path.parent_count).rev() {
+        let step = metadata_path.parents[parent_position];
+        read_filesystem_block(device, step.block_number, object_buffer)?;
+        let parent = validate_object_internal(object_buffer)?;
+        if parent.metadata.generation > current.superblock.generation {
+            return Err(PhoenixFsError::ObjectNodeGenerationAhead);
+        }
+        validate_path_pointer(object_buffer, step)?;
+
+        materialize_object_internal_after_child_copy(
+            object_buffer,
+            object_copy_buffer,
+            generation,
+            next_block,
+            step.child_index as usize,
+            new_child_block,
+            new_child_first_key,
+        )?;
+        write_filesystem_block(device, next_block, object_copy_buffer)?;
+        let copied_parent = TreeNodeHeader::decode(object_copy_buffer)?;
+        new_child_first_key = first_object_node_key(object_copy_buffer, copied_parent)?;
+        new_child_block = next_block;
+        next_block = next_block
+            .checked_add(1)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    }
+
+    let free_space_block = next_block;
+    if free_space_block
+        .checked_add(1)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?
+        != allocation.allocated.end_block_exclusive()?
+    {
+        return Err(PhoenixFsError::InvalidTransactionRoots);
+    }
+    materialize_free_space_leaf_after_allocation(
+        current_free_space,
+        next_free_space,
+        total_blocks,
+        generation,
+        free_space_block,
+        allocation,
+    )?;
+    write_filesystem_block(device, free_space_block, next_free_space)?;
+
+    let mut retired_blocks = [0_u64; MAX_OBJECT_TRANSACTION_RETIRED_BLOCKS];
+    let mut retired_count = 0_usize;
+    push_unique_retired(
+        &mut retired_blocks,
+        &mut retired_count,
+        metadata_path.leaf_block,
+    )?;
+    for index in 0..metadata_path.parent_count {
+        push_unique_retired(
+            &mut retired_blocks,
+            &mut retired_count,
+            metadata_path.parents[index].block_number,
+        )?;
+    }
+    push_unique_retired(
+        &mut retired_blocks,
+        &mut retired_count,
+        current.superblock.roots.free_space_tree,
+    )?;
+    append_retired_extent_blocks(&mut retired_blocks, &mut retired_count, old_extent)?;
+    sort_u64_prefix(&mut retired_blocks, retired_count);
+
+    let roots = TransactionRoots::new(new_child_block, free_space_block);
+    let plan = TransactionCommitPlan::new(current, roots, &retired_blocks[..retired_count])?;
+    let committed = commit_transaction(device, current, plan, superblock_buffer)?;
+
+    Ok(DeepRecordUpdateResult {
+        active: committed.active,
+        retired_blocks,
+        retired_count,
+        allocated: allocation.allocated,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn commit_shrink_single_extent_file<D: BlockDevice>(
+    device: &mut D,
+    current: ActiveSuperblock,
+    object_id: u64,
+    new_length: u64,
+    object_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    object_copy_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    data_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    current_free_space: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    next_free_space: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    superblock_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<DeepRecordUpdateResult, PhoenixFsError> {
+    if object_id == 0 || new_length == 0 {
+        return Err(PhoenixFsError::InvalidObjectMutationBatch);
+    }
+
+    let mut metadata_bytes = [0_u8; OBJECT_METADATA_VALUE_SIZE];
+    let metadata = read_object_metadata(
+        device,
+        current.superblock.roots.object_tree,
+        object_id,
+        current.superblock.generation,
+        object_buffer,
+        &mut metadata_bytes,
+    )?;
+    if metadata.object_type != ObjectType::File
+        || metadata.size_bytes == 0
+        || new_length >= metadata.size_bytes
+    {
+        return Err(PhoenixFsError::InvalidObjectMutationBatch);
+    }
+
+    let (extent_key, old_extent) =
+        read_single_file_extent(device, current, object_id, object_buffer)?;
+    if extent_key.offset != 0 || old_extent.data_bytes != metadata.size_bytes {
+        return Err(PhoenixFsError::InvalidObjectMutationBatch);
+    }
+
+    let metadata_key = ObjectTreeKey::new(object_id, ObjectRecordKind::Metadata, 0);
+    let metadata_path = find_object_tree_path(
+        device,
+        current.superblock.roots.object_tree,
+        metadata_key,
+        current.superblock.generation,
+        object_buffer,
+    )?;
+    let extent_path = find_object_tree_path(
+        device,
+        current.superblock.roots.object_tree,
+        extent_key,
+        current.superblock.generation,
+        object_buffer,
+    )?;
+    if metadata_path != extent_path {
+        return Err(PhoenixFsError::ObjectMutationBatchSpansLeaves);
+    }
+
+    let metadata_retired = metadata_path
+        .node_count()
+        .checked_add(1)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let data_retired =
+        usize::try_from(old_extent.block_count).map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
+    if metadata_retired
+        .checked_add(data_retired)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?
+        > MAX_OBJECT_TRANSACTION_RETIRED_BLOCKS
+    {
+        return Err(PhoenixFsError::BufferSize);
+    }
+
+    let total_blocks = current.superblock.total_blocks;
+    read_filesystem_block(
+        device,
+        current.superblock.roots.free_space_tree,
+        current_free_space,
+    )?;
+    let free_node = validate_free_space_leaf(current_free_space, total_blocks)?;
+    if free_node.metadata.block_number != current.superblock.roots.free_space_tree {
+        return Err(PhoenixFsError::InvalidTransactionRoots);
+    }
+    if free_node.metadata.generation > current.superblock.generation {
+        return Err(PhoenixFsError::ObjectNodeGenerationAhead);
+    }
+
+    let block_size = FILESYSTEM_BLOCK_SIZE as u64;
+    let rounded_bytes = new_length
+        .checked_add(block_size - 1)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let data_blocks = rounded_bytes / block_size;
+    let metadata_blocks = u64::try_from(metadata_path.node_count() + 1)
+        .map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
+    let requested_blocks = data_blocks
+        .checked_add(metadata_blocks)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let allocation = plan_cow_allocation(current_free_space, total_blocks, requested_blocks)?;
+    let generation = current
+        .superblock
+        .generation
+        .checked_add(1)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+
+    let data_start_block = allocation.allocated.start_block;
+    let written_blocks = copy_truncated_data_extent(
+        device,
+        old_extent,
+        data_start_block,
+        new_length,
+        data_buffer,
+    )?;
+    if written_blocks != data_blocks {
+        return Err(PhoenixFsError::InvalidExtent);
+    }
+
+    let next_metadata = ObjectMetadataValue::new(
+        ObjectType::File,
+        new_length,
+        metadata.created_ns,
+        metadata.modified_ns,
+        metadata.changed_ns,
+    );
+    next_metadata.encode(&mut metadata_bytes)?;
+    validate_object_record_value(metadata_key, &metadata_bytes, total_blocks)?;
+
+    let next_extent = ExtentValue::new(data_start_block, data_blocks, new_length);
     let mut extent_bytes = [0_u8; EXTENT_VALUE_SIZE];
     next_extent.encode(&mut extent_bytes)?;
     validate_object_record_value(extent_key, &extent_bytes, total_blocks)?;
@@ -7975,21 +8256,37 @@ impl<D: BlockDevice> FileSystem for PhoenixVfs<D> {
         if length == metadata.length {
             return Ok(());
         }
-        if length != 0 || metadata.length == 0 {
+        if length > metadata.length {
             return Err(VfsError::InvalidOffset);
         }
 
-        let result = commit_truncate_single_extent_file_to_zero(
-            self.device.get_mut(),
-            self.active,
-            node.0,
-            self.node_buffer.get_mut(),
-            &mut self.object_copy_buffer,
-            &mut self.current_free_space_buffer,
-            &mut self.next_free_space_buffer,
-            &mut self.superblock_buffer,
-        )
+        let result = if length == 0 {
+            commit_truncate_single_extent_file_to_zero(
+                self.device.get_mut(),
+                self.active,
+                node.0,
+                self.node_buffer.get_mut(),
+                &mut self.object_copy_buffer,
+                &mut self.current_free_space_buffer,
+                &mut self.next_free_space_buffer,
+                &mut self.superblock_buffer,
+            )
+        } else {
+            commit_shrink_single_extent_file(
+                self.device.get_mut(),
+                self.active,
+                node.0,
+                length,
+                self.node_buffer.get_mut(),
+                &mut self.object_copy_buffer,
+                self.data_buffer.get_mut(),
+                &mut self.current_free_space_buffer,
+                &mut self.next_free_space_buffer,
+                &mut self.superblock_buffer,
+            )
+        }
         .map_err(map_phoenix_fs_to_vfs)?;
+
         self.active = result.active;
         Ok(())
     }
@@ -12038,6 +12335,95 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn phoenix_vfs_shrinks_existing_file_and_remounts() {
+        use phoenix_vfs::{FileSystem, NodeId, NodeKind};
+
+        let device = MemoryBlockDevice::<512, 256>::new();
+        let mut buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut filesystem = PhoenixVfs::format_new(device, VOLUME_ID, 1, &mut buffer).unwrap();
+        let file = filesystem
+            .create_node(NodeId(ROOT_OBJECT_ID), b"shrink.txt", NodeKind::File)
+            .unwrap();
+        assert_eq!(filesystem.write_node(file, 0, b"hello world").unwrap(), 11);
+
+        let before = filesystem.active_superblock().superblock.generation;
+        filesystem.truncate_node(file, 5).unwrap();
+        assert_eq!(filesystem.metadata(file).unwrap().length, 5);
+        assert_eq!(
+            filesystem.active_superblock().superblock.generation,
+            before + 1
+        );
+
+        let stable_generation = filesystem.active_superblock().superblock.generation;
+        assert_eq!(filesystem.truncate_node(file, 5), Ok(()));
+        assert_eq!(
+            filesystem.active_superblock().superblock.generation,
+            stable_generation
+        );
+        assert_eq!(
+            filesystem.truncate_node(file, 6),
+            Err(VfsError::InvalidOffset)
+        );
+
+        let mut output = [0_u8; 11];
+        assert_eq!(filesystem.read_node(file, 0, &mut output).unwrap(), 5);
+        assert_eq!(&output[..5], b"hello");
+
+        let device = filesystem.into_device();
+        let mut first = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut second = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let remounted = PhoenixVfs::mount(device, &mut first, &mut second).unwrap();
+        assert_eq!(remounted.metadata(file).unwrap().length, 5);
+        let mut output = [0_u8; 11];
+        assert_eq!(remounted.read_node(file, 0, &mut output).unwrap(), 5);
+        assert_eq!(&output[..5], b"hello");
+    }
+
+    #[test]
+    fn phoenix_vfs_shrink_zeroes_tail_of_last_retained_block() {
+        use phoenix_vfs::{FileSystem, NodeId, NodeKind};
+
+        let device = MemoryBlockDevice::<512, 256>::new();
+        let mut buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut filesystem = PhoenixVfs::format_new(device, VOLUME_ID, 1, &mut buffer).unwrap();
+        let file = filesystem
+            .create_node(NodeId(ROOT_OBJECT_ID), b"blocks.bin", NodeKind::File)
+            .unwrap();
+        let input = [0xA5_u8; FILESYSTEM_BLOCK_SIZE + 37];
+        assert_eq!(filesystem.write_node(file, 0, &input).unwrap(), input.len());
+
+        let new_length = (FILESYSTEM_BLOCK_SIZE + 1) as u64;
+        filesystem.truncate_node(file, new_length).unwrap();
+        let active = filesystem.active_superblock();
+        let mut device = filesystem.into_device();
+
+        let mut object_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let (_, extent) =
+            read_single_file_extent(&mut device, active, file.0, &mut object_buffer).unwrap();
+        assert_eq!(extent.block_count, 2);
+        assert_eq!(extent.data_bytes, new_length);
+
+        let final_block = extent.physical_start_block + 1;
+        let mut data_block = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        read_filesystem_block(&mut device, final_block, &mut data_block).unwrap();
+        assert_eq!(data_block[0], 0xA5);
+        assert!(data_block[1..].iter().all(|byte| *byte == 0));
+
+        let mut first = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut second = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let remounted = PhoenixVfs::mount(device, &mut first, &mut second).unwrap();
+        let mut output = [0_u8; FILESYSTEM_BLOCK_SIZE + 37];
+        assert_eq!(
+            remounted.read_node(file, 0, &mut output).unwrap(),
+            FILESYSTEM_BLOCK_SIZE + 1
+        );
+        assert_eq!(
+            &output[..FILESYSTEM_BLOCK_SIZE + 1],
+            &input[..FILESYSTEM_BLOCK_SIZE + 1]
+        );
+    }
+
     fn phoenix_vfs_truncates_existing_file_to_zero_and_remounts() {
         use phoenix_vfs::{FileSystem, NodeId, NodeKind};
 

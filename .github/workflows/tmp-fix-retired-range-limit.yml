@@ -1,0 +1,40 @@
+name: Временное исправление лимита диапазонного возврата PhoenixFS
+
+on:
+  push:
+    branches:
+      - fix/phoenix-fs-retired-range-limit
+    paths:
+      - .github/tmp_fix_retired_range_limit.py
+      - .github/workflows/tmp-fix-retired-range-limit.yml
+
+permissions:
+  contents: write
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: fix/phoenix-fs-retired-range-limit
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Применить исправление
+        run: python3 .github/tmp_fix_retired_range_limit.py
+      - name: Удалить временные файлы
+        run: rm .github/tmp_fix_retired_range_limit.py .github/workflows/tmp-fix-retired-range-limit.yml
+      - name: Форматировать код
+        run: cargo fmt --all
+      - name: Проверить форматирование
+        run: cargo fmt --all -- --check
+      - name: Проверить PhoenixFS
+        run: cargo test -p phoenix-fs
+      - name: Проверить ВФС
+        run: cargo test -p phoenix-vfs
+      - name: Подготовить итоговый коммит
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/phoenix-fs/src/lib.rs STATUS.md .github
+          git commit -m 'Снять остаточный лимит диапазонного возврата PhoenixFS'
+          git push

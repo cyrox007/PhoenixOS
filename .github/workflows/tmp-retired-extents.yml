@@ -1,4 +1,3 @@
-# Итоговый временный прогон перед очисткой ветки. Том теста увеличен для CoW.
 name: Временная реализация диапазонного возврата PhoenixFS
 on:
   push:
@@ -16,15 +15,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
-      - name: Добавить регрессионную проверку
+      - name: Восстановить регрессионные тесты
         run: python .github/tmp_large_retired_extent_test.py
       - name: Форматировать код
         run: cargo fmt --all
       - name: Проверить форматирование
         run: cargo fmt --all -- --check
-      - name: Проверить большой экстент
-        run: cargo test -p phoenix-fs tests::phoenix_vfs_rewrites_file_larger_than_retired_block_capacity -- --exact
-      - name: Проверить весь PhoenixFS
+      - name: Проверить PhoenixFS
         run: cargo test -p phoenix-fs
       - name: Проверить ВФС
         run: cargo test -p phoenix-vfs
@@ -34,5 +31,5 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add crates/phoenix-fs/src/lib.rs .github
-          git commit -m 'Проверить большие освобождённые экстенты PhoenixFS'
+          git commit -m 'Завершить диапазонный возврат блоков PhoenixFS'
           git push origin HEAD:feature/phoenix-fs-retired-extents

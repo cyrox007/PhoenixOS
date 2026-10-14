@@ -9,6 +9,15 @@ text, count = pattern.subn(replacement, text)
 if count != 4:
     raise SystemExit(f'expected 4 obsolete retirement limit checks, replaced {count}')
 
+tests_marker = '''#[cfg(test)]\nmod tests {\n    use super::*;'''
+if tests_marker not in text:
+    raise SystemExit('tests module marker not found')
+text = text.replace(
+    tests_marker,
+    '''#[cfg(test)]\nmod tests {\n    extern crate std;\n\n    use super::*;''',
+    1,
+)
+
 marker = '''    #[test]\n    fn phoenix_vfs_rewrites_range_inside_existing_file_atomically() {'''
 if marker not in text:
     raise SystemExit('test insertion marker not found')

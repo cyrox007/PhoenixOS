@@ -26,6 +26,7 @@ pub const OBJECT_INTERNAL_RECORD_SIZE: usize = 32;
 pub const FREE_SPACE_RECORD_SIZE: usize = 16;
 pub const MAX_OBJECT_TREE_DEPTH: usize = 16;
 pub const MAX_OBJECT_TRANSACTION_RETIRED_BLOCKS: usize = MAX_OBJECT_TREE_DEPTH * 2 + 3;
+pub const MAX_OBJECT_TRANSACTION_RETIRED_EXTENTS: usize = 4;
 pub const ROOT_OBJECT_ID: u64 = 1;
 pub const INITIAL_OBJECT_TREE_BLOCK: u64 = 2;
 pub const INITIAL_FREE_SPACE_TREE_BLOCK: u64 = 3;
@@ -1956,12 +1957,18 @@ pub struct DeepRecordUpdateResult {
     pub active: ActiveSuperblock,
     pub retired_blocks: [u64; MAX_OBJECT_TRANSACTION_RETIRED_BLOCKS],
     pub retired_count: usize,
+    pub retired_extents: [FreeSpaceExtent; MAX_OBJECT_TRANSACTION_RETIRED_EXTENTS],
+    pub retired_extent_count: usize,
     pub allocated: FreeSpaceExtent,
 }
 
 impl DeepRecordUpdateResult {
     pub fn retired_blocks(&self) -> &[u64] {
         &self.retired_blocks[..self.retired_count]
+    }
+
+    pub fn retired_extents(&self) -> &[FreeSpaceExtent] {
+        &self.retired_extents[..self.retired_extent_count]
     }
 }
 
@@ -2636,6 +2643,8 @@ fn try_commit_internal_merge_after_prune<D: BlockDevice>(
             active: committed.active,
             retired_blocks,
             retired_count,
+            retired_extents: [FreeSpaceExtent::new(0, 0); MAX_OBJECT_TRANSACTION_RETIRED_EXTENTS],
+            retired_extent_count: 0,
             allocated: allocation.allocated,
         }));
     }
@@ -2718,6 +2727,8 @@ fn try_commit_internal_merge_after_prune<D: BlockDevice>(
         active: committed.active,
         retired_blocks,
         retired_count,
+        retired_extents: [FreeSpaceExtent::new(0, 0); MAX_OBJECT_TRANSACTION_RETIRED_EXTENTS],
+        retired_extent_count: 0,
         allocated: allocation.allocated,
     }))
 }
@@ -3065,6 +3076,8 @@ fn try_commit_internal_rebalance_after_prune<D: BlockDevice>(
         active: committed.active,
         retired_blocks,
         retired_count,
+        retired_extents: [FreeSpaceExtent::new(0, 0); MAX_OBJECT_TRANSACTION_RETIRED_EXTENTS],
+        retired_extent_count: 0,
         allocated: allocation.allocated,
     }))
 }
@@ -3127,6 +3140,8 @@ fn commit_empty_leaf_prune<D: BlockDevice>(
             active: committed.active,
             retired_blocks,
             retired_count,
+            retired_extents: [FreeSpaceExtent::new(0, 0); MAX_OBJECT_TRANSACTION_RETIRED_EXTENTS],
+            retired_extent_count: 0,
             allocated: allocation.allocated,
         });
     }
@@ -3227,6 +3242,8 @@ fn commit_empty_leaf_prune<D: BlockDevice>(
         active: committed.active,
         retired_blocks,
         retired_count,
+        retired_extents: [FreeSpaceExtent::new(0, 0); MAX_OBJECT_TRANSACTION_RETIRED_EXTENTS],
+        retired_extent_count: 0,
         allocated: allocation.allocated,
     })
 }
@@ -3558,6 +3575,8 @@ fn try_commit_leaf_merge_after_delete<D: BlockDevice>(
         active: committed.active,
         retired_blocks,
         retired_count,
+        retired_extents: [FreeSpaceExtent::new(0, 0); MAX_OBJECT_TRANSACTION_RETIRED_EXTENTS],
+        retired_extent_count: 0,
         allocated: allocation.allocated,
     }))
 }
@@ -3892,6 +3911,8 @@ fn try_commit_leaf_rebalance_after_delete<D: BlockDevice>(
         active: committed.active,
         retired_blocks,
         retired_count,
+        retired_extents: [FreeSpaceExtent::new(0, 0); MAX_OBJECT_TRANSACTION_RETIRED_EXTENTS],
+        retired_extent_count: 0,
         allocated: allocation.allocated,
     }))
 }
@@ -4200,6 +4221,8 @@ fn commit_object_leaf_mutation<D: BlockDevice>(
         active: committed.active,
         retired_blocks,
         retired_count,
+        retired_extents: [FreeSpaceExtent::new(0, 0); MAX_OBJECT_TRANSACTION_RETIRED_EXTENTS],
+        retired_extent_count: 0,
         allocated: allocation.allocated,
     })
 }
@@ -4506,6 +4529,8 @@ fn commit_two_leaf_insertions<D: BlockDevice>(
         active: committed.active,
         retired_blocks,
         retired_count,
+        retired_extents: [FreeSpaceExtent::new(0, 0); MAX_OBJECT_TRANSACTION_RETIRED_EXTENTS],
+        retired_extent_count: 0,
         allocated: allocation.allocated,
     })
 }
@@ -4693,6 +4718,8 @@ fn commit_two_leaf_deletions<D: BlockDevice>(
         active: committed.active,
         retired_blocks,
         retired_count,
+        retired_extents: [FreeSpaceExtent::new(0, 0); MAX_OBJECT_TRANSACTION_RETIRED_EXTENTS],
+        retired_extent_count: 0,
         allocated: allocation.allocated,
     })
 }
@@ -5433,6 +5460,8 @@ fn commit_nonroot_leaf_split_insertions<D: BlockDevice>(
         active: committed.active,
         retired_blocks,
         retired_count,
+        retired_extents: [FreeSpaceExtent::new(0, 0); MAX_OBJECT_TRANSACTION_RETIRED_EXTENTS],
+        retired_extent_count: 0,
         allocated: allocation.allocated,
     })
 }
@@ -5541,6 +5570,8 @@ fn commit_root_leaf_split_insertions<D: BlockDevice>(
         active: committed.active,
         retired_blocks,
         retired_count: 2,
+        retired_extents: [FreeSpaceExtent::new(0, 0); MAX_OBJECT_TRANSACTION_RETIRED_EXTENTS],
+        retired_extent_count: 0,
         allocated: allocation.allocated,
     })
 }
@@ -5897,6 +5928,159 @@ pub fn materialize_object_leaf_with_replaced_value(
     next.seal(destination)?;
     validate_object_leaf(destination)?;
     Ok(next)
+}
+
+pub fn materialize_free_space_leaf_with_reclaimed_extents(
+    current: &[u8],
+    destination: &mut [u8],
+    total_blocks: u64,
+    new_generation: u64,
+    new_block_number: u64,
+    reclaimed_extents: &[FreeSpaceExtent],
+) -> Result<TreeNodeHeader, PhoenixFsError> {
+    let current_node = validate_free_space_leaf(current, total_blocks)?;
+    if destination.len() != FILESYSTEM_BLOCK_SIZE {
+        return Err(PhoenixFsError::BufferSize);
+    }
+    if new_generation <= current_node.metadata.generation {
+        return Err(PhoenixFsError::GenerationSequence);
+    }
+    if new_block_number < SUPERBLOCK_COPY_COUNT || new_block_number >= total_blocks {
+        return Err(PhoenixFsError::InvalidMetadataBlock(new_block_number));
+    }
+
+    validate_reclaimed_extents_input(reclaimed_extents, total_blocks, new_block_number)?;
+
+    destination.fill(0);
+    let entries_start = TreeNodeHeader::entries_offset();
+    let entries_bytes = current_node.entries_bytes as usize;
+    let entries_end = entries_start
+        .checked_add(entries_bytes)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    destination[entries_start..entries_end].copy_from_slice(&current[entries_start..entries_end]);
+
+    let mut item_count = current_node.item_count as usize;
+    for extent in reclaimed_extents.iter().copied() {
+        insert_reclaimed_extent(destination, &mut item_count, extent)?;
+    }
+
+    let entries_bytes = item_count
+        .checked_mul(FREE_SPACE_RECORD_SIZE)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let next = TreeNodeHeader::new(
+        MetadataKind::FreeSpaceTree,
+        new_generation,
+        new_block_number,
+        0,
+        item_count as u32,
+        entries_bytes as u32,
+    )?;
+    next.seal(destination)?;
+    validate_free_space_leaf(destination, total_blocks)?;
+    Ok(next)
+}
+
+fn validate_reclaimed_extents_input(
+    reclaimed_extents: &[FreeSpaceExtent],
+    total_blocks: u64,
+    new_block_number: u64,
+) -> Result<(), PhoenixFsError> {
+    let mut previous_end = None;
+    for extent in reclaimed_extents.iter().copied() {
+        extent.validate(total_blocks)?;
+        let end = extent.end_block_exclusive()?;
+        if extent.contains(new_block_number)? {
+            return Err(PhoenixFsError::InvalidReclaimedBlock(new_block_number));
+        }
+        if previous_end.is_some_and(|previous| previous > extent.start_block) {
+            return Err(PhoenixFsError::InvalidReclaimedBlock(extent.start_block));
+        }
+        previous_end = Some(end);
+    }
+    Ok(())
+}
+
+fn insert_reclaimed_extent(
+    block: &mut [u8],
+    item_count: &mut usize,
+    reclaimed: FreeSpaceExtent,
+) -> Result<(), PhoenixFsError> {
+    let reclaimed_end = reclaimed.end_block_exclusive()?;
+    let mut index = 0_usize;
+    while index < *item_count {
+        let extent = free_space_extent_at(block, index)?;
+        if reclaimed.start_block < extent.end_block_exclusive()? {
+            break;
+        }
+        index += 1;
+    }
+
+    let previous = if index == 0 {
+        None
+    } else {
+        Some(free_space_extent_at(block, index - 1)?)
+    };
+    let next = if index == *item_count {
+        None
+    } else {
+        Some(free_space_extent_at(block, index)?)
+    };
+
+    if previous.is_some_and(|extent| {
+        reclaimed.start_block < extent.end_block_exclusive().unwrap_or(u64::MAX)
+    }) || next.is_some_and(|extent| reclaimed_end > extent.start_block)
+    {
+        return Err(PhoenixFsError::ReclaimedBlockAlreadyFree(
+            reclaimed.start_block,
+        ));
+    }
+
+    let joins_previous = previous
+        .map(|extent| extent.end_block_exclusive() == Ok(reclaimed.start_block))
+        .unwrap_or(false);
+    let joins_next = next
+        .map(|extent| reclaimed_end == extent.start_block)
+        .unwrap_or(false);
+
+    if joins_previous && joins_next {
+        let previous = previous.ok_or(PhoenixFsError::InvalidFreeSpaceRange)?;
+        let next = next.ok_or(PhoenixFsError::InvalidFreeSpaceRange)?;
+        let next_end = next.end_block_exclusive()?;
+        let merged = FreeSpaceExtent::new(
+            previous.start_block,
+            next_end
+                .checked_sub(previous.start_block)
+                .ok_or(PhoenixFsError::ArithmeticOverflow)?,
+        );
+        write_free_space_extent(block, index - 1, merged)?;
+        remove_free_space_extent(block, item_count, index)?;
+        return Ok(());
+    }
+
+    if joins_previous {
+        let previous = previous.ok_or(PhoenixFsError::InvalidFreeSpaceRange)?;
+        let merged = FreeSpaceExtent::new(
+            previous.start_block,
+            reclaimed_end
+                .checked_sub(previous.start_block)
+                .ok_or(PhoenixFsError::ArithmeticOverflow)?,
+        );
+        return write_free_space_extent(block, index - 1, merged);
+    }
+
+    if joins_next {
+        let next = next.ok_or(PhoenixFsError::InvalidFreeSpaceRange)?;
+        let next_end = next.end_block_exclusive()?;
+        let merged = FreeSpaceExtent::new(
+            reclaimed.start_block,
+            next_end
+                .checked_sub(reclaimed.start_block)
+                .ok_or(PhoenixFsError::ArithmeticOverflow)?,
+        );
+        return write_free_space_extent(block, index, merged);
+    }
+
+    insert_free_space_extent(block, item_count, index, reclaimed)
 }
 
 pub fn materialize_free_space_leaf_with_reclaimed_blocks(
@@ -7099,21 +7283,6 @@ fn read_single_file_extent<D: BlockDevice>(
     found.ok_or(PhoenixFsError::ObjectRecordNotFound)
 }
 
-fn append_retired_extent_blocks(
-    retired_blocks: &mut [u64; MAX_OBJECT_TRANSACTION_RETIRED_BLOCKS],
-    retired_count: &mut usize,
-    extent: ExtentValue,
-) -> Result<(), PhoenixFsError> {
-    for delta in 0..extent.block_count {
-        let block = extent
-            .physical_start_block
-            .checked_add(delta)
-            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
-        push_unique_retired(retired_blocks, retired_count, block)?;
-    }
-    Ok(())
-}
-
 #[allow(clippy::too_many_arguments)]
 fn write_zero_data_extent<D: BlockDevice>(
     device: &mut D,
@@ -7586,7 +7755,8 @@ pub fn commit_rewrite_single_extent_range<D: BlockDevice>(
         &mut retired_count,
         current.superblock.roots.free_space_tree,
     )?;
-    append_retired_extent_blocks(&mut retired_blocks, &mut retired_count, old_extent)?;
+    let retired_data_extent =
+        FreeSpaceExtent::new(old_extent.physical_start_block, old_extent.block_count);
     sort_u64_prefix(&mut retired_blocks, retired_count);
 
     let roots = TransactionRoots::new(new_child_block, free_space_block);
@@ -7597,6 +7767,12 @@ pub fn commit_rewrite_single_extent_range<D: BlockDevice>(
         active: committed.active,
         retired_blocks,
         retired_count,
+        retired_extents: {
+            let mut extents = [FreeSpaceExtent::new(0, 0); MAX_OBJECT_TRANSACTION_RETIRED_EXTENTS];
+            extents[0] = retired_data_extent;
+            extents
+        },
+        retired_extent_count: 1,
         allocated: allocation.allocated,
     })
 }
@@ -7817,7 +7993,8 @@ pub fn commit_shrink_single_extent_file<D: BlockDevice>(
         &mut retired_count,
         current.superblock.roots.free_space_tree,
     )?;
-    append_retired_extent_blocks(&mut retired_blocks, &mut retired_count, old_extent)?;
+    let retired_data_extent =
+        FreeSpaceExtent::new(old_extent.physical_start_block, old_extent.block_count);
     sort_u64_prefix(&mut retired_blocks, retired_count);
 
     let roots = TransactionRoots::new(new_child_block, free_space_block);
@@ -7828,6 +8005,12 @@ pub fn commit_shrink_single_extent_file<D: BlockDevice>(
         active: committed.active,
         retired_blocks,
         retired_count,
+        retired_extents: {
+            let mut extents = [FreeSpaceExtent::new(0, 0); MAX_OBJECT_TRANSACTION_RETIRED_EXTENTS];
+            extents[0] = retired_data_extent;
+            extents
+        },
+        retired_extent_count: 1,
         allocated: allocation.allocated,
     })
 }
@@ -8057,7 +8240,8 @@ pub fn commit_extend_single_extent_file<D: BlockDevice>(
         &mut retired_count,
         current.superblock.roots.free_space_tree,
     )?;
-    append_retired_extent_blocks(&mut retired_blocks, &mut retired_count, old_extent)?;
+    let retired_data_extent =
+        FreeSpaceExtent::new(old_extent.physical_start_block, old_extent.block_count);
     sort_u64_prefix(&mut retired_blocks, retired_count);
 
     let roots = TransactionRoots::new(new_child_block, free_space_block);
@@ -8068,6 +8252,12 @@ pub fn commit_extend_single_extent_file<D: BlockDevice>(
         active: committed.active,
         retired_blocks,
         retired_count,
+        retired_extents: {
+            let mut extents = [FreeSpaceExtent::new(0, 0); MAX_OBJECT_TRANSACTION_RETIRED_EXTENTS];
+            extents[0] = retired_data_extent;
+            extents
+        },
+        retired_extent_count: 1,
         allocated: allocation.allocated,
     })
 }
@@ -8243,7 +8433,8 @@ pub fn commit_truncate_single_extent_file_to_zero<D: BlockDevice>(
         &mut retired_count,
         current.superblock.roots.free_space_tree,
     )?;
-    append_retired_extent_blocks(&mut retired_blocks, &mut retired_count, old_extent)?;
+    let retired_data_extent =
+        FreeSpaceExtent::new(old_extent.physical_start_block, old_extent.block_count);
     sort_u64_prefix(&mut retired_blocks, retired_count);
 
     let roots = TransactionRoots::new(new_child_block, free_space_block);
@@ -8253,6 +8444,12 @@ pub fn commit_truncate_single_extent_file_to_zero<D: BlockDevice>(
         active: committed.active,
         retired_blocks,
         retired_count,
+        retired_extents: {
+            let mut extents = [FreeSpaceExtent::new(0, 0); MAX_OBJECT_TRANSACTION_RETIRED_EXTENTS];
+            extents[0] = retired_data_extent;
+            extents
+        },
+        retired_extent_count: 1,
         allocated: allocation.allocated,
     })
 }
@@ -8483,6 +8680,8 @@ pub fn commit_write_empty_file<D: BlockDevice>(
         active: committed.active,
         retired_blocks,
         retired_count,
+        retired_extents: [FreeSpaceExtent::new(0, 0); MAX_OBJECT_TRANSACTION_RETIRED_EXTENTS],
+        retired_extent_count: 0,
         allocated: allocation.allocated,
     })
 }
@@ -8682,6 +8881,8 @@ pub fn commit_extend_empty_file<D: BlockDevice>(
         active: committed.active,
         retired_blocks,
         retired_count,
+        retired_extents: [FreeSpaceExtent::new(0, 0); MAX_OBJECT_TRANSACTION_RETIRED_EXTENTS],
+        retired_extent_count: 0,
         allocated: allocation.allocated,
     })
 }
@@ -12423,6 +12624,43 @@ mod tests {
     }
 
     #[test]
+    fn reclaimed_large_extent_merges_without_block_enumeration() {
+        let mut current = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        write_free_space_extent(&mut current, 0, FreeSpaceExtent::new(10, 2)).unwrap();
+        write_free_space_extent(&mut current, 1, FreeSpaceExtent::new(60, 2)).unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::FreeSpaceTree,
+            7,
+            9,
+            0,
+            2,
+            (2 * FREE_SPACE_RECORD_SIZE) as u32,
+        )
+        .unwrap()
+        .seal(&mut current)
+        .unwrap();
+
+        let reclaimed = [FreeSpaceExtent::new(
+            12,
+            MAX_OBJECT_TRANSACTION_RETIRED_BLOCKS as u64 + 10,
+        )];
+        let mut next = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        materialize_free_space_leaf_with_reclaimed_extents(
+            &current, &mut next, 128, 8, 100, &reclaimed,
+        )
+        .unwrap();
+
+        assert_eq!(
+            free_space_extent_at(&next, 0).unwrap(),
+            FreeSpaceExtent::new(10, 2 + MAX_OBJECT_TRANSACTION_RETIRED_BLOCKS as u64 + 10)
+        );
+        assert_eq!(
+            free_space_extent_at(&next, 1).unwrap(),
+            FreeSpaceExtent::new(60, 2)
+        );
+    }
+
+    #[test]
     fn reclaimed_blocks_merge_adjacent_free_ranges() {
         let mut current = [0_u8; FILESYSTEM_BLOCK_SIZE];
         write_free_space_extent(&mut current, 0, FreeSpaceExtent::new(10, 2)).unwrap();
@@ -13229,8 +13467,6 @@ mod tests {
         assert_eq!(&output, b"world");
     }
 
-    #[test]
-    #[test]
     #[test]
     fn phoenix_vfs_extends_existing_file_with_zeroes_and_remounts() {
         use phoenix_vfs::{FileSystem, NodeId, NodeKind};

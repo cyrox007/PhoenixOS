@@ -38,7 +38,7 @@ test = r'''    #[test]
             .spawn(|| {
                 use phoenix_vfs::{FileSystem, NodeKind};
 
-                let device = MemoryBlockDevice::<512, 768>::new();
+                let device = MemoryBlockDevice::<512, 2048>::new();
                 let mut buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
                 let mut filesystem =
                     PhoenixVfs::format_new(device, VOLUME_ID, 1, &mut buffer).unwrap();

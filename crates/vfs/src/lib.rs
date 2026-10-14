@@ -19,6 +19,8 @@ pub enum VfsError {
     NoSpace,
     FileTooLarge,
     InvalidOffset,
+    BufferTooSmall,
+    Unsupported,
     ReadOnly,
     Storage,
 }
@@ -246,6 +248,17 @@ impl<'a, const CAPACITY: usize> FileSystemRegistry<'a, CAPACITY> {
             .lookup_child(parent.node, name)?)
     }
 
+    pub fn read_directory_entry(
+        &self,
+        directory: VfsNode,
+        cursor: DirectoryCursor,
+        name_buffer: &mut [u8],
+    ) -> Result<DirectoryRead, FileSystemRegistryError> {
+        Ok(self
+            .filesystem(directory.filesystem)?
+            .read_directory_entry(directory.node, cursor, name_buffer)?)
+    }
+
     pub fn create_node(
         &mut self,
         parent: VfsNode,
@@ -348,6 +361,35 @@ pub struct NodeMetadata {
     pub length: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectoryCursor(pub u64);
+
+impl DirectoryCursor {
+    pub const START: Self = Self(0);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectoryEntry {
+    pub node: NodeId,
+    pub kind: NodeKind,
+    pub name_length: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectoryRead {
+    pub entry: Option<DirectoryEntry>,
+    pub next_cursor: DirectoryCursor,
+}
+
+impl DirectoryRead {
+    pub const fn end(cursor: DirectoryCursor) -> Self {
+        Self {
+            entry: None,
+            next_cursor: cursor,
+        }
+    }
+}
+
 /// Независимые от конкретной файловой системы операции с узлами для ВФС и дескрипторов.
 ///
 /// Пути намеренно остаются вне этого контракта. Слой монтирования может разрешать путь
@@ -357,6 +399,15 @@ pub trait FileSystem {
     fn root_node(&self) -> Result<NodeId, VfsError>;
     fn metadata(&self, node: NodeId) -> Result<NodeMetadata, VfsError>;
     fn lookup_child(&self, parent: NodeId, name: &[u8]) -> Result<NodeId, VfsError>;
+    fn read_directory_entry(
+        &self,
+        directory: NodeId,
+        cursor: DirectoryCursor,
+        name_buffer: &mut [u8],
+    ) -> Result<DirectoryRead, VfsError> {
+        let _ = (directory, cursor, name_buffer);
+        Err(VfsError::Unsupported)
+    }
     fn create_node(
         &mut self,
         parent: NodeId,

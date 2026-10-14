@@ -7139,6 +7139,67 @@ fn copy_extended_data_extent<D: BlockDevice>(
     Ok(new_block_count)
 }
 
+fn overlay_data_range<D: BlockDevice>(
+    device: &mut D,
+    start_block: u64,
+    extent_data_bytes: u64,
+    offset: u64,
+    data: &[u8],
+    block_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+) -> Result<(), PhoenixFsError> {
+    if data.is_empty() {
+        return Ok(());
+    }
+
+    let data_len = u64::try_from(data.len()).map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
+    let write_end = offset
+        .checked_add(data_len)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    if write_end > extent_data_bytes {
+        return Err(PhoenixFsError::InvalidExtent);
+    }
+
+    let block_size = FILESYSTEM_BLOCK_SIZE as u64;
+    let first_block = offset / block_size;
+    let last_block = write_end
+        .checked_sub(1)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?
+        / block_size;
+
+    for block_index in first_block..=last_block {
+        let block_number = start_block
+            .checked_add(block_index)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+        read_filesystem_block(device, block_number, block_buffer)?;
+
+        let block_start = block_index
+            .checked_mul(block_size)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+        let block_end = block_start
+            .checked_add(block_size)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+        let overlap_start = core::cmp::max(block_start, offset);
+        let overlap_end = core::cmp::min(block_end, write_end);
+        let destination_start = usize::try_from(overlap_start - block_start)
+            .map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
+        let source_start = usize::try_from(overlap_start - offset)
+            .map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
+        let copy_len = usize::try_from(overlap_end - overlap_start)
+            .map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
+        let destination_end = destination_start
+            .checked_add(copy_len)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+        let source_end = source_start
+            .checked_add(copy_len)
+            .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+        block_buffer[destination_start..destination_end]
+            .copy_from_slice(&data[source_start..source_end]);
+        write_filesystem_block(device, block_number, block_buffer)?;
+    }
+
+    Ok(())
+}
+
 fn copy_truncated_data_extent<D: BlockDevice>(
     device: &mut D,
     old_extent: ExtentValue,
@@ -7720,6 +7781,8 @@ pub fn commit_extend_single_extent_file<D: BlockDevice>(
     current: ActiveSuperblock,
     object_id: u64,
     new_length: u64,
+    write_offset: u64,
+    data: &[u8],
     object_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
     object_copy_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
     data_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
@@ -7828,6 +7891,14 @@ pub fn commit_extend_single_extent_file<D: BlockDevice>(
     if written_blocks != data_blocks {
         return Err(PhoenixFsError::InvalidExtent);
     }
+    overlay_data_range(
+        device,
+        data_start_block,
+        new_length,
+        write_offset,
+        data,
+        data_buffer,
+    )?;
 
     let next_metadata = ObjectMetadataValue::new(
         ObjectType::File,
@@ -8365,6 +8436,8 @@ pub fn commit_extend_empty_file<D: BlockDevice>(
     current: ActiveSuperblock,
     object_id: u64,
     new_length: u64,
+    write_offset: u64,
+    data: &[u8],
     object_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
     object_copy_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
     data_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
@@ -8445,6 +8518,14 @@ pub fn commit_extend_empty_file<D: BlockDevice>(
     if written_blocks != data_blocks {
         return Err(PhoenixFsError::InvalidExtent);
     }
+    overlay_data_range(
+        device,
+        data_start_block,
+        new_length,
+        write_offset,
+        data,
+        data_buffer,
+    )?;
 
     let next_metadata = ObjectMetadataValue::new(
         ObjectType::File,
@@ -8724,7 +8805,22 @@ impl<D: BlockDevice> FileSystem for PhoenixVfs<D> {
                 &mut self.next_free_space_buffer,
                 &mut self.superblock_buffer,
             )
-        } else if metadata.length != 0 && write_end <= metadata.length {
+        } else if metadata.length == 0 {
+            commit_extend_empty_file(
+                self.device.get_mut(),
+                self.active,
+                node.0,
+                write_end,
+                offset,
+                data,
+                self.node_buffer.get_mut(),
+                &mut self.object_copy_buffer,
+                self.data_buffer.get_mut(),
+                &mut self.current_free_space_buffer,
+                &mut self.next_free_space_buffer,
+                &mut self.superblock_buffer,
+            )
+        } else if write_end <= metadata.length {
             commit_rewrite_single_extent_range(
                 self.device.get_mut(),
                 self.active,
@@ -8739,7 +8835,20 @@ impl<D: BlockDevice> FileSystem for PhoenixVfs<D> {
                 &mut self.superblock_buffer,
             )
         } else {
-            return Err(VfsError::InvalidOffset);
+            commit_extend_single_extent_file(
+                self.device.get_mut(),
+                self.active,
+                node.0,
+                write_end,
+                offset,
+                data,
+                self.node_buffer.get_mut(),
+                &mut self.object_copy_buffer,
+                self.data_buffer.get_mut(),
+                &mut self.current_free_space_buffer,
+                &mut self.next_free_space_buffer,
+                &mut self.superblock_buffer,
+            )
         }
         .map_err(map_phoenix_fs_to_vfs)?;
 
@@ -8773,6 +8882,8 @@ impl<D: BlockDevice> FileSystem for PhoenixVfs<D> {
                 self.active,
                 node.0,
                 length,
+                0,
+                &[],
                 self.node_buffer.get_mut(),
                 &mut self.object_copy_buffer,
                 self.data_buffer.get_mut(),
@@ -8799,6 +8910,8 @@ impl<D: BlockDevice> FileSystem for PhoenixVfs<D> {
                 self.active,
                 node.0,
                 length,
+                0,
+                &[],
                 self.node_buffer.get_mut(),
                 &mut self.object_copy_buffer,
                 self.data_buffer.get_mut(),
@@ -9432,14 +9545,21 @@ mod tests {
 
         assert_eq!(filesystem.write_node(file, 0, data), Ok(data.len()));
         assert_eq!(filesystem.metadata(file).unwrap().length, data.len() as u64);
+        let generation_before_append = filesystem.active_superblock().superblock.generation;
         assert_eq!(
             filesystem.write_node(file, data.len() as u64, b"second"),
-            Err(VfsError::InvalidOffset)
+            Ok(6)
+        );
+        assert_eq!(
+            filesystem.active_superblock().superblock.generation,
+            generation_before_append + 1
         );
 
+        let expected_len = data.len() + 6;
         let mut output = [0_u8; 64];
-        assert_eq!(filesystem.read_node(file, 0, &mut output), Ok(data.len()));
+        assert_eq!(filesystem.read_node(file, 0, &mut output), Ok(expected_len));
         assert_eq!(&output[..data.len()], data);
+        assert_eq!(&output[data.len()..expected_len], b"second");
 
         let mut device = filesystem.into_device();
         let mut first = [0_u8; FILESYSTEM_BLOCK_SIZE];
@@ -9449,9 +9569,81 @@ mod tests {
         let mut remounted_output = [0_u8; 64];
         assert_eq!(
             remounted.read_node(file, 0, &mut remounted_output),
-            Ok(data.len())
+            Ok(expected_len)
         );
         assert_eq!(&remounted_output[..data.len()], data);
+        assert_eq!(&remounted_output[data.len()..expected_len], b"second");
+    }
+
+    #[test]
+    fn phoenix_vfs_extending_write_zero_fills_gap_and_crosses_block_boundary() {
+        use phoenix_vfs::{FileSystem, NodeKind};
+
+        let device = MemoryBlockDevice::<512, 256>::new();
+        let mut format_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut filesystem =
+            PhoenixVfs::format_new(device, VOLUME_ID, 77, &mut format_buffer).unwrap();
+        let root = filesystem.root_node().unwrap();
+        let file = filesystem
+            .create_node(root, b"range.bin", NodeKind::File)
+            .unwrap();
+        let initial = [0xAB_u8; FILESYSTEM_BLOCK_SIZE - 6];
+        assert_eq!(filesystem.write_node(file, 0, &initial), Ok(initial.len()));
+
+        let generation_before = filesystem.active_superblock().superblock.generation;
+        assert_eq!(
+            filesystem.write_node(file, FILESYSTEM_BLOCK_SIZE as u64 - 2, b"ABCDEF"),
+            Ok(6)
+        );
+        assert_eq!(
+            filesystem.active_superblock().superblock.generation,
+            generation_before + 1
+        );
+        assert_eq!(
+            filesystem.metadata(file).unwrap().length,
+            FILESYSTEM_BLOCK_SIZE as u64 + 4
+        );
+
+        let mut boundary = [0_u8; 12];
+        assert_eq!(
+            filesystem.read_node(file, FILESYSTEM_BLOCK_SIZE as u64 - 8, &mut boundary,),
+            Ok(12)
+        );
+        assert_eq!(&boundary[..2], &[0xAB; 2]);
+        assert_eq!(&boundary[2..6], &[0; 4]);
+        assert_eq!(&boundary[6..], b"ABCDEF");
+
+        let empty = filesystem
+            .create_node(root, b"sparse.bin", NodeKind::File)
+            .unwrap();
+        let empty_generation = filesystem.active_superblock().superblock.generation;
+        assert_eq!(filesystem.write_node(empty, 4, b"ok"), Ok(2));
+        assert_eq!(
+            filesystem.active_superblock().superblock.generation,
+            empty_generation + 1
+        );
+        let mut sparse = [0xFF_u8; 6];
+        assert_eq!(filesystem.read_node(empty, 0, &mut sparse), Ok(6));
+        assert_eq!(&sparse, b"\0\0\0\0ok");
+
+        let mut device = filesystem.into_device();
+        let mut first = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut second = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let active = read_active_superblock(&mut device, &mut first, &mut second).unwrap();
+        let remounted = PhoenixVfs::new(device, active).unwrap();
+        let mut remounted_boundary = [0_u8; 12];
+        assert_eq!(
+            remounted.read_node(
+                file,
+                FILESYSTEM_BLOCK_SIZE as u64 - 8,
+                &mut remounted_boundary,
+            ),
+            Ok(12)
+        );
+        assert_eq!(remounted_boundary, boundary);
+        let mut remounted_sparse = [0xFF_u8; 6];
+        assert_eq!(remounted.read_node(empty, 0, &mut remounted_sparse), Ok(6));
+        assert_eq!(&remounted_sparse, b"\0\0\0\0ok");
     }
 
     #[test]

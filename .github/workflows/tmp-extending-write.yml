@@ -1,0 +1,40 @@
+name: Временная реализация расширяющей записи PhoenixFS
+
+on:
+  push:
+    branches:
+      - feature/phoenix-fs-extending-write
+
+permissions:
+  contents: write
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - name: Применить изменения
+        run: python3 .github/tmp_extending_write.py
+      - name: Форматировать код
+        run: cargo fmt --all
+      - name: Проверить форматирование
+        run: cargo fmt --all -- --check
+      - name: Проверить PhoenixFS
+        run: cargo test -p phoenix-fs
+      - name: Проверить ВФС
+        run: cargo test -p phoenix-vfs
+      - name: Подготовить итоговый коммит
+        run: |
+          rm -f Cargo.lock
+          rm -f .github/tmp_extending_write.py .github/workflows/tmp-extending-write.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/phoenix-fs/src/lib.rs ROADMAP.md STATUS.md
+          git add -u .github
+          git commit -m "Добавить атомарную запись с увеличением файла PhoenixFS"
+          git push origin HEAD:feature/phoenix-fs-extending-write

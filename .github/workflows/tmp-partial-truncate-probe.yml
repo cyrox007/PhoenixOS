@@ -1,0 +1,14 @@
+name: Временная проверка частичного усечения PhoenixFS
+
+on:
+  push:
+    branches:
+      - feature/phoenix-fs-partial-truncate
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Показать целевые функции
+        run: python .github/tmp_partial_truncate_probe.py

@@ -22,7 +22,7 @@ jobs:
       - name: Проверить форматирование
         run: cargo fmt --all -- --check
       - name: Проверить большой экстент
-        run: cargo test -p phoenix-fs phoenix_vfs_rewrites_file_larger_than_retired_block_capacity -- --exact
+        run: cargo test -p phoenix-fs tests::phoenix_vfs_rewrites_file_larger_than_retired_block_capacity -- --exact
       - name: Проверить весь PhoenixFS
         run: cargo test -p phoenix-fs
       - name: Проверить ВФС

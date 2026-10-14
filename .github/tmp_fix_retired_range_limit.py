@@ -9,12 +9,12 @@ text, count = pattern.subn(replacement, text)
 if count != 4:
     raise SystemExit(f'expected 4 obsolete retirement limit checks, replaced {count}')
 
-tests_marker = '''#[cfg(test)]\nmod tests {\n    use super::*;'''
+tests_marker = '''#[cfg(test)]\nmod tests {\n    use super::*;\n    use phoenix_block::MemoryBlockDevice;\n\n    const VOLUME_ID: [u8; 16] = *b"phoenix-volume-1";'''
 if tests_marker not in text:
     raise SystemExit('tests module marker not found')
 text = text.replace(
     tests_marker,
-    '''#[cfg(test)]\nmod tests {\n    extern crate std;\n\n    use super::*;''',
+    '''#[cfg(test)]\nmod tests {\n    extern crate std;\n\n    use super::*;\n    use phoenix_block::{BlockDevice, BlockError, BlockGeometry, MemoryBlockDevice};\n\n    struct HeapBlockDevice {\n        bytes: std::vec::Vec<u8>,\n        block_size: usize,\n        block_count: u64,\n        dirty: bool,\n    }\n\n    impl HeapBlockDevice {\n        fn new(block_size: usize, block_count: u64) -> Self {\n            let byte_count = block_size\n                .checked_mul(usize::try_from(block_count).unwrap())\n                .unwrap();\n            Self {\n                bytes: std::vec![0; byte_count],\n                block_size,\n                block_count,\n                dirty: false,\n            }\n        }\n\n        fn checked_range(\n            &self,\n            first_block: u64,\n            byte_length: usize,\n        ) -> Result<core::ops::Range<usize>, BlockError> {\n            phoenix_block::validate_transfer(self.geometry(), first_block, byte_length)?;\n            let start = usize::try_from(first_block)\n                .map_err(|_| BlockError::ArithmeticOverflow)?\n                .checked_mul(self.block_size)\n                .ok_or(BlockError::ArithmeticOverflow)?;\n            let end = start\n                .checked_add(byte_length)\n                .ok_or(BlockError::ArithmeticOverflow)?;\n            Ok(start..end)\n        }\n    }\n\n    impl BlockDevice for HeapBlockDevice {\n        fn geometry(&self) -> BlockGeometry {\n            BlockGeometry {\n                block_size: self.block_size,\n                block_count: self.block_count,\n            }\n        }\n\n        fn read_blocks(\n            &mut self,\n            first_block: u64,\n            destination: &mut [u8],\n        ) -> Result<(), BlockError> {\n            let range = self.checked_range(first_block, destination.len())?;\n            destination.copy_from_slice(&self.bytes[range]);\n            Ok(())\n        }\n\n        fn write_blocks(&mut self, first_block: u64, source: &[u8]) -> Result<(), BlockError> {\n            let range = self.checked_range(first_block, source.len())?;\n            self.bytes[range].copy_from_slice(source);\n            self.dirty = true;\n            Ok(())\n        }\n\n        fn flush(&mut self) -> Result<(), BlockError> {\n            self.dirty = false;\n            Ok(())\n        }\n    }\n\n    const VOLUME_ID: [u8; 16] = *b"phoenix-volume-1";''',
     1,
 )
 
@@ -29,7 +29,7 @@ test = r'''    #[test]
         const LARGE_BLOCKS: usize = MAX_OBJECT_TRANSACTION_RETIRED_BLOCKS + 2;
         const LARGE_BYTES: usize = FILESYSTEM_BLOCK_SIZE * LARGE_BLOCKS;
 
-        let device = MemoryBlockDevice::<512, 1024>::new();
+        let device = HeapBlockDevice::new(512, 1024);
         let mut buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
         let mut filesystem = PhoenixVfs::format_new(device, VOLUME_ID, 1, &mut buffer).unwrap();
         let root = filesystem.root_node().unwrap();

@@ -19,7 +19,7 @@ jobs:
         with:
           components: rustfmt
       - name: Применить изменения
-        run: python3 .github/tmp_extending_write.py
+        run: python3 .github/tmp_extending_write_v2.py
       - name: Форматировать код
         run: cargo fmt --all
       - name: Проверить форматирование
@@ -31,7 +31,7 @@ jobs:
       - name: Подготовить итоговый коммит
         run: |
           rm -f Cargo.lock
-          rm -f .github/tmp_extending_write.py .github/workflows/tmp-extending-write.yml
+          rm -f .github/tmp_extending_write.py .github/tmp_extending_write_v2.py .github/workflows/tmp-extending-write.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add crates/phoenix-fs/src/lib.rs ROADMAP.md STATUS.md

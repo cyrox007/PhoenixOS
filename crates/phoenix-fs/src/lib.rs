@@ -7604,13 +7604,7 @@ pub fn commit_rewrite_single_extent_range<D: BlockDevice>(
         .node_count()
         .checked_add(1)
         .ok_or(PhoenixFsError::ArithmeticOverflow)?;
-    let data_retired =
-        usize::try_from(old_extent.block_count).map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
-    if metadata_retired
-        .checked_add(data_retired)
-        .ok_or(PhoenixFsError::ArithmeticOverflow)?
-        > MAX_OBJECT_TRANSACTION_RETIRED_BLOCKS
-    {
+    if metadata_retired > MAX_OBJECT_TRANSACTION_RETIRED_BLOCKS {
         return Err(PhoenixFsError::BufferSize);
     }
 
@@ -7839,13 +7833,7 @@ pub fn commit_shrink_single_extent_file<D: BlockDevice>(
         .node_count()
         .checked_add(1)
         .ok_or(PhoenixFsError::ArithmeticOverflow)?;
-    let data_retired =
-        usize::try_from(old_extent.block_count).map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
-    if metadata_retired
-        .checked_add(data_retired)
-        .ok_or(PhoenixFsError::ArithmeticOverflow)?
-        > MAX_OBJECT_TRANSACTION_RETIRED_BLOCKS
-    {
+    if metadata_retired > MAX_OBJECT_TRANSACTION_RETIRED_BLOCKS {
         return Err(PhoenixFsError::BufferSize);
     }
 
@@ -8078,13 +8066,7 @@ pub fn commit_extend_single_extent_file<D: BlockDevice>(
         .node_count()
         .checked_add(1)
         .ok_or(PhoenixFsError::ArithmeticOverflow)?;
-    let data_retired =
-        usize::try_from(old_extent.block_count).map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
-    if metadata_retired
-        .checked_add(data_retired)
-        .ok_or(PhoenixFsError::ArithmeticOverflow)?
-        > MAX_OBJECT_TRANSACTION_RETIRED_BLOCKS
-    {
+    if metadata_retired > MAX_OBJECT_TRANSACTION_RETIRED_BLOCKS {
         return Err(PhoenixFsError::BufferSize);
     }
 
@@ -8315,14 +8297,11 @@ pub fn commit_truncate_single_extent_file_to_zero<D: BlockDevice>(
         return Err(PhoenixFsError::ObjectMutationBatchSpansLeaves);
     }
 
-    let metadata_retired = metadata_path.node_count() + 1;
-    let data_retired =
-        usize::try_from(old_extent.block_count).map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
-    if metadata_retired
-        .checked_add(data_retired)
-        .ok_or(PhoenixFsError::ArithmeticOverflow)?
-        > MAX_OBJECT_TRANSACTION_RETIRED_BLOCKS
-    {
+    let metadata_retired = metadata_path
+        .node_count()
+        .checked_add(1)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    if metadata_retired > MAX_OBJECT_TRANSACTION_RETIRED_BLOCKS {
         return Err(PhoenixFsError::BufferSize);
     }
 
@@ -9581,8 +9560,78 @@ fn write_u64(bytes: &mut [u8], offset: usize, value: u64) {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use super::*;
-    use phoenix_block::MemoryBlockDevice;
+    use phoenix_block::{BlockDevice, BlockError, BlockGeometry, MemoryBlockDevice};
+
+    struct HeapBlockDevice {
+        bytes: std::vec::Vec<u8>,
+        block_size: usize,
+        block_count: u64,
+        dirty: bool,
+    }
+
+    impl HeapBlockDevice {
+        fn new(block_size: usize, block_count: u64) -> Self {
+            let byte_count = block_size
+                .checked_mul(usize::try_from(block_count).unwrap())
+                .unwrap();
+            Self {
+                bytes: std::vec![0; byte_count],
+                block_size,
+                block_count,
+                dirty: false,
+            }
+        }
+
+        fn checked_range(
+            &self,
+            first_block: u64,
+            byte_length: usize,
+        ) -> Result<core::ops::Range<usize>, BlockError> {
+            phoenix_block::validate_transfer(self.geometry(), first_block, byte_length)?;
+            let start = usize::try_from(first_block)
+                .map_err(|_| BlockError::ArithmeticOverflow)?
+                .checked_mul(self.block_size)
+                .ok_or(BlockError::ArithmeticOverflow)?;
+            let end = start
+                .checked_add(byte_length)
+                .ok_or(BlockError::ArithmeticOverflow)?;
+            Ok(start..end)
+        }
+    }
+
+    impl BlockDevice for HeapBlockDevice {
+        fn geometry(&self) -> BlockGeometry {
+            BlockGeometry {
+                block_size: self.block_size,
+                block_count: self.block_count,
+            }
+        }
+
+        fn read_blocks(
+            &mut self,
+            first_block: u64,
+            destination: &mut [u8],
+        ) -> Result<(), BlockError> {
+            let range = self.checked_range(first_block, destination.len())?;
+            destination.copy_from_slice(&self.bytes[range]);
+            Ok(())
+        }
+
+        fn write_blocks(&mut self, first_block: u64, source: &[u8]) -> Result<(), BlockError> {
+            let range = self.checked_range(first_block, source.len())?;
+            self.bytes[range].copy_from_slice(source);
+            self.dirty = true;
+            Ok(())
+        }
+
+        fn flush(&mut self) -> Result<(), BlockError> {
+            self.dirty = false;
+            Ok(())
+        }
+    }
 
     const VOLUME_ID: [u8; 16] = *b"phoenix-volume-1";
     const ROOTS: TransactionRoots = TransactionRoots::new(2, 3);
@@ -13658,6 +13707,69 @@ mod tests {
         assert_eq!(remounted.metadata(file).unwrap().length, 0);
         let mut output = [0_u8; 5];
         assert_eq!(remounted.read_node(file, 0, &mut output).unwrap(), 0);
+    }
+
+    #[test]
+    fn phoenix_vfs_rewrites_large_extent_without_per_block_retirement_limit() {
+        use phoenix_vfs::{FileSystem, NodeId, NodeKind};
+
+        const LARGE_BLOCKS: usize = MAX_OBJECT_TRANSACTION_RETIRED_BLOCKS + 2;
+        const LARGE_BYTES: usize = FILESYSTEM_BLOCK_SIZE * LARGE_BLOCKS;
+
+        let device = HeapBlockDevice::new(512, 1024);
+        let mut buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut filesystem = PhoenixVfs::format_new(device, VOLUME_ID, 1, &mut buffer).unwrap();
+        let root = filesystem.root_node().unwrap();
+        let file = filesystem
+            .create_node(root, b"large.bin", NodeKind::File)
+            .unwrap();
+
+        let payload = std::vec![0x41_u8; LARGE_BYTES];
+        assert_eq!(
+            filesystem.write_node(file, 0, &payload).unwrap(),
+            payload.len()
+        );
+        let generation_before = filesystem.active_superblock().superblock.generation;
+
+        let rewrite_offset = (FILESYSTEM_BLOCK_SIZE * (LARGE_BLOCKS / 2)) as u64;
+        assert_eq!(
+            filesystem.write_node(file, rewrite_offset, b"Z").unwrap(),
+            1
+        );
+        assert_eq!(
+            filesystem.active_superblock().superblock.generation,
+            generation_before + 1
+        );
+
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            filesystem
+                .read_node(file, rewrite_offset, &mut byte)
+                .unwrap(),
+            1
+        );
+        assert_eq!(byte, [b'Z']);
+
+        let device = filesystem.into_device();
+        let mut first_superblock_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut second_superblock_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let remounted = PhoenixVfs::mount(
+            device,
+            &mut first_superblock_buffer,
+            &mut second_superblock_buffer,
+        )
+        .unwrap();
+        assert_eq!(
+            remounted.metadata(NodeId(file.0)).unwrap().length,
+            LARGE_BYTES as u64
+        );
+        assert_eq!(
+            remounted
+                .read_node(file, rewrite_offset, &mut byte)
+                .unwrap(),
+            1
+        );
+        assert_eq!(byte, [b'Z']);
     }
 
     #[test]

@@ -34,7 +34,7 @@ test = r'''    #[test]
     fn phoenix_vfs_rewrites_file_larger_than_retired_block_capacity() {
         std::thread::Builder::new()
             .name("phoenix-fs-large-retired-extent".into())
-            .stack_size(8 * 1024 * 1024)
+            .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 use phoenix_vfs::{FileSystem, NodeKind};
 

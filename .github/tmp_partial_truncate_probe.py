@@ -20,10 +20,10 @@ def extract(name: str) -> str:
     raise RuntimeError(name)
 
 for name in [
-    'commit_rewrite_single_extent_range',
-    'commit_truncate_single_extent_file_to_zero',
+    'write_node',
     'truncate_node',
-    'rewrite_data_extent_range',
+    'phoenix_vfs_truncates_existing_file_to_zero_and_remounts',
+    'phoenix_vfs_rewrites_range_inside_existing_file_atomically',
 ]:
     print(f'===== {name} =====')
     print(extract(name))

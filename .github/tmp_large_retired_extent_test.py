@@ -2,15 +2,30 @@ from pathlib import Path
 
 p = Path('crates/phoenix-fs/src/lib.rs')
 s = p.read_text()
+
+# В промежуточном генераторе два старых теста потеряли атрибут запуска — восстанавливаем их.
+for name in [
+    'phoenix_vfs_shrinks_existing_file_and_remounts',
+    'phoenix_vfs_truncates_existing_file_to_zero_and_remounts',
+]:
+    plain = f'    fn {name}() {{'
+    marked = f'    #[test]\n    fn {name}() {{'
+    if marked not in s:
+        assert plain in s
+        s = s.replace(plain, marked, 1)
+
 anchor = '''    #[test]
     fn phoenix_vfs_extends_existing_file_with_zeroes_and_remounts() {'''
 assert anchor in s
+assert 'fn phoenix_vfs_rewrites_file_larger_than_retired_block_capacity()' not in s
 
 test = r'''    #[test]
     fn phoenix_vfs_rewrites_file_larger_than_retired_block_capacity() {
         use phoenix_vfs::{FileSystem, NodeKind};
 
-        let device = MemoryBlockDevice::<512, 2048>::new();
+        // 96 логических блоков PhoenixFS достаточно для двух CoW-экстентов по 36 блоков
+        // и метаданных, но не раздувает стек тестового потока мегабайтным устройством.
+        let device = MemoryBlockDevice::<512, 768>::new();
         let mut buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
         let mut filesystem = PhoenixVfs::format_new(device, VOLUME_ID, 1, &mut buffer).unwrap();
         let root = filesystem.root_node().unwrap();
@@ -18,7 +33,7 @@ test = r'''    #[test]
             .create_node(root, b"large-retired.bin", NodeKind::File)
             .unwrap();
 
-        let old_blocks = MAX_OBJECT_TRANSACTION_RETIRED_BLOCKS as u64 + 8;
+        let old_blocks = MAX_OBJECT_TRANSACTION_RETIRED_BLOCKS as u64 + 1;
         let length = old_blocks * FILESYSTEM_BLOCK_SIZE as u64;
         filesystem.truncate_node(file, length).unwrap();
         let before = filesystem.active_superblock().superblock.generation;

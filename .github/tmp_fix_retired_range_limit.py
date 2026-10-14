@@ -44,8 +44,14 @@ test = r'''    #[test]
         assert_eq!(byte, [b'Z']);
 
         let device = filesystem.into_device();
-        let mut remount_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
-        let mut remounted = PhoenixVfs::mount(device, &mut remount_buffer).unwrap();
+        let mut first_superblock_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut second_superblock_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut remounted = PhoenixVfs::mount(
+            device,
+            &mut first_superblock_buffer,
+            &mut second_superblock_buffer,
+        )
+        .unwrap();
         assert_eq!(remounted.metadata(NodeId(file.0)).unwrap().length, LARGE_BYTES as u64);
         assert_eq!(remounted.read_node(file, rewrite_offset, &mut byte).unwrap(), 1);
         assert_eq!(byte, [b'Z']);

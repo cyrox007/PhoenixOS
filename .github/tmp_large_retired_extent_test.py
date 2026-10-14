@@ -3,6 +3,18 @@ from pathlib import Path
 p = Path('crates/phoenix-fs/src/lib.rs')
 s = p.read_text()
 
+module_header = '''#[cfg(test)]
+mod tests {
+    use super::*;'''
+module_header_with_std = '''#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use super::*;'''
+if module_header_with_std not in s:
+    assert module_header in s
+    s = s.replace(module_header, module_header_with_std, 1)
+
 for name in [
     'phoenix_vfs_shrinks_existing_file_and_remounts',
     'phoenix_vfs_truncates_existing_file_to_zero_and_remounts',

@@ -2,7 +2,10 @@
 
 use core::cell::RefCell;
 use phoenix_block::{BlockDevice, BlockError};
-use phoenix_vfs::{FileSystem, NodeId, NodeKind, NodeMetadata, VfsError};
+use phoenix_vfs::{
+    DirectoryCursor, DirectoryEntry, DirectoryRead, FileSystem, NodeId, NodeKind, NodeMetadata,
+    VfsError,
+};
 
 pub const FILESYSTEM_BLOCK_SIZE: usize = 4096;
 pub const SUPERBLOCK_COPY_COUNT: u64 = 2;
@@ -836,6 +839,59 @@ pub fn lookup_directory_entry<D: BlockDevice>(
     )?;
 
     result.ok_or(PhoenixFsError::DirectoryEntryNotFound)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectoryReadResult {
+    pub entry_id: u64,
+    pub target_object_id: u64,
+    pub target_type: ObjectType,
+    pub name_bytes: usize,
+}
+
+pub fn read_next_directory_entry<D: BlockDevice>(
+    device: &mut D,
+    root_block: u64,
+    directory_object_id: u64,
+    after_entry_id: u64,
+    maximum_generation: u64,
+    node_buffer: &mut [u8; FILESYSTEM_BLOCK_SIZE],
+    name_buffer: &mut [u8],
+) -> Result<Option<DirectoryReadResult>, PhoenixFsError> {
+    if directory_object_id == 0 {
+        return Err(PhoenixFsError::InvalidObjectId);
+    }
+
+    let mut result = None;
+    scan_object_tree_records(
+        device,
+        root_block,
+        maximum_generation,
+        node_buffer,
+        |key, value| {
+            if key.object_id != directory_object_id
+                || key.kind != ObjectRecordKind::DirectoryEntry
+                || key.offset <= after_entry_id
+            {
+                return Ok(false);
+            }
+
+            let (entry, name) = DirectoryEntryValue::decode(value)?;
+            if name_buffer.len() < name.len() {
+                return Err(PhoenixFsError::BufferSize);
+            }
+            name_buffer[..name.len()].copy_from_slice(name.as_bytes());
+            result = Some(DirectoryReadResult {
+                entry_id: key.offset,
+                target_object_id: entry.target_object_id,
+                target_type: entry.target_type,
+                name_bytes: name.len(),
+            });
+            Ok(true)
+        },
+    )?;
+
+    Ok(result)
 }
 
 fn ensure_object_has_no_payload_records<D: BlockDevice>(
@@ -8680,6 +8736,59 @@ impl<D: BlockDevice> FileSystem for PhoenixVfs<D> {
         Ok(NodeId(entry.target_object_id))
     }
 
+    fn read_directory_entry(
+        &self,
+        directory: NodeId,
+        cursor: DirectoryCursor,
+        name_buffer: &mut [u8],
+    ) -> Result<DirectoryRead, VfsError> {
+        let metadata = self.metadata(directory)?;
+        if metadata.kind != NodeKind::Directory {
+            return Err(VfsError::NotDirectory);
+        }
+
+        let mut device = self
+            .device
+            .try_borrow_mut()
+            .map_err(|_| VfsError::Storage)?;
+        let mut node_buffer = self
+            .node_buffer
+            .try_borrow_mut()
+            .map_err(|_| VfsError::Storage)?;
+
+        let next = read_next_directory_entry(
+            &mut *device,
+            self.active.superblock.roots.object_tree,
+            directory.0,
+            cursor.0,
+            self.active.superblock.generation,
+            &mut *node_buffer,
+            name_buffer,
+        );
+
+        let next = match next {
+            Ok(next) => next,
+            Err(PhoenixFsError::BufferSize) => return Err(VfsError::BufferTooSmall),
+            Err(error) => return Err(map_phoenix_fs_to_vfs(error)),
+        };
+        let Some(next) = next else {
+            return Ok(DirectoryRead::end(cursor));
+        };
+
+        let kind = match next.target_type {
+            ObjectType::File => NodeKind::File,
+            ObjectType::Directory => NodeKind::Directory,
+        };
+        Ok(DirectoryRead {
+            entry: Some(DirectoryEntry {
+                node: NodeId(next.target_object_id),
+                kind,
+                name_length: next.name_bytes,
+            }),
+            next_cursor: DirectoryCursor(next.entry_id),
+        })
+    }
+
     fn create_node(
         &mut self,
         parent: NodeId,
@@ -9644,6 +9753,78 @@ mod tests {
         let mut remounted_sparse = [0xFF_u8; 6];
         assert_eq!(remounted.read_node(empty, 0, &mut remounted_sparse), Ok(6));
         assert_eq!(&remounted_sparse, b"\0\0\0\0ok");
+    }
+
+    #[test]
+    fn phoenix_vfs_enumerates_directory_entries_and_remounts() {
+        use phoenix_vfs::{DirectoryCursor, FileSystem, NodeKind, VfsError};
+
+        let device = MemoryBlockDevice::<512, 256>::new();
+        let mut format_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut filesystem =
+            PhoenixVfs::format_new(device, VOLUME_ID, 77, &mut format_buffer).unwrap();
+        let root = filesystem.root_node().unwrap();
+        let alpha = filesystem
+            .create_node(root, b"alpha.txt", NodeKind::File)
+            .unwrap();
+        let docs = filesystem
+            .create_node(root, b"docs", NodeKind::Directory)
+            .unwrap();
+
+        let mut name = [0_u8; 32];
+        let first = filesystem
+            .read_directory_entry(root, DirectoryCursor::START, &mut name)
+            .unwrap();
+        let first_entry = first.entry.unwrap();
+        assert_eq!(first_entry.node, alpha);
+        assert_eq!(first_entry.kind, NodeKind::File);
+        assert_eq!(&name[..first_entry.name_length], b"alpha.txt");
+
+        name.fill(0);
+        let second = filesystem
+            .read_directory_entry(root, first.next_cursor, &mut name)
+            .unwrap();
+        let second_entry = second.entry.unwrap();
+        assert_eq!(second_entry.node, docs);
+        assert_eq!(second_entry.kind, NodeKind::Directory);
+        assert_eq!(&name[..second_entry.name_length], b"docs");
+
+        let end = filesystem
+            .read_directory_entry(root, second.next_cursor, &mut name)
+            .unwrap();
+        assert_eq!(end.entry, None);
+        assert_eq!(end.next_cursor, second.next_cursor);
+
+        let empty = filesystem
+            .read_directory_entry(docs, DirectoryCursor::START, &mut name)
+            .unwrap();
+        assert_eq!(empty.entry, None);
+        assert_eq!(
+            filesystem.read_directory_entry(alpha, DirectoryCursor::START, &mut name),
+            Err(VfsError::NotDirectory)
+        );
+
+        let mut short = [0_u8; 3];
+        assert_eq!(
+            filesystem.read_directory_entry(root, DirectoryCursor::START, &mut short),
+            Err(VfsError::BufferTooSmall)
+        );
+
+        let mut device = filesystem.into_device();
+        let mut first_superblock = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let mut second_superblock = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let active =
+            read_active_superblock(&mut device, &mut first_superblock, &mut second_superblock)
+                .unwrap();
+        let remounted = PhoenixVfs::new(device, active).unwrap();
+
+        name.fill(0);
+        let remounted_first = remounted
+            .read_directory_entry(root, DirectoryCursor::START, &mut name)
+            .unwrap();
+        let remounted_entry = remounted_first.entry.unwrap();
+        assert_eq!(remounted_entry.node, alpha);
+        assert_eq!(&name[..remounted_entry.name_length], b"alpha.txt");
     }
 
     #[test]

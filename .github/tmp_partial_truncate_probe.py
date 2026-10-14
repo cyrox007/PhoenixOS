@@ -200,7 +200,7 @@ shrink_source = replace_once(
 
 if 'fn commit_shrink_single_extent_file<D: BlockDevice>(' not in text:
     truncate_anchor = '#[allow(clippy::too_many_arguments)]\npub fn commit_truncate_single_extent_file_to_zero<D: BlockDevice>('
-    insertion = '#[allow(clippy::too_many_arguments)]\npub ' + shrink_source + '\n\n'
+    insertion = '#[allow(clippy::too_many_arguments)]\n' + shrink_source + '\n\n'
     text = replace_once(text, truncate_anchor, insertion + truncate_anchor, 'вставка транзакции частичного усечения')
 
 truncate_start, truncate_end, _ = function_span(text, 'truncate_node')
@@ -338,7 +338,10 @@ if 'fn phoenix_vfs_shrinks_existing_file_and_remounts()' not in text:
             remounted.read_node(file, 0, &mut output).unwrap(),
             FILESYSTEM_BLOCK_SIZE + 1
         );
-        assert_eq!(&output[..FILESYSTEM_BLOCK_SIZE + 1], &input[..FILESYSTEM_BLOCK_SIZE + 1]);
+        assert_eq!(
+            &output[..FILESYSTEM_BLOCK_SIZE + 1],
+            &input[..FILESYSTEM_BLOCK_SIZE + 1]
+        );
     }
 
 '''

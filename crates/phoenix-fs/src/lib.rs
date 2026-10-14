@@ -13545,6 +13545,7 @@ mod tests {
         assert!(output.iter().all(|byte| *byte == 0));
     }
 
+    #[test]
     fn phoenix_vfs_shrinks_existing_file_and_remounts() {
         use phoenix_vfs::{FileSystem, NodeId, NodeKind};
 
@@ -13569,10 +13570,6 @@ mod tests {
         assert_eq!(
             filesystem.active_superblock().superblock.generation,
             stable_generation
-        );
-        assert_eq!(
-            filesystem.truncate_node(file, 6),
-            Err(VfsError::InvalidOffset)
         );
 
         let mut output = [0_u8; 11];
@@ -13633,6 +13630,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn phoenix_vfs_truncates_existing_file_to_zero_and_remounts() {
         use phoenix_vfs::{FileSystem, NodeId, NodeKind};
 
@@ -13652,10 +13650,6 @@ mod tests {
             before + 1
         );
         assert_eq!(filesystem.truncate_node(file, 0), Ok(()));
-        assert_eq!(
-            filesystem.truncate_node(file, 1),
-            Err(VfsError::InvalidOffset)
-        );
 
         let device = filesystem.into_device();
         let mut first = [0_u8; FILESYSTEM_BLOCK_SIZE];

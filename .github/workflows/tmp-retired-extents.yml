@@ -16,7 +16,9 @@ jobs:
         with:
           components: rustfmt
       - name: Применить изменения
-        run: python .github/tmp_retired_extents.py
+        run: |
+          python .github/tmp_retired_extents.py
+          python .github/tmp_retired_extents_fix.py
       - name: Форматировать код
         run: cargo fmt --all
       - name: Проверить форматирование
@@ -27,7 +29,7 @@ jobs:
         run: cargo test -p phoenix-vfs
       - name: Подготовить итоговый коммит
         run: |
-          rm .github/tmp_retired_extents.py .github/workflows/tmp-retired-extents.yml
+          rm .github/tmp_retired_extents.py .github/tmp_retired_extents_fix.py .github/workflows/tmp-retired-extents.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add crates/phoenix-fs/src/lib.rs ROADMAP.md STATUS.md .github

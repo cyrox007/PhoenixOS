@@ -1643,6 +1643,157 @@ pub fn plan_cow_allocation(
     Err(PhoenixFsError::NoFreeSpace)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SplitCowAllocationPlan {
+    pub data: FreeSpaceExtent,
+    pub metadata: FreeSpaceExtent,
+}
+
+pub fn plan_split_cow_allocation(
+    free_space_leaf: &[u8],
+    total_blocks: u64,
+    data_blocks: u64,
+    metadata_blocks: u64,
+) -> Result<SplitCowAllocationPlan, PhoenixFsError> {
+    if data_blocks == 0 || metadata_blocks == 0 {
+        return Err(PhoenixFsError::InvalidFreeSpaceRange);
+    }
+
+    let node = validate_free_space_leaf(free_space_leaf, total_blocks)?;
+    for data_index in 0..node.item_count as usize {
+        let data_source = free_space_extent_at(free_space_leaf, data_index)?;
+        if data_source.block_count < data_blocks {
+            continue;
+        }
+
+        let data = FreeSpaceExtent::new(data_source.start_block, data_blocks);
+        let data_end = data.end_block_exclusive()?;
+        let same_extent_remaining = data_source.block_count - data_blocks;
+        if same_extent_remaining >= metadata_blocks {
+            return Ok(SplitCowAllocationPlan {
+                data,
+                metadata: FreeSpaceExtent::new(data_end, metadata_blocks),
+            });
+        }
+
+        for metadata_index in 0..node.item_count as usize {
+            if metadata_index == data_index {
+                continue;
+            }
+
+            let metadata_source = free_space_extent_at(free_space_leaf, metadata_index)?;
+            if metadata_source.block_count < metadata_blocks {
+                continue;
+            }
+
+            return Ok(SplitCowAllocationPlan {
+                data,
+                metadata: FreeSpaceExtent::new(metadata_source.start_block, metadata_blocks),
+            });
+        }
+    }
+
+    Err(PhoenixFsError::NoFreeSpace)
+}
+
+pub fn materialize_free_space_leaf_after_split_allocation(
+    current: &[u8],
+    destination: &mut [u8],
+    total_blocks: u64,
+    new_generation: u64,
+    new_block_number: u64,
+    plan: SplitCowAllocationPlan,
+) -> Result<TreeNodeHeader, PhoenixFsError> {
+    let current_node = validate_free_space_leaf(current, total_blocks)?;
+    if destination.len() != FILESYSTEM_BLOCK_SIZE {
+        return Err(PhoenixFsError::BufferSize);
+    }
+    if new_generation <= current_node.metadata.generation {
+        return Err(PhoenixFsError::GenerationSequence);
+    }
+    if !plan.metadata.contains(new_block_number)? {
+        return Err(PhoenixFsError::AllocationTargetOutsideRange);
+    }
+
+    let expected = plan_split_cow_allocation(
+        current,
+        total_blocks,
+        plan.data.block_count,
+        plan.metadata.block_count,
+    )?;
+    if expected != plan {
+        return Err(PhoenixFsError::StaleAllocationPlan);
+    }
+
+    let allocations = if plan.data.start_block <= plan.metadata.start_block {
+        [plan.data, plan.metadata]
+    } else {
+        [plan.metadata, plan.data]
+    };
+
+    destination.fill(0);
+    let entries_start = TreeNodeHeader::entries_offset();
+    let mut write_index = 0_usize;
+
+    for index in 0..current_node.item_count as usize {
+        let source = free_space_extent_at(current, index)?;
+        let source_end = source.end_block_exclusive()?;
+        let mut cursor = source.start_block;
+
+        for allocation in allocations {
+            let allocation_end = allocation.end_block_exclusive()?;
+            if allocation_end <= source.start_block || allocation.start_block >= source_end {
+                continue;
+            }
+            if allocation.start_block < cursor || allocation_end > source_end {
+                return Err(PhoenixFsError::StaleAllocationPlan);
+            }
+
+            if allocation.start_block > cursor {
+                write_free_space_extent(
+                    destination,
+                    write_index,
+                    FreeSpaceExtent::new(cursor, allocation.start_block - cursor),
+                )?;
+                write_index += 1;
+            }
+            cursor = allocation_end;
+        }
+
+        if cursor < source_end {
+            write_free_space_extent(
+                destination,
+                write_index,
+                FreeSpaceExtent::new(cursor, source_end - cursor),
+            )?;
+            write_index += 1;
+        }
+    }
+
+    let entries_bytes = write_index
+        .checked_mul(FREE_SPACE_RECORD_SIZE)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let node = TreeNodeHeader::new(
+        MetadataKind::FreeSpaceTree,
+        new_generation,
+        new_block_number,
+        0,
+        write_index as u32,
+        entries_bytes as u32,
+    )?;
+    node.seal(destination)?;
+    validate_free_space_leaf(destination, total_blocks)?;
+
+    let data_end = entries_start
+        .checked_add(entries_bytes)
+        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    if destination[data_end..].iter().any(|byte| *byte != 0) {
+        return Err(PhoenixFsError::InvalidReservedField);
+    }
+
+    Ok(node)
+}
+
 pub fn materialize_free_space_leaf_after_allocation(
     current: &[u8],
     destination: &mut [u8],
@@ -7625,17 +7776,19 @@ pub fn commit_rewrite_single_extent_range<D: BlockDevice>(
     let data_blocks = old_extent.block_count;
     let metadata_blocks = u64::try_from(metadata_path.node_count() + 1)
         .map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
-    let requested_blocks = data_blocks
-        .checked_add(metadata_blocks)
-        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
-    let allocation = plan_cow_allocation(current_free_space, total_blocks, requested_blocks)?;
+    let allocation = plan_split_cow_allocation(
+        current_free_space,
+        total_blocks,
+        data_blocks,
+        metadata_blocks,
+    )?;
     let generation = current
         .superblock
         .generation
         .checked_add(1)
         .ok_or(PhoenixFsError::ArithmeticOverflow)?;
 
-    let data_start_block = allocation.allocated.start_block;
+    let data_start_block = allocation.data.start_block;
     let written_blocks = rewrite_data_extent_range(
         device,
         old_extent,
@@ -7664,9 +7817,7 @@ pub fn commit_rewrite_single_extent_range<D: BlockDevice>(
     validate_object_record_value(extent_key, &extent_bytes, total_blocks)?;
 
     read_filesystem_block(device, metadata_path.leaf_block, object_buffer)?;
-    let object_block = data_start_block
-        .checked_add(data_blocks)
-        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let object_block = allocation.metadata.start_block;
     let leaf = materialize_object_leaf_with_two_replacements(
         object_buffer,
         object_copy_buffer,
@@ -7716,11 +7867,11 @@ pub fn commit_rewrite_single_extent_range<D: BlockDevice>(
     if free_space_block
         .checked_add(1)
         .ok_or(PhoenixFsError::ArithmeticOverflow)?
-        != allocation.allocated.end_block_exclusive()?
+        != allocation.metadata.end_block_exclusive()?
     {
         return Err(PhoenixFsError::InvalidTransactionRoots);
     }
-    materialize_free_space_leaf_after_allocation(
+    materialize_free_space_leaf_after_split_allocation(
         current_free_space,
         next_free_space,
         total_blocks,
@@ -7767,7 +7918,7 @@ pub fn commit_rewrite_single_extent_range<D: BlockDevice>(
             extents
         },
         retired_extent_count: 1,
-        allocated: allocation.allocated,
+        allocated: allocation.metadata,
     })
 }
 
@@ -7858,17 +8009,19 @@ pub fn commit_shrink_single_extent_file<D: BlockDevice>(
     let data_blocks = rounded_bytes / block_size;
     let metadata_blocks = u64::try_from(metadata_path.node_count() + 1)
         .map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
-    let requested_blocks = data_blocks
-        .checked_add(metadata_blocks)
-        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
-    let allocation = plan_cow_allocation(current_free_space, total_blocks, requested_blocks)?;
+    let allocation = plan_split_cow_allocation(
+        current_free_space,
+        total_blocks,
+        data_blocks,
+        metadata_blocks,
+    )?;
     let generation = current
         .superblock
         .generation
         .checked_add(1)
         .ok_or(PhoenixFsError::ArithmeticOverflow)?;
 
-    let data_start_block = allocation.allocated.start_block;
+    let data_start_block = allocation.data.start_block;
     let written_blocks = copy_truncated_data_extent(
         device,
         old_extent,
@@ -7896,9 +8049,7 @@ pub fn commit_shrink_single_extent_file<D: BlockDevice>(
     validate_object_record_value(extent_key, &extent_bytes, total_blocks)?;
 
     read_filesystem_block(device, metadata_path.leaf_block, object_buffer)?;
-    let object_block = data_start_block
-        .checked_add(data_blocks)
-        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let object_block = allocation.metadata.start_block;
     let leaf = materialize_object_leaf_with_two_replacements(
         object_buffer,
         object_copy_buffer,
@@ -7948,11 +8099,11 @@ pub fn commit_shrink_single_extent_file<D: BlockDevice>(
     if free_space_block
         .checked_add(1)
         .ok_or(PhoenixFsError::ArithmeticOverflow)?
-        != allocation.allocated.end_block_exclusive()?
+        != allocation.metadata.end_block_exclusive()?
     {
         return Err(PhoenixFsError::InvalidTransactionRoots);
     }
-    materialize_free_space_leaf_after_allocation(
+    materialize_free_space_leaf_after_split_allocation(
         current_free_space,
         next_free_space,
         total_blocks,
@@ -7999,7 +8150,7 @@ pub fn commit_shrink_single_extent_file<D: BlockDevice>(
             extents
         },
         retired_extent_count: 1,
-        allocated: allocation.allocated,
+        allocated: allocation.metadata,
     })
 }
 
@@ -8091,17 +8242,19 @@ pub fn commit_extend_single_extent_file<D: BlockDevice>(
     let data_blocks = rounded_bytes / block_size;
     let metadata_blocks = u64::try_from(metadata_path.node_count() + 1)
         .map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
-    let requested_blocks = data_blocks
-        .checked_add(metadata_blocks)
-        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
-    let allocation = plan_cow_allocation(current_free_space, total_blocks, requested_blocks)?;
+    let allocation = plan_split_cow_allocation(
+        current_free_space,
+        total_blocks,
+        data_blocks,
+        metadata_blocks,
+    )?;
     let generation = current
         .superblock
         .generation
         .checked_add(1)
         .ok_or(PhoenixFsError::ArithmeticOverflow)?;
 
-    let data_start_block = allocation.allocated.start_block;
+    let data_start_block = allocation.data.start_block;
     let written_blocks = copy_extended_data_extent(
         device,
         old_extent,
@@ -8137,9 +8290,7 @@ pub fn commit_extend_single_extent_file<D: BlockDevice>(
     validate_object_record_value(extent_key, &extent_bytes, total_blocks)?;
 
     read_filesystem_block(device, metadata_path.leaf_block, object_buffer)?;
-    let object_block = data_start_block
-        .checked_add(data_blocks)
-        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let object_block = allocation.metadata.start_block;
     let leaf = materialize_object_leaf_with_two_replacements(
         object_buffer,
         object_copy_buffer,
@@ -8189,11 +8340,11 @@ pub fn commit_extend_single_extent_file<D: BlockDevice>(
     if free_space_block
         .checked_add(1)
         .ok_or(PhoenixFsError::ArithmeticOverflow)?
-        != allocation.allocated.end_block_exclusive()?
+        != allocation.metadata.end_block_exclusive()?
     {
         return Err(PhoenixFsError::InvalidTransactionRoots);
     }
-    materialize_free_space_leaf_after_allocation(
+    materialize_free_space_leaf_after_split_allocation(
         current_free_space,
         next_free_space,
         total_blocks,
@@ -8240,7 +8391,7 @@ pub fn commit_extend_single_extent_file<D: BlockDevice>(
             extents
         },
         retired_extent_count: 1,
-        allocated: allocation.allocated,
+        allocated: allocation.metadata,
     })
 }
 
@@ -8544,17 +8695,19 @@ pub fn commit_write_empty_file<D: BlockDevice>(
     let data_blocks = u64::try_from(data_blocks).map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
     let metadata_blocks = u64::try_from(metadata_path.node_count() + 1)
         .map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
-    let requested_blocks = data_blocks
-        .checked_add(metadata_blocks)
-        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
-    let allocation = plan_cow_allocation(current_free_space, total_blocks, requested_blocks)?;
+    let allocation = plan_split_cow_allocation(
+        current_free_space,
+        total_blocks,
+        data_blocks,
+        metadata_blocks,
+    )?;
     let generation = current
         .superblock
         .generation
         .checked_add(1)
         .ok_or(PhoenixFsError::ArithmeticOverflow)?;
 
-    let data_start_block = allocation.allocated.start_block;
+    let data_start_block = allocation.data.start_block;
     let written_blocks = write_data_extent(device, data_start_block, data, data_buffer)?;
     if written_blocks != data_blocks {
         return Err(PhoenixFsError::InvalidExtent);
@@ -8576,9 +8729,7 @@ pub fn commit_write_empty_file<D: BlockDevice>(
     validate_object_record_value(extent_key, &extent_bytes, total_blocks)?;
 
     read_filesystem_block(device, metadata_path.leaf_block, object_buffer)?;
-    let object_block = data_start_block
-        .checked_add(data_blocks)
-        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let object_block = allocation.metadata.start_block;
     let leaf = materialize_object_leaf_with_replacement_and_insertion(
         object_buffer,
         object_copy_buffer,
@@ -8628,11 +8779,11 @@ pub fn commit_write_empty_file<D: BlockDevice>(
     if free_space_block
         .checked_add(1)
         .ok_or(PhoenixFsError::ArithmeticOverflow)?
-        != allocation.allocated.end_block_exclusive()?
+        != allocation.metadata.end_block_exclusive()?
     {
         return Err(PhoenixFsError::InvalidTransactionRoots);
     }
-    materialize_free_space_leaf_after_allocation(
+    materialize_free_space_leaf_after_split_allocation(
         current_free_space,
         next_free_space,
         total_blocks,
@@ -8661,7 +8812,7 @@ pub fn commit_write_empty_file<D: BlockDevice>(
         retired_count,
         retired_extents: [FreeSpaceExtent::new(0, 0); MAX_OBJECT_TRANSACTION_RETIRED_EXTENTS],
         retired_extent_count: 0,
-        allocated: allocation.allocated,
+        allocated: allocation.metadata,
     })
 }
 
@@ -8737,17 +8888,19 @@ pub fn commit_extend_empty_file<D: BlockDevice>(
         / block_size;
     let metadata_blocks = u64::try_from(metadata_path.node_count() + 1)
         .map_err(|_| PhoenixFsError::ArithmeticOverflow)?;
-    let requested_blocks = data_blocks
-        .checked_add(metadata_blocks)
-        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
-    let allocation = plan_cow_allocation(current_free_space, total_blocks, requested_blocks)?;
+    let allocation = plan_split_cow_allocation(
+        current_free_space,
+        total_blocks,
+        data_blocks,
+        metadata_blocks,
+    )?;
     let generation = current
         .superblock
         .generation
         .checked_add(1)
         .ok_or(PhoenixFsError::ArithmeticOverflow)?;
 
-    let data_start_block = allocation.allocated.start_block;
+    let data_start_block = allocation.data.start_block;
     let written_blocks = write_zero_data_extent(device, data_start_block, new_length, data_buffer)?;
     if written_blocks != data_blocks {
         return Err(PhoenixFsError::InvalidExtent);
@@ -8777,9 +8930,7 @@ pub fn commit_extend_empty_file<D: BlockDevice>(
     validate_object_record_value(extent_key, &extent_bytes, total_blocks)?;
 
     read_filesystem_block(device, metadata_path.leaf_block, object_buffer)?;
-    let object_block = data_start_block
-        .checked_add(data_blocks)
-        .ok_or(PhoenixFsError::ArithmeticOverflow)?;
+    let object_block = allocation.metadata.start_block;
     let leaf = materialize_object_leaf_with_replacement_and_insertion(
         object_buffer,
         object_copy_buffer,
@@ -8829,11 +8980,11 @@ pub fn commit_extend_empty_file<D: BlockDevice>(
     if free_space_block
         .checked_add(1)
         .ok_or(PhoenixFsError::ArithmeticOverflow)?
-        != allocation.allocated.end_block_exclusive()?
+        != allocation.metadata.end_block_exclusive()?
     {
         return Err(PhoenixFsError::InvalidTransactionRoots);
     }
-    materialize_free_space_leaf_after_allocation(
+    materialize_free_space_leaf_after_split_allocation(
         current_free_space,
         next_free_space,
         total_blocks,
@@ -8862,7 +9013,7 @@ pub fn commit_extend_empty_file<D: BlockDevice>(
         retired_count,
         retired_extents: [FreeSpaceExtent::new(0, 0); MAX_OBJECT_TRANSACTION_RETIRED_EXTENTS],
         retired_extent_count: 0,
-        allocated: allocation.allocated,
+        allocated: allocation.metadata,
     })
 }
 
@@ -12999,6 +13150,43 @@ mod tests {
         assert_eq!(
             validate_free_space_leaf(&block, 64),
             Err(PhoenixFsError::FreeSpaceRangesNotCanonical)
+        );
+    }
+
+    #[test]
+    fn split_cow_allocation_uses_fragmented_ranges_for_data_and_metadata() {
+        let mut block = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        write_free_space_extent(&mut block, 0, FreeSpaceExtent::new(10, 8)).unwrap();
+        write_free_space_extent(&mut block, 1, FreeSpaceExtent::new(30, 3)).unwrap();
+        TreeNodeHeader::new(
+            MetadataKind::FreeSpaceTree,
+            5,
+            9,
+            0,
+            2,
+            (2 * FREE_SPACE_RECORD_SIZE) as u32,
+        )
+        .unwrap()
+        .seal(&mut block)
+        .unwrap();
+
+        assert_eq!(
+            plan_cow_allocation(&block, 64, 9),
+            Err(PhoenixFsError::NoFreeSpace)
+        );
+
+        let plan = plan_split_cow_allocation(&block, 64, 6, 3).unwrap();
+        assert_eq!(plan.data, FreeSpaceExtent::new(10, 6));
+        assert_eq!(plan.metadata, FreeSpaceExtent::new(30, 3));
+
+        let mut next = [0_u8; FILESYSTEM_BLOCK_SIZE];
+        let node =
+            materialize_free_space_leaf_after_split_allocation(&block, &mut next, 64, 6, 32, plan)
+                .unwrap();
+        assert_eq!(node.item_count, 1);
+        assert_eq!(
+            free_space_extent_at(&next, 0).unwrap(),
+            FreeSpaceExtent::new(16, 2)
         );
     }
 

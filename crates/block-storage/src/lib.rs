@@ -18,6 +18,7 @@ pub enum BlockError {
     InvalidBufferLength,
     OutOfRange,
     ArithmeticOverflow,
+    AccessDenied,
     ReadOnly,
     BackendFailure,
 }

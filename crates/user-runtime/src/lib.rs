@@ -3,8 +3,9 @@
 use core::arch::asm;
 
 use phoenix_syscall_abi::{
-    FILE_OPEN_CREATE, FILE_OPEN_READ, FILE_OPEN_TRUNCATE, FILE_OPEN_WRITE, FILE_SEEK_CURRENT,
-    FILE_SEEK_END, FILE_SEEK_START, FileIoArguments, FileOpenArguments, FileSeekArguments,
+    FILE_OPEN_CREATE, FILE_OPEN_READ, FILE_OPEN_TRUNCATE, FILE_OPEN_WRITE, FILE_READY_ERROR,
+    FILE_READY_HANGUP, FILE_READY_READ, FILE_READY_WRITE, FILE_SEEK_CURRENT, FILE_SEEK_END,
+    FILE_SEEK_START, FileIoArguments, FileOpenArguments, FilePollArguments, FileSeekArguments,
     IpcReceiveArguments, IpcReceiveMetadata, IpcSendArguments, PackedCapabilityHandle,
     PackedFileDescriptor, ProcessStartInfo, SYSCALL_STATUS_BAD_ARGUMENTS,
     SYSCALL_STATUS_OPERATION_NOT_READY, SYSCALL_STATUS_UNKNOWN_CALL, SyscallRequest,
@@ -121,6 +122,33 @@ pub enum SeekFrom {
     End(i64),
 }
 
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileReadyEvents(u64);
+
+impl FileReadyEvents {
+    pub const READ: Self = Self(FILE_READY_READ);
+    pub const WRITE: Self = Self(FILE_READY_WRITE);
+    pub const ERROR: Self = Self(FILE_READY_ERROR);
+    pub const HANGUP: Self = Self(FILE_READY_HANGUP);
+
+    pub const fn bits(self) -> u64 {
+        self.0
+    }
+
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    pub const fn from_bits(bits: u64) -> Self {
+        Self(bits)
+    }
+}
+
 pub fn file_open(path: &str, options: OpenOptions) -> Result<PackedFileDescriptor, SyscallError> {
     let value = invoke(build_file_open_request(path, options))?;
     Ok(PackedFileDescriptor::from_raw(value))
@@ -145,6 +173,17 @@ pub fn file_seek(descriptor: PackedFileDescriptor, from: SeekFrom) -> Result<u64
 
 pub fn file_close(descriptor: PackedFileDescriptor) -> Result<(), SyscallError> {
     invoke(SyscallRequest::file_close(descriptor)).map(|_| ())
+}
+
+pub fn file_poll(
+    descriptor: PackedFileDescriptor,
+    events: FileReadyEvents,
+) -> Result<FileReadyEvents, SyscallError> {
+    let ready = invoke(SyscallRequest::file_poll(FilePollArguments {
+        descriptor,
+        events: events.bits(),
+    }))?;
+    Ok(FileReadyEvents::from_bits(ready))
 }
 
 #[unsafe(no_mangle)]
@@ -202,6 +241,17 @@ pub extern "C" fn phoenix_file_seek(
 #[unsafe(no_mangle)]
 pub extern "C" fn phoenix_file_close(descriptor: PackedFileDescriptor) -> RuntimeCallResult {
     invoke_raw(SyscallRequest::file_close(descriptor))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn phoenix_file_poll(
+    descriptor: PackedFileDescriptor,
+    events: u64,
+) -> RuntimeCallResult {
+    invoke_raw(SyscallRequest::file_poll(FilePollArguments {
+        descriptor,
+        events,
+    }))
 }
 
 pub fn ipc_send(
@@ -415,6 +465,22 @@ mod tests {
         assert_eq!(
             write.arguments,
             [descriptor.raw(), write_buffer.as_ptr() as u64, 8, 0, 0, 0]
+        );
+
+        let poll = SyscallRequest::file_poll(FilePollArguments {
+            descriptor,
+            events: FileReadyEvents::READ.union(FileReadyEvents::WRITE).bits(),
+        });
+        assert_eq!(
+            poll.arguments,
+            [
+                descriptor.raw(),
+                FILE_READY_READ | FILE_READY_WRITE,
+                0,
+                0,
+                0,
+                0
+            ]
         );
     }
 

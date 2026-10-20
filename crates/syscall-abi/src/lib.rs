@@ -10,6 +10,7 @@ pub const SYSCALL_FILE_READ: u64 = 0x111;
 pub const SYSCALL_FILE_WRITE: u64 = 0x112;
 pub const SYSCALL_FILE_SEEK: u64 = 0x113;
 pub const SYSCALL_FILE_CLOSE: u64 = 0x114;
+pub const SYSCALL_FILE_POLL: u64 = 0x115;
 
 pub const SYSCALL_STATUS_UNKNOWN_CALL: u32 = 1;
 pub const SYSCALL_STATUS_BAD_ARGUMENTS: u32 = 2;
@@ -23,6 +24,12 @@ pub const FILE_OPEN_TRUNCATE: u64 = 1 << 3;
 pub const FILE_SEEK_START: u64 = 0;
 pub const FILE_SEEK_CURRENT: u64 = 1;
 pub const FILE_SEEK_END: u64 = 2;
+pub const FILE_READY_READ: u64 = 1 << 0;
+pub const FILE_READY_WRITE: u64 = 1 << 1;
+pub const FILE_READY_ERROR: u64 = 1 << 2;
+pub const FILE_READY_HANGUP: u64 = 1 << 3;
+pub const FILE_READY_KNOWN: u64 =
+    FILE_READY_READ | FILE_READY_WRITE | FILE_READY_ERROR | FILE_READY_HANGUP;
 pub const NO_TRANSFERRED_CAPABILITY: u64 = u64::MAX;
 pub const PROCESS_START_ABI_VERSION: u32 = 0;
 pub const PROCESS_START_MAX_ENTRIES: u64 = 256;
@@ -202,6 +209,18 @@ pub struct FileSeekArguments {
     pub origin: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FilePollArguments {
+    pub descriptor: PackedFileDescriptor,
+    pub events: u64,
+}
+
+impl FilePollArguments {
+    pub const fn registers(self) -> [u64; SYSCALL_ARGUMENT_COUNT] {
+        [self.descriptor.raw(), self.events, 0, 0, 0, 0]
+    }
+}
+
 impl FileSeekArguments {
     pub const fn registers(self) -> [u64; SYSCALL_ARGUMENT_COUNT] {
         [
@@ -373,6 +392,10 @@ impl SyscallRequest {
         Self::new(SYSCALL_FILE_CLOSE, [descriptor.raw(), 0, 0, 0, 0, 0])
     }
 
+    pub const fn file_poll(arguments: FilePollArguments) -> Self {
+        Self::new(SYSCALL_FILE_POLL, arguments.registers())
+    }
+
     pub const fn argument(&self, index: usize) -> Option<u64> {
         if index < SYSCALL_ARGUMENT_COUNT {
             Some(self.arguments[index])
@@ -542,6 +565,21 @@ mod tests {
         assert_eq!(
             SyscallRequest::file_close(descriptor).arguments,
             [descriptor.raw(), 0, 0, 0, 0, 0]
+        );
+        assert_eq!(
+            SyscallRequest::file_poll(FilePollArguments {
+                descriptor,
+                events: FILE_READY_READ | FILE_READY_WRITE,
+            })
+            .arguments,
+            [
+                descriptor.raw(),
+                FILE_READY_READ | FILE_READY_WRITE,
+                0,
+                0,
+                0,
+                0
+            ]
         );
     }
 

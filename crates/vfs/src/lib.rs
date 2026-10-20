@@ -282,6 +282,10 @@ impl<'a, const CAPACITY: usize> FileSystemRegistry<'a, CAPACITY> {
         Ok(())
     }
 
+    pub fn poll_node(&self, node: VfsNode) -> Result<IoEvents, FileSystemRegistryError> {
+        Ok(self.filesystem(node.filesystem)?.poll_node(node.node)?)
+    }
+
     pub fn read_node(
         &self,
         node: VfsNode,
@@ -361,6 +365,43 @@ pub struct NodeMetadata {
     pub length: u64,
 }
 
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IoEvents(u32);
+
+impl IoEvents {
+    pub const NONE: Self = Self(0);
+    pub const READABLE: Self = Self(1 << 0);
+    pub const WRITABLE: Self = Self(1 << 1);
+    pub const ERROR: Self = Self(1 << 2);
+    pub const HANGUP: Self = Self(1 << 3);
+    pub const KNOWN: u32 = Self::READABLE.0 | Self::WRITABLE.0 | Self::ERROR.0 | Self::HANGUP.0;
+
+    pub const fn from_bits(bits: u32) -> Option<Self> {
+        if bits & !Self::KNOWN == 0 {
+            Some(Self(bits))
+        } else {
+            None
+        }
+    }
+
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    pub const fn intersection(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DirectoryCursor(pub u64);
 
@@ -416,6 +457,12 @@ pub trait FileSystem {
     ) -> Result<NodeId, VfsError>;
     fn remove_node(&mut self, _parent: NodeId, _name: &[u8]) -> Result<(), VfsError> {
         Err(VfsError::ReadOnly)
+    }
+    fn poll_node(&self, node: NodeId) -> Result<IoEvents, VfsError> {
+        if self.metadata(node)?.kind != NodeKind::File {
+            return Err(VfsError::IsDirectory);
+        }
+        Ok(IoEvents::READABLE.union(IoEvents::WRITABLE))
     }
     fn read_node(&self, node: NodeId, offset: u64, output: &mut [u8]) -> Result<usize, VfsError>;
     fn write_node(&mut self, node: NodeId, offset: u64, data: &[u8]) -> Result<usize, VfsError>;
@@ -616,6 +663,28 @@ impl<const CAPACITY: usize> DescriptorTable<CAPACITY> {
         Ok(self.file(descriptor)?.node)
     }
 
+    pub fn poll<F: FileSystem + ?Sized>(
+        &self,
+        filesystem: &F,
+        descriptor: FileDescriptor,
+        requested: IoEvents,
+    ) -> Result<IoEvents, DescriptorError> {
+        let file = self.file(descriptor)?;
+        let available = filesystem.poll_node(file.node.node)?;
+        Ok(self.filter_ready(file, requested, available))
+    }
+
+    pub fn poll_vfs<'a, const FILESYSTEMS: usize>(
+        &self,
+        filesystems: &FileSystemRegistry<'a, FILESYSTEMS>,
+        descriptor: FileDescriptor,
+        requested: IoEvents,
+    ) -> Result<IoEvents, DescriptorError> {
+        let file = self.file(descriptor)?;
+        let available = filesystems.poll_node(file.node)?;
+        Ok(self.filter_ready(file, requested, available))
+    }
+
     pub fn set_position(
         &mut self,
         descriptor: FileDescriptor,
@@ -737,6 +806,17 @@ impl<const CAPACITY: usize> DescriptorTable<CAPACITY> {
             .checked_add(written as u64)
             .ok_or(DescriptorError::OffsetOverflow)?;
         Ok(written)
+    }
+
+    fn filter_ready(&self, file: &OpenFile, requested: IoEvents, available: IoEvents) -> IoEvents {
+        let mut allowed = IoEvents::ERROR.union(IoEvents::HANGUP);
+        if file.access.can_read() {
+            allowed = allowed.union(IoEvents::READABLE);
+        }
+        if file.access.can_write() {
+            allowed = allowed.union(IoEvents::WRITABLE);
+        }
+        requested.intersection(available).intersection(allowed)
     }
 
     fn open_identity(
@@ -1619,5 +1699,33 @@ mod tests {
             Err(DescriptorError::OffsetOverflow)
         );
         assert_eq!(descriptors.position(descriptor), Ok(5));
+    }
+    #[test]
+    fn descriptor_poll_filters_readiness_by_access_mode() {
+        let mut fs = MemoryFileSystem::<2, 16>::new();
+        let file = fs.create_file("/data").unwrap();
+        let mut descriptors = DescriptorTable::<2>::new();
+        let reader = descriptors.open(&fs, file, AccessMode::ReadOnly).unwrap();
+        let writer = descriptors.open(&fs, file, AccessMode::WriteOnly).unwrap();
+        let both = IoEvents::READABLE.union(IoEvents::WRITABLE);
+
+        assert_eq!(descriptors.poll(&fs, reader, both), Ok(IoEvents::READABLE));
+        assert_eq!(descriptors.poll(&fs, writer, both), Ok(IoEvents::WRITABLE));
+    }
+
+    #[test]
+    fn stale_descriptor_cannot_be_polled_after_slot_reuse() {
+        let mut fs = MemoryFileSystem::<3, 8>::new();
+        let first = fs.create_file("/a").unwrap();
+        let second = fs.create_file("/b").unwrap();
+        let mut descriptors = DescriptorTable::<1>::new();
+        let stale = descriptors.open(&fs, first, AccessMode::ReadOnly).unwrap();
+        descriptors.close(stale).unwrap();
+        let _current = descriptors.open(&fs, second, AccessMode::ReadOnly).unwrap();
+
+        assert_eq!(
+            descriptors.poll(&fs, stale, IoEvents::READABLE),
+            Err(DescriptorError::BadDescriptor)
+        );
     }
 }

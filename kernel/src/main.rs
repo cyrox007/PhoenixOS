@@ -28,6 +28,8 @@ use qemu::ExitCode;
 use x86_64::VirtAddr;
 use x86_64::structures::paging::{Page, PageTableFlags, Size4KiB};
 
+static USERSPACE_SMOKE_ELF: &[u8] = include_bytes!(env!("PHOENIX_USERSPACE_SMOKE"));
+
 const SYSTEM_MEMORY_RANGE_CAPACITY: usize = 256;
 const VM_TEST_ADDRESS: u64 = 0x0000_6000_0000_0000;
 const VM_TEST_VALUE: u64 = 0x5048_4f45_4e49_584f;
@@ -1985,12 +1987,13 @@ fn elf_user_execution_self_test(
         RestartPolicy, ServiceId, ServiceManager, ServiceManifest, ServiceState,
     };
 
-    const LOAD_ADDRESS: u64 = 0x0000_0000_4300_0000;
-    const STACK_ADDRESS: u64 = LOAD_ADDRESS + phoenix_process::PAGE_SIZE;
-    const CODE_OFFSET: usize = 0x100;
-    const IMAGE_SIZE: usize = phoenix_process::PAGE_SIZE as usize;
+    const STACK_ADDRESS: u64 = 0x0000_0000_4500_0000;
     const SERVICE_ID: ServiceId = ServiceId(2);
     const SERVICE_IMAGE_ID: u64 = 0x5048_4f45_4e49_5853;
+
+    if USERSPACE_SMOKE_ELF.is_empty() {
+        panic!("собранный пользовательский ELF пуст");
+    }
 
     let manifest = ServiceManifest {
         id: SERVICE_ID,
@@ -2009,11 +2012,6 @@ fn elf_user_execution_self_test(
         panic!("менеджер служб выбрал неверный ELF-образ");
     }
 
-    let user_code = arch::x86_64::syscall::user_mode_test_image();
-    if user_code.is_empty() || CODE_OFFSET + user_code.len() > IMAGE_SIZE {
-        panic!("пользовательский код не помещается в тестовый ELF64");
-    }
-
     let free_before = frames.free_frames();
     let mut space = unsafe {
         process_space::ProcessAddressSpace::<{ process_space::PROCESS_REGION_CAPACITY }>::new(
@@ -2024,33 +2022,11 @@ fn elf_user_execution_self_test(
     }
     .expect("не удалось создать адресное пространство для запуска ELF");
 
-    let mut image = [0_u8; IMAGE_SIZE];
-    image[0..4].copy_from_slice(b"\x7fELF");
-    image[4] = 2;
-    image[5] = 1;
-    image[6] = 1;
-    image[16..18].copy_from_slice(&2_u16.to_le_bytes());
-    image[18..20].copy_from_slice(&62_u16.to_le_bytes());
-    image[20..24].copy_from_slice(&1_u32.to_le_bytes());
-    image[24..32].copy_from_slice(&(LOAD_ADDRESS + CODE_OFFSET as u64).to_le_bytes());
-    image[32..40].copy_from_slice(&64_u64.to_le_bytes());
-    image[52..54].copy_from_slice(&64_u16.to_le_bytes());
-    image[54..56].copy_from_slice(&56_u16.to_le_bytes());
-    image[56..58].copy_from_slice(&1_u16.to_le_bytes());
-
-    let file_size = (CODE_OFFSET + user_code.len()) as u64;
-    let ph = 64_usize;
-    image[ph..ph + 4].copy_from_slice(&1_u32.to_le_bytes());
-    image[ph + 4..ph + 8].copy_from_slice(&5_u32.to_le_bytes());
-    image[ph + 8..ph + 16].copy_from_slice(&0_u64.to_le_bytes());
-    image[ph + 16..ph + 24].copy_from_slice(&LOAD_ADDRESS.to_le_bytes());
-    image[ph + 32..ph + 40].copy_from_slice(&file_size.to_le_bytes());
-    image[ph + 40..ph + 48].copy_from_slice(&(IMAGE_SIZE as u64).to_le_bytes());
-    image[ph + 48..ph + 56].copy_from_slice(&0x1000_u64.to_le_bytes());
-    image[CODE_OFFSET..CODE_OFFSET + user_code.len()].copy_from_slice(user_code);
-
-    let loaded = elf_user_loader::load_elf(&image[..file_size as usize], &mut space, frames)
-        .expect("не удалось загрузить исполняемый ELF64");
+    let loaded = elf_user_loader::load_elf(USERSPACE_SMOKE_ELF, &mut space, frames)
+        .expect("не удалось загрузить собранную пользовательскую программу");
+    if loaded.segment_count == 0 {
+        panic!("пользовательский ELF не содержит загружаемых сегментов");
+    }
 
     let stack_region = VirtualRegion::new(
         STACK_ADDRESS,
@@ -2094,10 +2070,10 @@ fn elf_user_execution_self_test(
     });
 
     let Ok(exit_status) = passed else {
-        panic!("ELF-служба не завершила пользовательский SYSCALL-цикл");
+        panic!("собранная пользовательская программа не завершила SYSCALL-цикл");
     };
     if exit_status != arch::x86_64::syscall::USER_SELF_TEST_SUCCESS {
-        panic!("ELF-служба вернула неожиданный статус");
+        panic!("собранная пользовательская программа вернула неожиданный статус");
     }
 
     let completion = service_manager

@@ -1,0 +1,16 @@
+[package]
+name = "phoenix-userspace-smoke"
+version = "0.0.1"
+edition = "2024"
+publish = false
+build = "build.rs"
+
+[[bin]]
+name = "smoke"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+phoenix-syscall-abi = { path = "../../crates/syscall-abi" }
+phoenix-user-runtime = { path = "../../crates/user-runtime" }

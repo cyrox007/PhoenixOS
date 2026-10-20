@@ -22,3 +22,7 @@ phoenix-vfs = { path = "../crates/vfs" }
 phoenix-vm = { path = "../crates/virtual-memory" }
 uart_16550 = "0.8.0"
 x86_64 = "0.15.2"
+
+[build-dependencies]
+userspace-smoke = { package = "phoenix-userspace-smoke", path = "../userspace/smoke", artifact = "bin", target = "x86_64-unknown-none" }
+

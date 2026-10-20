@@ -6,5 +6,8 @@ fn main() {
             .expect("Cargo должен собрать проверочную пользовательскую программу"),
     );
 
-    println!("cargo:rustc-env=PHOENIX_USERSPACE_SMOKE={}", binary.display());
+    println!(
+        "cargo:rustc-env=PHOENIX_USERSPACE_SMOKE={}",
+        binary.display()
+    );
 }

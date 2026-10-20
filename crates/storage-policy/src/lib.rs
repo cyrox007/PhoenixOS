@@ -143,7 +143,7 @@ impl MediaSession {
         self.open_write_grant = OpenWriteGrant::None;
     }
 
-    pub const fn authorize_read(&self) -> Result<(), MediaPolicyError> {
+    pub fn authorize_read(&self) -> Result<(), MediaPolicyError> {
         match self.mode {
             MediaProtectionMode::BoundProtected => match self.unlock {
                 MediaUnlock::Bound(installation)

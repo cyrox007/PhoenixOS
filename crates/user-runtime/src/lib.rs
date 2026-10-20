@@ -248,7 +248,10 @@ pub extern "C" fn phoenix_file_poll(
     descriptor: PackedFileDescriptor,
     events: u64,
 ) -> RuntimeCallResult {
-    invoke_raw(SyscallRequest::file_poll(FilePollArguments { descriptor, events }))
+    invoke_raw(SyscallRequest::file_poll(FilePollArguments {
+        descriptor,
+        events,
+    }))
 }
 
 pub fn ipc_send(
@@ -470,7 +473,14 @@ mod tests {
         });
         assert_eq!(
             poll.arguments,
-            [descriptor.raw(), FILE_READY_READ | FILE_READY_WRITE, 0, 0, 0, 0]
+            [
+                descriptor.raw(),
+                FILE_READY_READ | FILE_READY_WRITE,
+                0,
+                0,
+                0,
+                0
+            ]
         );
     }
 

@@ -16,6 +16,11 @@ extern "C" {
 #define PHOENIX_FILE_SEEK_CURRENT UINT64_C(1)
 #define PHOENIX_FILE_SEEK_END UINT64_C(2)
 
+#define PHOENIX_FILE_READY_READ (UINT64_C(1) << 0)
+#define PHOENIX_FILE_READY_WRITE (UINT64_C(1) << 1)
+#define PHOENIX_FILE_READY_ERROR (UINT64_C(1) << 2)
+#define PHOENIX_FILE_READY_HANGUP (UINT64_C(1) << 3)
+
 #define PHOENIX_EIO 5
 #define PHOENIX_EAGAIN 11
 #define PHOENIX_EINVAL 22
@@ -56,6 +61,11 @@ PhoenixRuntimeCallResult phoenix_file_seek(
 );
 
 PhoenixRuntimeCallResult phoenix_file_close(PhoenixFileDescriptor descriptor);
+
+PhoenixRuntimeCallResult phoenix_file_poll(
+    PhoenixFileDescriptor descriptor,
+    uint64_t events
+);
 
 int32_t phoenix_errno_from_status(uint64_t status);
 

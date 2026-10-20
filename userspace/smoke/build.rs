@@ -9,4 +9,5 @@ fn main() {
     println!("cargo:rerun-if-changed={}", script.display());
     println!("cargo:rustc-link-arg-bin=smoke=-T{}", script.display());
     println!("cargo:rustc-link-arg-bin=smoke=--build-id=none");
+    println!("cargo:rustc-link-arg-bin=smoke=-no-pie");
 }

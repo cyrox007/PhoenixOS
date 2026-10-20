@@ -19,8 +19,8 @@ use phoenix_syscall_abi::{
 };
 use phoenix_vfs::{
     AccessMode, DescriptorError, DescriptorTable, FileDescriptor, FileSystemId, FileSystemRegistry,
-    IoEvents, MemoryFileSystem, MountTable, NodeKind, SeekOrigin, VfsError, VfsNode, create_mounted_node,
-    resolve_mounted_path,
+    IoEvents, MemoryFileSystem, MountTable, NodeKind, SeekOrigin, VfsError, VfsNode,
+    create_mounted_node, resolve_mounted_path,
 };
 
 use crate::file_user_memory;
@@ -1337,8 +1337,7 @@ pub fn file_context_operations_self_test(
         [opened.value, 0, 0, 0, 0, 0],
     ));
     ready.is_success()
-        && ready.value & (FILE_READY_READ | FILE_READY_WRITE)
-            == FILE_READY_READ | FILE_READY_WRITE
+        && ready.value & (FILE_READY_READ | FILE_READY_WRITE) == FILE_READY_READ | FILE_READY_WRITE
         && write.is_success()
         && write.value == buffer_length
         && seek.is_success()

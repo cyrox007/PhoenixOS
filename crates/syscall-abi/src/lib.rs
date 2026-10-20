@@ -28,7 +28,8 @@ pub const FILE_READY_READ: u64 = 1 << 0;
 pub const FILE_READY_WRITE: u64 = 1 << 1;
 pub const FILE_READY_ERROR: u64 = 1 << 2;
 pub const FILE_READY_HANGUP: u64 = 1 << 3;
-pub const FILE_READY_KNOWN: u64 = FILE_READY_READ | FILE_READY_WRITE | FILE_READY_ERROR | FILE_READY_HANGUP;
+pub const FILE_READY_KNOWN: u64 =
+    FILE_READY_READ | FILE_READY_WRITE | FILE_READY_ERROR | FILE_READY_HANGUP;
 pub const NO_TRANSFERRED_CAPABILITY: u64 = u64::MAX;
 pub const PROCESS_START_ABI_VERSION: u32 = 0;
 pub const PROCESS_START_MAX_ENTRIES: u64 = 256;
@@ -571,7 +572,14 @@ mod tests {
                 events: FILE_READY_READ | FILE_READY_WRITE,
             })
             .arguments,
-            [descriptor.raw(), FILE_READY_READ | FILE_READY_WRITE, 0, 0, 0, 0]
+            [
+                descriptor.raw(),
+                FILE_READY_READ | FILE_READY_WRITE,
+                0,
+                0,
+                0,
+                0
+            ]
         );
     }
 

@@ -331,9 +331,7 @@ mod tests {
             Err(MediaPolicyError::OpenWriteConfirmationRequired)
         );
 
-        session
-            .confirm_open_write(OpenWriteScope::Session)
-            .unwrap();
+        session.confirm_open_write(OpenWriteScope::Session).unwrap();
         session.lock();
         assert_eq!(
             session.authorize_write(),

@@ -122,10 +122,7 @@ impl MediaSession {
         Ok(())
     }
 
-    pub fn confirm_open_write(
-        &mut self,
-        scope: OpenWriteScope,
-    ) -> Result<(), MediaPolicyError> {
+    pub fn confirm_open_write(&mut self, scope: OpenWriteScope) -> Result<(), MediaPolicyError> {
         if !matches!(self.mode, MediaProtectionMode::Open) {
             return Err(MediaPolicyError::WrongMode);
         }
@@ -215,11 +212,7 @@ impl<D: BlockDevice> BlockDevice for ExternalMediaDevice<D> {
         self.inner.geometry()
     }
 
-    fn read_blocks(
-        &mut self,
-        first_block: u64,
-        destination: &mut [u8],
-    ) -> Result<(), BlockError> {
+    fn read_blocks(&mut self, first_block: u64, destination: &mut [u8]) -> Result<(), BlockError> {
         self.session
             .authorize_read()
             .map_err(|_| BlockError::AccessDenied)?;
@@ -244,12 +237,12 @@ mod tests {
     use phoenix_block::MemoryBlockDevice;
 
     const INSTALLATION_A: InstallationId = InstallationId::new([
-        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
-        0x1e, 0x1f,
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
+        0x1f,
     ]);
     const INSTALLATION_B: InstallationId = InstallationId::new([
-        0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d,
-        0x2e, 0x2f,
+        0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e,
+        0x2f,
     ]);
 
     #[test]
@@ -327,9 +320,7 @@ mod tests {
     #[test]
     fn open_session_confirmation_persists_until_lock_or_revoke() {
         let mut session = MediaSession::new(MediaProtectionMode::Open, true, None).unwrap();
-        session
-            .confirm_open_write(OpenWriteScope::Session)
-            .unwrap();
+        session.confirm_open_write(OpenWriteScope::Session).unwrap();
 
         assert_eq!(session.authorize_write(), Ok(()));
         assert_eq!(session.authorize_write(), Ok(()));

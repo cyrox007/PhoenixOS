@@ -8,17 +8,18 @@ use phoenix_ipc::{
 };
 use phoenix_process::{ProcessCapabilitySet, ProcessId};
 use phoenix_syscall_abi::{
-    FILE_OPEN_CREATE, FILE_OPEN_READ, FILE_OPEN_TRUNCATE, FILE_OPEN_WRITE, FILE_SEEK_CURRENT,
+    FILE_OPEN_CREATE, FILE_OPEN_READ, FILE_OPEN_TRUNCATE, FILE_OPEN_WRITE, FILE_READY_ERROR,
+    FILE_READY_HANGUP, FILE_READY_KNOWN, FILE_READY_READ, FILE_READY_WRITE, FILE_SEEK_CURRENT,
     FILE_SEEK_END, FILE_SEEK_START, IpcReceiveArguments, IpcReceiveMetadata, IpcSendArguments,
     NO_TRANSFERRED_CAPABILITY, PackedCapabilityHandle, PackedFileDescriptor, SYSCALL_FILE_CLOSE,
-    SYSCALL_FILE_OPEN, SYSCALL_FILE_READ, SYSCALL_FILE_SEEK, SYSCALL_FILE_WRITE,
+    SYSCALL_FILE_OPEN, SYSCALL_FILE_POLL, SYSCALL_FILE_READ, SYSCALL_FILE_SEEK, SYSCALL_FILE_WRITE,
     SYSCALL_IPC_RECEIVE, SYSCALL_IPC_SEND, SYSCALL_PROCESS_EXIT, SYSCALL_STATUS_BAD_ARGUMENTS,
     SYSCALL_STATUS_OPERATION_NOT_READY, SYSCALL_STATUS_UNKNOWN_CALL, SyscallRequest, SyscallReturn,
     SyscallStatus,
 };
 use phoenix_vfs::{
     AccessMode, DescriptorError, DescriptorTable, FileDescriptor, FileSystemId, FileSystemRegistry,
-    MemoryFileSystem, MountTable, NodeKind, SeekOrigin, VfsError, VfsNode, create_mounted_node,
+    IoEvents, MemoryFileSystem, MountTable, NodeKind, SeekOrigin, VfsError, VfsNode, create_mounted_node,
     resolve_mounted_path,
 };
 
@@ -1073,6 +1074,7 @@ fn dispatch(request: SyscallRequest) -> SyscallReturn {
         SYSCALL_FILE_READ | SYSCALL_FILE_WRITE => return dispatch_file_io(request),
         SYSCALL_FILE_SEEK => return dispatch_file_seek(request),
         SYSCALL_FILE_CLOSE => return dispatch_file_close(request),
+        SYSCALL_FILE_POLL => return dispatch_file_poll(request),
         SELF_TEST_NUMBER => {}
         _ => return syscall_failure(SYSCALL_STATUS_UNKNOWN_CALL),
     }
@@ -1250,6 +1252,30 @@ fn dispatch_file_close(request: SyscallRequest) -> SyscallReturn {
     }
 }
 
+fn dispatch_file_poll(request: SyscallRequest) -> SyscallReturn {
+    if request.arguments[2..].iter().any(|argument| *argument != 0) {
+        return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS);
+    }
+
+    let requested = request.arguments[1];
+    if requested == 0 || requested & !FILE_READY_KNOWN != 0 {
+        return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS);
+    }
+
+    let Some(events) = IoEvents::from_bits(requested as u32) else {
+        return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS);
+    };
+    let descriptor = unpack_file_descriptor(request.arguments[0]);
+
+    match with_current_file_context(|filesystems, _, descriptors| {
+        descriptors.poll_vfs(filesystems, descriptor, events)
+    }) {
+        Some(Ok(ready)) => SyscallReturn::success(ready.bits() as u64),
+        Some(Err(_)) => syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS),
+        None => syscall_failure(SYSCALL_STATUS_OPERATION_NOT_READY),
+    }
+}
+
 fn unpack_file_descriptor(raw: u64) -> FileDescriptor {
     let descriptor = PackedFileDescriptor::from_raw(raw);
     FileDescriptor {
@@ -1279,6 +1305,17 @@ pub fn file_context_operations_self_test(
     if !opened.is_success() {
         return false;
     }
+    let ready = dispatch(SyscallRequest::new(
+        SYSCALL_FILE_POLL,
+        [
+            opened.value,
+            FILE_READY_READ | FILE_READY_WRITE | FILE_READY_ERROR | FILE_READY_HANGUP,
+            0,
+            0,
+            0,
+            0,
+        ],
+    ));
     let write = dispatch(SyscallRequest::new(
         SYSCALL_FILE_WRITE,
         [opened.value, input_address, buffer_length, 0, 0, 0],
@@ -1299,7 +1336,10 @@ pub fn file_context_operations_self_test(
         SYSCALL_FILE_CLOSE,
         [opened.value, 0, 0, 0, 0, 0],
     ));
-    write.is_success()
+    ready.is_success()
+        && ready.value & (FILE_READY_READ | FILE_READY_WRITE)
+            == FILE_READY_READ | FILE_READY_WRITE
+        && write.is_success()
         && write.value == buffer_length
         && seek.is_success()
         && seek.value == 0
@@ -1317,11 +1357,13 @@ pub fn file_dispatch_self_test() -> bool {
     );
     let invalid_seek = SyscallRequest::new(SYSCALL_FILE_SEEK, [1, 0, 3, 0, 0, 0]);
     let reserved_close = SyscallRequest::new(SYSCALL_FILE_CLOSE, [1, 1, 0, 0, 0, 0]);
+    let invalid_poll = SyscallRequest::new(SYSCALL_FILE_POLL, [1, 1 << 10, 0, 0, 0, 0]);
 
     dispatch(valid_open).status.raw() == u64::from(SYSCALL_STATUS_OPERATION_NOT_READY)
         && dispatch(invalid_open).status.raw() == u64::from(SYSCALL_STATUS_BAD_ARGUMENTS)
         && dispatch(invalid_seek).status.raw() == u64::from(SYSCALL_STATUS_BAD_ARGUMENTS)
         && dispatch(reserved_close).status.raw() == u64::from(SYSCALL_STATUS_BAD_ARGUMENTS)
+        && dispatch(invalid_poll).status.raw() == u64::from(SYSCALL_STATUS_BAD_ARGUMENTS)
 }
 
 fn dispatch_process_exit(request: SyscallRequest) -> SyscallReturn {

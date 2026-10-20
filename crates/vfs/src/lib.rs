@@ -375,11 +375,14 @@ impl IoEvents {
     pub const WRITABLE: Self = Self(1 << 1);
     pub const ERROR: Self = Self(1 << 2);
     pub const HANGUP: Self = Self(1 << 3);
-    pub const KNOWN: u32 =
-        Self::READABLE.0 | Self::WRITABLE.0 | Self::ERROR.0 | Self::HANGUP.0;
+    pub const KNOWN: u32 = Self::READABLE.0 | Self::WRITABLE.0 | Self::ERROR.0 | Self::HANGUP.0;
 
     pub const fn from_bits(bits: u32) -> Option<Self> {
-        if bits & !Self::KNOWN == 0 { Some(Self(bits)) } else { None }
+        if bits & !Self::KNOWN == 0 {
+            Some(Self(bits))
+        } else {
+            None
+        }
     }
 
     pub const fn bits(self) -> u32 {
@@ -1725,5 +1728,4 @@ mod tests {
             Err(DescriptorError::BadDescriptor)
         );
     }
-
 }

@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "kernel",
+    "crates/acpi",
     "crates/phoenix-framebuffer",
     "crates/boot-memory",
     "crates/block-storage",

@@ -40,12 +40,7 @@ impl EcamSegment {
         })
     }
 
-    pub fn function_address(
-        self,
-        bus: u8,
-        device: u8,
-        function: u8,
-    ) -> Result<u64, PcieError> {
+    pub fn function_address(self, bus: u8, device: u8, function: u8) -> Result<u64, PcieError> {
         if bus < self.start_bus || bus > self.end_bus {
             return Err(PcieError::InvalidBusRange);
         }
@@ -116,7 +111,14 @@ where
         for device in 0..DEVICE_COUNT_PER_BUS {
             for function in 0..FUNCTION_COUNT_PER_DEVICE {
                 let address = segment.function_address(bus, device, function)?;
-                let Some(info) = read_function(access, segment.segment_group, bus, device, function, address) else {
+                let Some(info) = read_function(
+                    access,
+                    segment.segment_group,
+                    bus,
+                    device,
+                    function,
+                    address,
+                ) else {
                     continue;
                 };
 
@@ -132,8 +134,7 @@ where
                         summary.storage_controller_count.saturating_add(1);
                 }
                 if info.class_code == 0x0c && info.subclass == 0x03 {
-                    summary.usb_controller_count =
-                        summary.usb_controller_count.saturating_add(1);
+                    summary.usb_controller_count = summary.usb_controller_count.saturating_add(1);
                 }
 
                 visitor(info);

@@ -37,7 +37,7 @@ pub extern "C" fn __phoenix_errno_location() -> *mut c_int {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn phoenix_libc_open(path: *const c_char, flags: c_int) -> c_int {
-    let Some(length) = c_string_length(path, PATH_CAPACITY) else {
+    let Some(length) = (unsafe { c_string_length(path, PATH_CAPACITY) }) else {
         return fail(EINVAL);
     };
     let bytes = unsafe { core::slice::from_raw_parts(path.cast::<u8>(), length) };
@@ -54,7 +54,7 @@ pub unsafe extern "C" fn phoenix_libc_open(path: *const c_char, flags: c_int) ->
     }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(test), unsafe(no_mangle))]
 pub unsafe extern "C" fn read(fd: c_int, buffer: *mut c_void, count: usize) -> isize {
     if count != 0 && buffer.is_null() {
         return fail_ssize(EINVAL);
@@ -70,7 +70,7 @@ pub unsafe extern "C" fn read(fd: c_int, buffer: *mut c_void, count: usize) -> i
     }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(test), unsafe(no_mangle))]
 pub unsafe extern "C" fn write(fd: c_int, buffer: *const c_void, count: usize) -> isize {
     if count != 0 && buffer.is_null() {
         return fail_ssize(EINVAL);
@@ -86,7 +86,7 @@ pub unsafe extern "C" fn write(fd: c_int, buffer: *const c_void, count: usize) -
     }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(not(test), unsafe(no_mangle))]
 pub extern "C" fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64 {
     let Some(descriptor) = descriptor(fd) else {
         return fail_off(EBADF);
@@ -104,8 +104,8 @@ pub extern "C" fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64 {
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn close(fd: c_int) -> c_int {
+#[cfg_attr(not(test), unsafe(no_mangle))]
+pub unsafe extern "C" fn close(fd: c_int) -> c_int {
     let Some(index) = descriptor_index(fd) else {
         return fail(EBADF);
     };

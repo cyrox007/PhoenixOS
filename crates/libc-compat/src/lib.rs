@@ -4,7 +4,10 @@ use core::ffi::{c_char, c_int, c_void};
 use core::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
 use phoenix_syscall_abi::PackedFileDescriptor;
-use phoenix_user_runtime::{OpenOptions, SeekFrom, errno_from_status, file_close, file_open, file_read, file_seek, file_write};
+use phoenix_user_runtime::{
+    OpenOptions, SeekFrom, errno_from_status, file_close, file_open, file_read, file_seek,
+    file_write,
+};
 
 const FD_BASE: c_int = 3;
 const FD_CAPACITY: usize = 32;
@@ -145,7 +148,10 @@ fn open_options(flags: c_int) -> Option<OpenOptions> {
 fn install_descriptor(descriptor: PackedFileDescriptor) -> c_int {
     let raw = descriptor.raw();
     for (index, slot) in DESCRIPTORS.iter().enumerate() {
-        if slot.compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+        if slot
+            .compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
             return index as c_int + FD_BASE;
         }
     }

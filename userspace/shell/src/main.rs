@@ -83,11 +83,16 @@ fn process_argument(info: &ProcessStartInfo, index: usize) -> Result<&str, ()> {
     if index >= info.argument_count as usize {
         return Err(());
     }
-    let entry = unsafe { (info.argument_vector as *const ProcessStartString).add(index).read() };
+    let entry = unsafe {
+        (info.argument_vector as *const ProcessStartString)
+            .add(index)
+            .read()
+    };
     if entry.address == 0 {
         return Err(());
     }
-    let bytes = unsafe { core::slice::from_raw_parts(entry.address as *const u8, entry.length as usize) };
+    let bytes =
+        unsafe { core::slice::from_raw_parts(entry.address as *const u8, entry.length as usize) };
     core::str::from_utf8(bytes).map_err(|_| ())
 }
 

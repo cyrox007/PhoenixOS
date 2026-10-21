@@ -185,10 +185,7 @@ impl<const CAPACITY: usize> DriverRegistry<CAPACITY> {
         selected
     }
 
-    pub fn start_best(
-        &self,
-        function: PcieFunction,
-    ) -> Result<DriverLaunch, DriverRegistryError> {
+    pub fn start_best(&self, function: PcieFunction) -> Result<DriverLaunch, DriverRegistryError> {
         let driver = self
             .select(function)
             .ok_or(DriverRegistryError::NoMatchingDriver)?;
@@ -202,10 +199,13 @@ impl<const CAPACITY: usize> DriverRegistry<CAPACITY> {
     }
 
     fn contains(&self, descriptor: DriverDescriptor) -> bool {
-        self.drivers[..self.count].iter().flatten().any(|registered| {
-            registered.descriptor.name == descriptor.name
-                && registered.descriptor.version == descriptor.version
-        })
+        self.drivers[..self.count]
+            .iter()
+            .flatten()
+            .any(|registered| {
+                registered.descriptor.name == descriptor.name
+                    && registered.descriptor.version == descriptor.version
+            })
     }
 }
 
@@ -220,17 +220,12 @@ fn validate_descriptor(descriptor: DriverDescriptor) -> Result<(), DriverRegistr
         return Err(DriverRegistryError::EmptyName);
     }
     if descriptor.abi_version != DRIVER_ABI_VERSION {
-        return Err(DriverRegistryError::UnsupportedAbi(
-            descriptor.abi_version,
-        ));
+        return Err(DriverRegistryError::UnsupportedAbi(descriptor.abi_version));
     }
     Ok(())
 }
 
-fn is_better_match(
-    candidate: RegisteredDriver,
-    selected: Option<RegisteredDriver>,
-) -> bool {
+fn is_better_match(candidate: RegisteredDriver, selected: Option<RegisteredDriver>) -> bool {
     let Some(selected) = selected else {
         return true;
     };
@@ -308,9 +303,7 @@ mod tests {
                 descriptor,
                 start: started,
             }),
-            Err(DriverRegistryError::UnsupportedAbi(
-                DRIVER_ABI_VERSION + 1
-            ))
+            Err(DriverRegistryError::UnsupportedAbi(DRIVER_ABI_VERSION + 1))
         );
         assert!(registry.is_empty());
     }

@@ -11,11 +11,11 @@ use phoenix_syscall_abi::{
     FILE_OPEN_CREATE, FILE_OPEN_READ, FILE_OPEN_TRUNCATE, FILE_OPEN_WRITE, FILE_READY_ERROR,
     FILE_READY_HANGUP, FILE_READY_KNOWN, FILE_READY_READ, FILE_READY_WRITE, FILE_SEEK_CURRENT,
     FILE_SEEK_END, FILE_SEEK_START, IpcReceiveArguments, IpcReceiveMetadata, IpcSendArguments,
-    NO_TRANSFERRED_CAPABILITY, PackedCapabilityHandle, PackedFileDescriptor, SYSCALL_CONSOLE_WRITE, SYSCALL_FILE_CLOSE,
-    SYSCALL_FILE_OPEN, SYSCALL_FILE_POLL, SYSCALL_FILE_READ, SYSCALL_FILE_SEEK, SYSCALL_FILE_WRITE,
-    SYSCALL_IPC_RECEIVE, SYSCALL_IPC_SEND, SYSCALL_PROCESS_EXIT, SYSCALL_STATUS_BAD_ARGUMENTS,
-    SYSCALL_STATUS_OPERATION_NOT_READY, SYSCALL_STATUS_UNKNOWN_CALL, SyscallRequest, SyscallReturn,
-    SyscallStatus,
+    NO_TRANSFERRED_CAPABILITY, PackedCapabilityHandle, PackedFileDescriptor, SYSCALL_CONSOLE_WRITE,
+    SYSCALL_FILE_CLOSE, SYSCALL_FILE_OPEN, SYSCALL_FILE_POLL, SYSCALL_FILE_READ, SYSCALL_FILE_SEEK,
+    SYSCALL_FILE_WRITE, SYSCALL_IPC_RECEIVE, SYSCALL_IPC_SEND, SYSCALL_PROCESS_EXIT,
+    SYSCALL_STATUS_BAD_ARGUMENTS, SYSCALL_STATUS_OPERATION_NOT_READY, SYSCALL_STATUS_UNKNOWN_CALL,
+    SyscallRequest, SyscallReturn, SyscallStatus,
 };
 use phoenix_vfs::{
     AccessMode, DescriptorError, DescriptorTable, FileDescriptor, FileSystemId, FileSystemRegistry,
@@ -1104,7 +1104,12 @@ fn dispatch_console_write(request: SyscallRequest) -> SyscallReturn {
 
     let mut buffer = [0_u8; FILE_CAPACITY];
     let copied = with_current_process_address_space(|space| {
-        file_user_memory::copy_from_user(space, request.arguments[0], request.arguments[1], &mut buffer)
+        file_user_memory::copy_from_user(
+            space,
+            request.arguments[0],
+            request.arguments[1],
+            &mut buffer,
+        )
     });
     let data = match copied {
         Some(Ok(data)) => data,

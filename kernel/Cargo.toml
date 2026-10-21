@@ -14,6 +14,7 @@ phoenix-elf-loader = { path = "../crates/elf-loader" }
 phoenix-framebuffer = { path = "../crates/phoenix-framebuffer" }
 phoenix-ipc = { path = "../crates/ipc-model" }
 phoenix-memory = { path = "../crates/boot-memory" }
+phoenix-pcie = { path = "../crates/pcie" }
 phoenix-process = { path = "../crates/process-model" }
 phoenix-process-manager = { path = "../crates/process-manager" }
 phoenix-scheduler = { path = "../crates/scheduler" }

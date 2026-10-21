@@ -14,6 +14,7 @@ members = [
     "crates/syscall-abi",
     "crates/capability-model",
     "crates/ipc-model",
+    "crates/libc-compat",
     "crates/elf-loader",
     "crates/fat",
     "crates/phoenix-fs",

@@ -8,6 +8,7 @@ const SUCCESS: u64 = 0x5553_4552_5f4f_4b21;
 const FAILURE_START_INFO: u64 = 1;
 const FAILURE_ARGUMENTS: u64 = 2;
 const FAILURE_ENVIRONMENT: u64 = 3;
+const FAILURE_CONSOLE: u64 = 4;
 const FAILURE_PANIC: u64 = 0xffff_ffff_ffff_fffe;
 
 const ARGUMENT_ZERO: &[u8] = b"phoenix-test";
@@ -39,6 +40,10 @@ extern "C" fn program_main(info: *const ProcessStartInfo) -> u64 {
 
     if !vector_entry_matches(info.environment_vector, 0, ENVIRONMENT_ZERO) {
         return FAILURE_ENVIRONMENT;
+    }
+
+    if phoenix_user_runtime::console_write(b"userspace console self-test: OK\n").is_err() {
+        return FAILURE_CONSOLE;
     }
 
     SUCCESS

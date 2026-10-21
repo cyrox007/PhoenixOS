@@ -7,6 +7,7 @@ members = [
     "crates/block-storage",
     "crates/virtual-memory",
     "crates/scheduler",
+    "crates/shell",
     "crates/process-model",
     "crates/process-manager",
     "crates/service-manager",
@@ -21,6 +22,7 @@ members = [
     "crates/user-runtime",
     "crates/vfs",
     "userspace/smoke",
+    "userspace/shell",
 ]
 
 [package]

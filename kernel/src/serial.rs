@@ -18,6 +18,16 @@ pub fn emergency(args: fmt::Arguments<'_>) {
     }
 }
 
+pub fn write_user_text(bytes: &[u8]) -> bool {
+    let Ok(text) = core::str::from_utf8(bytes) else {
+        return false;
+    };
+    let Some(mut out) = try_console() else {
+        return false;
+    };
+    out.write_str(text).is_ok()
+}
+
 pub fn line(out: &mut Com1, level: &str, args: fmt::Arguments<'_>) {
     let _ = write!(out, "[{level}] ");
     let _ = out.write_fmt(args);

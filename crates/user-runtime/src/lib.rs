@@ -3,11 +3,11 @@
 use core::arch::asm;
 
 use phoenix_syscall_abi::{
-    FILE_OPEN_CREATE, FILE_OPEN_READ, FILE_OPEN_TRUNCATE, FILE_OPEN_WRITE, FILE_READY_ERROR,
-    FILE_READY_HANGUP, FILE_READY_READ, FILE_READY_WRITE, FILE_SEEK_CURRENT, FILE_SEEK_END,
-    FILE_SEEK_START, FileIoArguments, FileOpenArguments, FilePollArguments, FileSeekArguments,
-    IpcReceiveArguments, IpcReceiveMetadata, IpcSendArguments, PackedCapabilityHandle,
-    PackedFileDescriptor, ProcessStartInfo, SYSCALL_STATUS_BAD_ARGUMENTS,
+    ConsoleWriteArguments, FILE_OPEN_CREATE, FILE_OPEN_READ, FILE_OPEN_TRUNCATE, FILE_OPEN_WRITE,
+    FILE_READY_ERROR, FILE_READY_HANGUP, FILE_READY_READ, FILE_READY_WRITE, FILE_SEEK_CURRENT,
+    FILE_SEEK_END, FILE_SEEK_START, FileIoArguments, FileOpenArguments, FilePollArguments,
+    FileSeekArguments, IpcReceiveArguments, IpcReceiveMetadata, IpcSendArguments,
+    PackedCapabilityHandle, PackedFileDescriptor, ProcessStartInfo, SYSCALL_STATUS_BAD_ARGUMENTS,
     SYSCALL_STATUS_OPERATION_NOT_READY, SYSCALL_STATUS_UNKNOWN_CALL, SyscallRequest,
 };
 
@@ -184,6 +184,14 @@ pub fn file_poll(
         events: events.bits(),
     }))?;
     Ok(FileReadyEvents::from_bits(ready))
+}
+
+pub fn console_write(buffer: &[u8]) -> Result<usize, SyscallError> {
+    let value = invoke(SyscallRequest::console_write(ConsoleWriteArguments {
+        buffer_address: buffer.as_ptr() as u64,
+        buffer_length: buffer.len() as u64,
+    }))?;
+    usize::try_from(value).map_err(|_| SyscallError { status: u64::MAX })
 }
 
 #[unsafe(no_mangle)]

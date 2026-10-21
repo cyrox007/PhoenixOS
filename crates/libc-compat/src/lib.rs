@@ -5,8 +5,8 @@ use core::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
 use phoenix_syscall_abi::PackedFileDescriptor;
 use phoenix_user_runtime::{
-    OpenOptions, SeekFrom, errno_from_status, file_close, file_open, file_read, file_seek,
-    file_write,
+    OpenOptions, SeekFrom, console_write, errno_from_status, file_close, file_open, file_read,
+    file_seek, file_write,
 };
 
 const FD_BASE: c_int = 3;
@@ -75,10 +75,17 @@ pub unsafe extern "C" fn write(fd: c_int, buffer: *const c_void, count: usize) -
     if count != 0 && buffer.is_null() {
         return fail_ssize(EINVAL);
     }
+    let input = unsafe { core::slice::from_raw_parts(buffer.cast::<u8>(), count) };
+    if fd == 1 || fd == 2 {
+        return match console_write(input) {
+            Ok(written) => written as isize,
+            Err(error) => fail_ssize(errno_from_status(error.status())),
+        };
+    }
+
     let Some(descriptor) = descriptor(fd) else {
         return fail_ssize(EBADF);
     };
-    let input = unsafe { core::slice::from_raw_parts(buffer.cast::<u8>(), count) };
 
     match file_write(descriptor, input) {
         Ok(written) => written as isize,
@@ -216,6 +223,7 @@ mod tests {
     #[test]
     fn reserves_standard_stream_numbers() {
         assert_eq!(descriptor_index(0), None);
+        assert_eq!(descriptor_index(1), None);
         assert_eq!(descriptor_index(2), None);
         assert_eq!(descriptor_index(3), Some(0));
         assert_eq!(descriptor_index(34), Some(31));

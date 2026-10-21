@@ -11,6 +11,7 @@ pub const SYSCALL_FILE_WRITE: u64 = 0x112;
 pub const SYSCALL_FILE_SEEK: u64 = 0x113;
 pub const SYSCALL_FILE_CLOSE: u64 = 0x114;
 pub const SYSCALL_FILE_POLL: u64 = 0x115;
+pub const SYSCALL_CONSOLE_WRITE: u64 = 0x120;
 
 pub const SYSCALL_STATUS_UNKNOWN_CALL: u32 = 1;
 pub const SYSCALL_STATUS_BAD_ARGUMENTS: u32 = 2;
@@ -215,6 +216,18 @@ pub struct FilePollArguments {
     pub events: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConsoleWriteArguments {
+    pub buffer_address: u64,
+    pub buffer_length: u64,
+}
+
+impl ConsoleWriteArguments {
+    pub const fn registers(self) -> [u64; SYSCALL_ARGUMENT_COUNT] {
+        [self.buffer_address, self.buffer_length, 0, 0, 0, 0]
+    }
+}
+
 impl FilePollArguments {
     pub const fn registers(self) -> [u64; SYSCALL_ARGUMENT_COUNT] {
         [self.descriptor.raw(), self.events, 0, 0, 0, 0]
@@ -394,6 +407,10 @@ impl SyscallRequest {
 
     pub const fn file_poll(arguments: FilePollArguments) -> Self {
         Self::new(SYSCALL_FILE_POLL, arguments.registers())
+    }
+
+    pub const fn console_write(arguments: ConsoleWriteArguments) -> Self {
+        Self::new(SYSCALL_CONSOLE_WRITE, arguments.registers())
     }
 
     pub const fn argument(&self, index: usize) -> Option<u64> {

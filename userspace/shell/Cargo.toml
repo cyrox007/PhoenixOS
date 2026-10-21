@@ -1,0 +1,17 @@
+[package]
+name = "phoenix-userspace-shell"
+version = "0.0.1"
+edition = "2024"
+publish = false
+build = "build.rs"
+
+[[bin]]
+name = "phxsh"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+phoenix-shell = { path = "../../crates/shell" }
+phoenix-syscall-abi = { path = "../../crates/syscall-abi" }
+phoenix-user-runtime = { path = "../../crates/user-runtime" }

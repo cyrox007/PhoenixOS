@@ -1,0 +1,11 @@
+[package]
+name = "phoenix-driver-registry"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[dependencies]
+phoenix-pcie = { path = "../pcie" }
+
+[lib]
+path = "src/lib.rs"

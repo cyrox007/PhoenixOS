@@ -5,6 +5,7 @@
 
 extern crate alloc;
 
+mod acpi;
 mod arch;
 mod elf_user_loader;
 mod file_user_memory;
@@ -193,6 +194,30 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             .physical_memory_offset
             .into_option()
             .expect("загрузчик не передал отображение физической памяти"),
+    );
+
+    let rsdp_address = boot_info
+        .rsdp_addr
+        .into_option()
+        .expect("загрузчик не передал RSDP для современного профиля ACPI");
+    let platform_acpi = acpi::discover(rsdp_address, physical_memory_offset)
+        .expect("не удалось проверить обязательные таблицы ACPI");
+    if platform_acpi.madt.processor_count == 0
+        || platform_acpi.madt.io_apic_count == 0
+        || platform_acpi.mcfg.segment_count == 0
+    {
+        panic!("ACPI не описывает обязательные ресурсы современного профиля");
+    }
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "acpi platform discovery: OK cpus={} x2apic={} ioapic={} pci_segments={}",
+            platform_acpi.madt.processor_count,
+            platform_acpi.madt.x2apic_processor_count,
+            platform_acpi.madt.io_apic_count,
+            platform_acpi.mcfg.segment_count
+        ),
     );
 
     let mut page_table = unsafe { ActivePageTable::from_current(physical_memory_offset) };

@@ -127,7 +127,8 @@ impl Xsdt {
 
         let mut entries = [0_u64; MAX_XSDT_ENTRIES];
         for (index, chunk) in payload.chunks_exact(XSDT_ENTRY_SIZE).enumerate() {
-            entries[index] = u64::from_le_bytes(chunk.try_into().map_err(|_| AcpiError::Truncated)?);
+            entries[index] =
+                u64::from_le_bytes(chunk.try_into().map_err(|_| AcpiError::Truncated)?);
         }
 
         Ok(Self {
@@ -283,19 +284,25 @@ pub const fn checksum(bytes: &[u8]) -> u8 {
 fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, AcpiError> {
     let end = offset.checked_add(2).ok_or(AcpiError::Truncated)?;
     let value = bytes.get(offset..end).ok_or(AcpiError::Truncated)?;
-    Ok(u16::from_le_bytes(value.try_into().map_err(|_| AcpiError::Truncated)?))
+    Ok(u16::from_le_bytes(
+        value.try_into().map_err(|_| AcpiError::Truncated)?,
+    ))
 }
 
 fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, AcpiError> {
     let end = offset.checked_add(4).ok_or(AcpiError::Truncated)?;
     let value = bytes.get(offset..end).ok_or(AcpiError::Truncated)?;
-    Ok(u32::from_le_bytes(value.try_into().map_err(|_| AcpiError::Truncated)?))
+    Ok(u32::from_le_bytes(
+        value.try_into().map_err(|_| AcpiError::Truncated)?,
+    ))
 }
 
 fn read_u64(bytes: &[u8], offset: usize) -> Result<u64, AcpiError> {
     let end = offset.checked_add(8).ok_or(AcpiError::Truncated)?;
     let value = bytes.get(offset..end).ok_or(AcpiError::Truncated)?;
-    Ok(u64::from_le_bytes(value.try_into().map_err(|_| AcpiError::Truncated)?))
+    Ok(u64::from_le_bytes(
+        value.try_into().map_err(|_| AcpiError::Truncated)?,
+    ))
 }
 
 #[cfg(test)]
@@ -335,8 +342,7 @@ mod tests {
         table[..4].copy_from_slice(b"XSDT");
         let length = table.len() as u32;
         table[4..8].copy_from_slice(&length.to_le_bytes());
-        table[SDT_HEADER_SIZE..SDT_HEADER_SIZE + 8]
-            .copy_from_slice(&0x1000_u64.to_le_bytes());
+        table[SDT_HEADER_SIZE..SDT_HEADER_SIZE + 8].copy_from_slice(&0x1000_u64.to_le_bytes());
         table[SDT_HEADER_SIZE + 8..].copy_from_slice(&0x2000_u64.to_le_bytes());
         seal(&mut table, 9);
 
@@ -352,8 +358,7 @@ mod tests {
         table[..4].copy_from_slice(b"APIC");
         let length = table.len() as u32;
         table[4..8].copy_from_slice(&length.to_le_bytes());
-        table[SDT_HEADER_SIZE..SDT_HEADER_SIZE + 4]
-            .copy_from_slice(&0xfee0_0000_u32.to_le_bytes());
+        table[SDT_HEADER_SIZE..SDT_HEADER_SIZE + 4].copy_from_slice(&0xfee0_0000_u32.to_le_bytes());
 
         let cpu = SDT_HEADER_SIZE + 8;
         table[cpu] = 0;

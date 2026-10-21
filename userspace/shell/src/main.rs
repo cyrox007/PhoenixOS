@@ -22,13 +22,25 @@ impl ShellIo for RuntimeIo {
     fn cat(&mut self, path: &str) -> Result<(), ()> {
         let descriptor = file_open(path, OpenOptions::read_only()).map_err(|_| ())?;
         let mut buffer = [0_u8; 256];
-        let result = loop {
-            let read = file_read(descriptor, &mut buffer).map_err(|_| ())?;
+        let mut result = Ok(());
+
+        loop {
+            let read = match file_read(descriptor, &mut buffer) {
+                Ok(read) => read,
+                Err(_) => {
+                    result = Err(());
+                    break;
+                }
+            };
             if read == 0 {
-                break Ok(());
+                break;
             }
-            console_write(&buffer[..read]).map_err(|_| ())?;
-        };
+            if console_write(&buffer[..read]).is_err() {
+                result = Err(());
+                break;
+            }
+        }
+
         let close = file_close(descriptor).map_err(|_| ());
         result.and(close)
     }

@@ -2,6 +2,7 @@
 bootstrap: OK
 exception: breakpoint
 acpi platform discovery: OK
+pcie ecam enumeration: OK
 virtual memory self-test: OK
 kernel heap self-test: OK
 apic timer self-test: OK

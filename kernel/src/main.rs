@@ -11,6 +11,7 @@ mod elf_user_loader;
 mod file_user_memory;
 mod heap;
 mod ipc_user_memory;
+mod pcie;
 mod process_space;
 mod qemu;
 mod serial;
@@ -217,6 +218,27 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             platform_acpi.madt.x2apic_processor_count,
             platform_acpi.madt.io_apic_count,
             platform_acpi.mcfg.segment_count
+        ),
+    );
+
+    let pcie = pcie::enumerate(
+        &platform_acpi.mcfg,
+        &boot_info.memory_regions,
+        physical_memory_offset,
+    )
+    .expect("не удалось перечислить PCIe через ECAM");
+    if pcie.function_count == 0 {
+        panic!("ECAM не обнаружил ни одной PCIe-функции");
+    }
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "pcie ecam enumeration: OK functions={} bridges={} storage={} usb={}",
+            pcie.function_count,
+            pcie.bridge_count,
+            pcie.storage_controller_count,
+            pcie.usb_controller_count
         ),
     );
 

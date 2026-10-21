@@ -11,7 +11,7 @@ use phoenix_syscall_abi::{
     FILE_OPEN_CREATE, FILE_OPEN_READ, FILE_OPEN_TRUNCATE, FILE_OPEN_WRITE, FILE_READY_ERROR,
     FILE_READY_HANGUP, FILE_READY_KNOWN, FILE_READY_READ, FILE_READY_WRITE, FILE_SEEK_CURRENT,
     FILE_SEEK_END, FILE_SEEK_START, IpcReceiveArguments, IpcReceiveMetadata, IpcSendArguments,
-    NO_TRANSFERRED_CAPABILITY, PackedCapabilityHandle, PackedFileDescriptor, SYSCALL_FILE_CLOSE,
+    NO_TRANSFERRED_CAPABILITY, PackedCapabilityHandle, PackedFileDescriptor, SYSCALL_CONSOLE_WRITE, SYSCALL_FILE_CLOSE,
     SYSCALL_FILE_OPEN, SYSCALL_FILE_POLL, SYSCALL_FILE_READ, SYSCALL_FILE_SEEK, SYSCALL_FILE_WRITE,
     SYSCALL_IPC_RECEIVE, SYSCALL_IPC_SEND, SYSCALL_PROCESS_EXIT, SYSCALL_STATUS_BAD_ARGUMENTS,
     SYSCALL_STATUS_OPERATION_NOT_READY, SYSCALL_STATUS_UNKNOWN_CALL, SyscallRequest, SyscallReturn,
@@ -1075,6 +1075,7 @@ fn dispatch(request: SyscallRequest) -> SyscallReturn {
         SYSCALL_FILE_SEEK => return dispatch_file_seek(request),
         SYSCALL_FILE_CLOSE => return dispatch_file_close(request),
         SYSCALL_FILE_POLL => return dispatch_file_poll(request),
+        SYSCALL_CONSOLE_WRITE => return dispatch_console_write(request),
         SELF_TEST_NUMBER => {}
         _ => return syscall_failure(SYSCALL_STATUS_UNKNOWN_CALL),
     }
@@ -1084,6 +1085,38 @@ fn dispatch(request: SyscallRequest) -> SyscallReturn {
     }
 
     SyscallReturn::success(SELF_TEST_RESULT)
+}
+
+fn dispatch_console_write(request: SyscallRequest) -> SyscallReturn {
+    if request.arguments[2..].iter().any(|argument| *argument != 0) {
+        return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS);
+    }
+    if phoenix_vm::UserBuffer::for_array(request.arguments[0], request.arguments[1], 1, 1).is_err()
+    {
+        return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS);
+    }
+    let Ok(length) = usize::try_from(request.arguments[1]) else {
+        return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS);
+    };
+    if length > FILE_CAPACITY {
+        return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS);
+    }
+
+    let mut buffer = [0_u8; FILE_CAPACITY];
+    let copied = with_current_process_address_space(|space| {
+        file_user_memory::copy_from_user(space, request.arguments[0], request.arguments[1], &mut buffer)
+    });
+    let data = match copied {
+        Some(Ok(data)) => data,
+        Some(Err(_)) => return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS),
+        None => return syscall_failure(SYSCALL_STATUS_OPERATION_NOT_READY),
+    };
+
+    if !crate::serial::write_user_text(data) {
+        return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS);
+    }
+
+    SyscallReturn::success(data.len() as u64)
 }
 
 fn dispatch_file_open(request: SyscallRequest) -> SyscallReturn {
@@ -1357,12 +1390,14 @@ pub fn file_dispatch_self_test() -> bool {
     let invalid_seek = SyscallRequest::new(SYSCALL_FILE_SEEK, [1, 0, 3, 0, 0, 0]);
     let reserved_close = SyscallRequest::new(SYSCALL_FILE_CLOSE, [1, 1, 0, 0, 0, 0]);
     let invalid_poll = SyscallRequest::new(SYSCALL_FILE_POLL, [1, 1 << 10, 0, 0, 0, 0]);
+    let invalid_console = SyscallRequest::new(SYSCALL_CONSOLE_WRITE, [0x4000, 4, 1, 0, 0, 0]);
 
     dispatch(valid_open).status.raw() == u64::from(SYSCALL_STATUS_OPERATION_NOT_READY)
         && dispatch(invalid_open).status.raw() == u64::from(SYSCALL_STATUS_BAD_ARGUMENTS)
         && dispatch(invalid_seek).status.raw() == u64::from(SYSCALL_STATUS_BAD_ARGUMENTS)
         && dispatch(reserved_close).status.raw() == u64::from(SYSCALL_STATUS_BAD_ARGUMENTS)
         && dispatch(invalid_poll).status.raw() == u64::from(SYSCALL_STATUS_BAD_ARGUMENTS)
+        && dispatch(invalid_console).status.raw() == u64::from(SYSCALL_STATUS_BAD_ARGUMENTS)
 }
 
 fn dispatch_process_exit(request: SyscallRequest) -> SyscallReturn {

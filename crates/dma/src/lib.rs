@@ -89,7 +89,11 @@ impl DmaRegion {
         {
             return Err(DmaError::AddressOverflow);
         }
-        Ok(Self { cpu, device, layout })
+        Ok(Self {
+            cpu,
+            device,
+            layout,
+        })
     }
 
     pub const fn cpu_address(self) -> CpuVirtualAddress {
@@ -109,7 +113,11 @@ impl DmaRegion {
             return Err(DmaError::InvalidRange);
         }
         let offset = u64::try_from(offset).map_err(|_| DmaError::Unaddressable)?;
-        let address = self.device.value().checked_add(offset).ok_or(DmaError::AddressOverflow)?;
+        let address = self
+            .device
+            .value()
+            .checked_add(offset)
+            .ok_or(DmaError::AddressOverflow)?;
         Ok(DeviceAddress::new(address))
     }
 }
@@ -139,32 +147,56 @@ mod tests {
     fn checks_both_address_spaces() {
         let layout = DmaLayout::new(4096, 4096).unwrap();
         assert_eq!(
-            DmaRegion::new(CpuVirtualAddress::new(3), DeviceAddress::new(0x2000), layout),
+            DmaRegion::new(
+                CpuVirtualAddress::new(3),
+                DeviceAddress::new(0x2000),
+                layout
+            ),
             Err(DmaError::MisalignedAddress)
         );
         assert_eq!(
-            DmaRegion::new(CpuVirtualAddress::new(0x1000), DeviceAddress::new(3), layout),
+            DmaRegion::new(
+                CpuVirtualAddress::new(0x1000),
+                DeviceAddress::new(3),
+                layout
+            ),
             Err(DmaError::MisalignedAddress)
         );
-        assert!(DmaRegion::new(
-            CpuVirtualAddress::new(0x1000),
-            DeviceAddress::new(0x2000),
-            layout
-        ).is_ok());
+        assert!(
+            DmaRegion::new(
+                CpuVirtualAddress::new(0x1000),
+                DeviceAddress::new(0x2000),
+                layout
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn rejects_overflow_and_out_of_bounds() {
         let layout = DmaLayout::new(4096, 1).unwrap();
         assert_eq!(
-            DmaRegion::new(CpuVirtualAddress::new(usize::MAX), DeviceAddress::new(0), layout),
+            DmaRegion::new(
+                CpuVirtualAddress::new(usize::MAX),
+                DeviceAddress::new(0),
+                layout
+            ),
             Err(DmaError::AddressOverflow)
         );
         assert_eq!(
-            DmaRegion::new(CpuVirtualAddress::new(0), DeviceAddress::new(u64::MAX), layout),
+            DmaRegion::new(
+                CpuVirtualAddress::new(0),
+                DeviceAddress::new(u64::MAX),
+                layout
+            ),
             Err(DmaError::AddressOverflow)
         );
-        let region = DmaRegion::new(CpuVirtualAddress::new(0), DeviceAddress::new(0x2000), layout).unwrap();
+        let region = DmaRegion::new(
+            CpuVirtualAddress::new(0),
+            DeviceAddress::new(0x2000),
+            layout,
+        )
+        .unwrap();
         assert_eq!(region.device_offset(4095, 1).unwrap().value(), 0x2fff);
         assert_eq!(region.device_offset(4095, 2), Err(DmaError::InvalidRange));
         assert_eq!(region.device_offset(0, 0), Err(DmaError::InvalidRange));

@@ -6,6 +6,7 @@ members = [
     "crates/phoenix-framebuffer",
     "crates/pcie",
     "crates/driver-registry",
+    "crates/dma",
     "crates/boot-memory",
     "crates/block-storage",
     "crates/virtual-memory",

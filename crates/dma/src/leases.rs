@@ -51,11 +51,14 @@ impl<const N: usize> DmaLeaseTable<N> {
         backing: &mut B,
         layout: crate::DmaLayout,
     ) -> Result<DmaHandle, DmaLeaseError> {
-        let slot = self.slots.iter().position(|entry| {
-            entry.region.is_none() && entry.generation != u64::MAX
-        });
+        let slot = self
+            .slots
+            .iter()
+            .position(|entry| entry.region.is_none() && entry.generation != u64::MAX);
         let slot = slot.ok_or(DmaLeaseError::Exhausted)?;
-        let region = backing.allocate(layout).map_err(DmaLeaseError::Allocation)?;
+        let region = backing
+            .allocate(layout)
+            .map_err(DmaLeaseError::Allocation)?;
         self.slots[slot].generation += 1;
         self.slots[slot].region = Some(region);
         Ok(DmaHandle {
@@ -65,7 +68,10 @@ impl<const N: usize> DmaLeaseTable<N> {
     }
 
     pub fn region(&self, handle: DmaHandle) -> Result<DmaRegion, DmaLeaseError> {
-        let slot = self.slots.get(handle.slot).ok_or(DmaLeaseError::StaleHandle)?;
+        let slot = self
+            .slots
+            .get(handle.slot)
+            .ok_or(DmaLeaseError::StaleHandle)?;
         if slot.generation != handle.generation {
             return Err(DmaLeaseError::StaleHandle);
         }
@@ -116,12 +122,21 @@ mod tests {
     #[test]
     fn rejects_duplicate_and_stale_release() {
         let mut table = DmaLeaseTable::<1>::new();
-        let mut backing = FakeBacking { allocs: 0, frees: 0 };
+        let mut backing = FakeBacking {
+            allocs: 0,
+            frees: 0,
+        };
         let layout = DmaLayout::new(256, 64).unwrap();
         let first = table.acquire(&mut backing, layout).unwrap();
-        assert_eq!(table.acquire(&mut backing, layout), Err(DmaLeaseError::Exhausted));
+        assert_eq!(
+            table.acquire(&mut backing, layout),
+            Err(DmaLeaseError::Exhausted)
+        );
         table.release(&mut backing, first).unwrap();
-        assert_eq!(table.release(&mut backing, first), Err(DmaLeaseError::StaleHandle));
+        assert_eq!(
+            table.release(&mut backing, first),
+            Err(DmaLeaseError::StaleHandle)
+        );
         let second = table.acquire(&mut backing, layout).unwrap();
         assert_ne!(first, second);
         assert_eq!(table.region(first), Err(DmaLeaseError::StaleHandle));
@@ -132,9 +147,15 @@ mod tests {
     #[test]
     fn zero_capacity_does_not_allocate() {
         let mut table = DmaLeaseTable::<0>::new();
-        let mut backing = FakeBacking { allocs: 0, frees: 0 };
+        let mut backing = FakeBacking {
+            allocs: 0,
+            frees: 0,
+        };
         let layout = DmaLayout::new(64, 16).unwrap();
-        assert_eq!(table.acquire(&mut backing, layout), Err(DmaLeaseError::Exhausted));
+        assert_eq!(
+            table.acquire(&mut backing, layout),
+            Err(DmaLeaseError::Exhausted)
+        );
         assert_eq!(backing.allocs, 0);
     }
 }

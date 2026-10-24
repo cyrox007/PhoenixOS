@@ -13,6 +13,9 @@ pub struct DmaHandle {
 pub enum DmaLeaseError {
     Exhausted,
     StaleHandle,
+    AlreadyActive,
+    NotActive,
+    DeviceActive,
     GenerationExhausted,
     Allocation(DmaError),
 }
@@ -21,6 +24,7 @@ pub enum DmaLeaseError {
 struct Slot {
     region: Option<DmaRegion>,
     generation: u64,
+    active: bool,
 }
 
 /// Реализация отвечает за физическое выделение, закрепление страниц,
@@ -42,6 +46,7 @@ impl<const N: usize> DmaLeaseTable<N> {
             slots: [Slot {
                 region: None,
                 generation: 0,
+                active: false,
             }; N],
         }
     }
@@ -61,6 +66,7 @@ impl<const N: usize> DmaLeaseTable<N> {
             .map_err(DmaLeaseError::Allocation)?;
         self.slots[slot].generation += 1;
         self.slots[slot].region = Some(region);
+        self.slots[slot].active = false;
         Ok(DmaHandle {
             slot,
             generation: self.slots[slot].generation,
@@ -78,13 +84,39 @@ impl<const N: usize> DmaLeaseTable<N> {
         slot.region.ok_or(DmaLeaseError::StaleHandle)
     }
 
-    /// Вызывать только после подтверждения остановки доступа устройства.
+    /// Отмечает начало работы устройства с областью.
+    pub fn begin_device_access(&mut self, handle: DmaHandle) -> Result<(), DmaLeaseError> {
+        self.region(handle)?;
+        let slot = &mut self.slots[handle.slot];
+        if slot.active {
+            return Err(DmaLeaseError::AlreadyActive);
+        }
+        slot.active = true;
+        Ok(())
+    }
+
+    /// Вызывается драйвером только после аппаратного подтверждения остановки DMA.
+    pub fn finish_device_access(&mut self, handle: DmaHandle) -> Result<(), DmaLeaseError> {
+        self.region(handle)?;
+        let slot = &mut self.slots[handle.slot];
+        if !slot.active {
+            return Err(DmaLeaseError::NotActive);
+        }
+        slot.active = false;
+        Ok(())
+    }
+
+    /// Запрещает освобождение области, пока драйвер отметил её активной.
+    /// Достоверность подтверждения завершения DMA остаётся обязанностью драйвера.
     pub fn release<B: DmaBacking>(
         &mut self,
         backing: &mut B,
         handle: DmaHandle,
     ) -> Result<(), DmaLeaseError> {
         let region = self.region(handle)?;
+        if self.slots[handle.slot].active {
+            return Err(DmaLeaseError::DeviceActive);
+        }
         self.slots[handle.slot].region = None;
         backing.release(region);
         Ok(())
@@ -142,6 +174,25 @@ mod tests {
         assert_eq!(table.region(first), Err(DmaLeaseError::StaleHandle));
         table.release(&mut backing, second).unwrap();
         assert_eq!((backing.allocs, backing.frees), (2, 2));
+    }
+
+    #[test]
+    fn active_region_cannot_be_freed() {
+        let mut table = DmaLeaseTable::<1>::new();
+        let mut backing = FakeBacking {
+            allocs: 0,
+            frees: 0,
+        };
+        let handle = table.acquire(&mut backing, DmaLayout::new(256, 64).unwrap()).unwrap();
+        table.begin_device_access(handle).unwrap();
+        assert_eq!(table.begin_device_access(handle), Err(DmaLeaseError::AlreadyActive));
+        assert_eq!(table.release(&mut backing, handle), Err(DmaLeaseError::DeviceActive));
+        assert_eq!(backing.frees, 0);
+        table.finish_device_access(handle).unwrap();
+        assert_eq!(table.finish_device_access(handle), Err(DmaLeaseError::NotActive));
+        table.release(&mut backing, handle).unwrap();
+        assert_eq!(backing.frees, 1);
+        assert_eq!(table.begin_device_access(handle), Err(DmaLeaseError::StaleHandle));
     }
 
     #[test]

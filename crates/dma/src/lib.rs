@@ -4,6 +4,8 @@
 //! Выделение и отображение страниц будут подключены отдельным серверным
 //! механизмом. Сам этот модуль не выделяет память и не включает DMA.
 
+pub mod leases;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DmaError {
     ZeroLength,

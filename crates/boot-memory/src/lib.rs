@@ -247,10 +247,13 @@ impl<const MAX_RANGES: usize> SystemFrameAllocator<MAX_RANGES> {
         count: u64,
     ) -> Result<(), PhysicalMemoryError> {
         let start = first.start_address().as_u64() / FRAME_SIZE;
-        let end = start.checked_add(count).ok_or(PhysicalMemoryError::FrameOutsideManagedMemory)?;
-        if count == 0 || !self.managed[..self.managed_len]
-            .iter()
-            .any(|range| range.start <= start && end <= range.end)
+        let end = start
+            .checked_add(count)
+            .ok_or(PhysicalMemoryError::FrameOutsideManagedMemory)?;
+        if count == 0
+            || !self.managed[..self.managed_len]
+                .iter()
+                .any(|range| range.start <= start && end <= range.end)
         {
             return Err(PhysicalMemoryError::FrameOutsideManagedMemory);
         }
@@ -261,7 +264,11 @@ impl<const MAX_RANGES: usize> SystemFrameAllocator<MAX_RANGES> {
             return Err(PhysicalMemoryError::FrameAlreadyFree);
         }
 
-        insert_range(&mut self.free, &mut self.free_len, FrameRange { start, end })
+        insert_range(
+            &mut self.free,
+            &mut self.free_len,
+            FrameRange { start, end },
+        )
     }
 
     pub fn release_4k(&mut self, frame: PhysFrame<Size4KiB>) -> Result<(), PhysicalMemoryError> {

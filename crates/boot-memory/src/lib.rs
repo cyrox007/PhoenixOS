@@ -192,6 +192,85 @@ impl<const MAX_RANGES: usize> SystemFrameAllocator<MAX_RANGES> {
         Some(frame_from_number(frame_number))
     }
 
+    /// Выделяет физически непрерывные страницы с выравниванием по числу страниц.
+    /// Не меняет состояние при отсутствии подходящего диапазона или места в метаданных.
+    pub fn allocate_contiguous_4k(
+        &mut self,
+        count: u64,
+        alignment_frames: u64,
+    ) -> Option<PhysFrame<Size4KiB>> {
+        if count == 0 || !alignment_frames.is_power_of_two() {
+            return None;
+        }
+
+        for index in 0..self.free_len {
+            let range = self.free[index];
+            let start = align_up(range.start, alignment_frames)?;
+            let end = start.checked_add(count)?;
+            if end > range.end {
+                continue;
+            }
+
+            let splits = start > range.start && end < range.end;
+            if splits && self.free_len == MAX_RANGES {
+                continue;
+            }
+
+            if splits {
+                let tail = FrameRange {
+                    start: end,
+                    end: range.end,
+                };
+                // Проверка вместимости выполнена до изменения исходного диапазона.
+                insert_new_range(&mut self.free, &mut self.free_len, index + 1, tail).ok()?;
+                self.free[index].end = start;
+            } else if start == range.start && end == range.end {
+                remove_range(&mut self.free, &mut self.free_len, index);
+            } else if start == range.start {
+                self.free[index].start = end;
+            } else {
+                self.free[index].end = start;
+            }
+
+            return Some(frame_from_number(start));
+        }
+
+        None
+    }
+
+    /// Возвращает ранее выделенный непрерывный диапазон.
+    /// Вызывающий код отвечает за прекращение доступа устройства и снятие
+    /// всех отображений DMA до возврата страниц.
+    pub fn release_contiguous_4k(
+        &mut self,
+        first: PhysFrame<Size4KiB>,
+        count: u64,
+    ) -> Result<(), PhysicalMemoryError> {
+        let start = first.start_address().as_u64() / FRAME_SIZE;
+        let end = start
+            .checked_add(count)
+            .ok_or(PhysicalMemoryError::FrameOutsideManagedMemory)?;
+        if count == 0
+            || !self.managed[..self.managed_len]
+                .iter()
+                .any(|range| range.start <= start && end <= range.end)
+        {
+            return Err(PhysicalMemoryError::FrameOutsideManagedMemory);
+        }
+        if self.free[..self.free_len]
+            .iter()
+            .any(|range| start < range.end && range.start < end)
+        {
+            return Err(PhysicalMemoryError::FrameAlreadyFree);
+        }
+
+        insert_range(
+            &mut self.free,
+            &mut self.free_len,
+            FrameRange { start, end },
+        )
+    }
+
     pub fn release_4k(&mut self, frame: PhysFrame<Size4KiB>) -> Result<(), PhysicalMemoryError> {
         let frame_number = frame.start_address().as_u64() / FRAME_SIZE;
 
@@ -536,6 +615,62 @@ mod tests {
             allocator.release_4k(foreign),
             Err(PhysicalMemoryError::FrameOutsideManagedMemory)
         );
+    }
+
+    #[test]
+    fn contiguous_allocation_respects_alignment_and_preserves_other_frames() {
+        let regions = [MemoryRegion {
+            start: 0x1000,
+            end: 0x11000,
+            kind: MemoryRegionKind::Usable,
+        }];
+        let mut allocator = SystemFrameAllocator::<8>::from_regions(&regions).unwrap();
+        let start = allocator.allocate_contiguous_4k(3, 4).unwrap();
+        assert_eq!(start.start_address().as_u64(), 0x4000);
+        assert_eq!(allocator.free_frames(), 13);
+        assert_eq!(allocator.free_ranges(), 2);
+        allocator.release_contiguous_4k(start, 3).unwrap();
+        assert_eq!(allocator.free_frames(), 16);
+        assert_eq!(allocator.free_ranges(), 1);
+        assert_eq!(
+            allocator.release_contiguous_4k(start, 3),
+            Err(PhysicalMemoryError::FrameAlreadyFree)
+        );
+    }
+
+    #[test]
+    fn contiguous_allocation_does_not_split_without_metadata_capacity() {
+        let regions = [MemoryRegion {
+            start: 0x1000,
+            end: 0x11000,
+            kind: MemoryRegionKind::Usable,
+        }];
+        let mut allocator = SystemFrameAllocator::<1>::from_regions(&regions).unwrap();
+        assert!(allocator.allocate_contiguous_4k(2, 4).is_none());
+        assert_eq!(allocator.free_frames(), 16);
+        assert!(allocator.allocate_contiguous_4k(1, 1).is_some());
+        assert_eq!(allocator.free_frames(), 15);
+    }
+
+    #[test]
+    fn contiguous_allocation_rejects_invalid_and_overlapping_release() {
+        let regions = [MemoryRegion {
+            start: 0x1000,
+            end: 0x9000,
+            kind: MemoryRegionKind::Usable,
+        }];
+        let mut allocator = SystemFrameAllocator::<8>::from_regions(&regions).unwrap();
+        assert!(allocator.allocate_contiguous_4k(0, 1).is_none());
+        assert!(allocator.allocate_contiguous_4k(2, 3).is_none());
+        assert!(allocator.allocate_contiguous_4k(9, 1).is_none());
+        let start = allocator.allocate_contiguous_4k(3, 1).unwrap();
+        let other = PhysFrame::containing_address(PhysAddr::new(0x3000));
+        allocator.release_4k(other).unwrap();
+        assert_eq!(
+            allocator.release_contiguous_4k(start, 3),
+            Err(PhysicalMemoryError::FrameAlreadyFree)
+        );
+        assert_eq!(allocator.free_frames(), 6);
     }
 
     #[test]

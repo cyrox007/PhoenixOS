@@ -183,16 +183,30 @@ mod tests {
             allocs: 0,
             frees: 0,
         };
-        let handle = table.acquire(&mut backing, DmaLayout::new(256, 64).unwrap()).unwrap();
+        let handle = table
+            .acquire(&mut backing, DmaLayout::new(256, 64).unwrap())
+            .unwrap();
         table.begin_device_access(handle).unwrap();
-        assert_eq!(table.begin_device_access(handle), Err(DmaLeaseError::AlreadyActive));
-        assert_eq!(table.release(&mut backing, handle), Err(DmaLeaseError::DeviceActive));
+        assert_eq!(
+            table.begin_device_access(handle),
+            Err(DmaLeaseError::AlreadyActive)
+        );
+        assert_eq!(
+            table.release(&mut backing, handle),
+            Err(DmaLeaseError::DeviceActive)
+        );
         assert_eq!(backing.frees, 0);
         table.finish_device_access(handle).unwrap();
-        assert_eq!(table.finish_device_access(handle), Err(DmaLeaseError::NotActive));
+        assert_eq!(
+            table.finish_device_access(handle),
+            Err(DmaLeaseError::NotActive)
+        );
         table.release(&mut backing, handle).unwrap();
         assert_eq!(backing.frees, 1);
-        assert_eq!(table.begin_device_access(handle), Err(DmaLeaseError::StaleHandle));
+        assert_eq!(
+            table.begin_device_access(handle),
+            Err(DmaLeaseError::StaleHandle)
+        );
     }
 
     #[test]

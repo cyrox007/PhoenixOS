@@ -199,15 +199,39 @@ impl<const MAX_RANGES: usize> SystemFrameAllocator<MAX_RANGES> {
         count: u64,
         alignment_frames: u64,
     ) -> Option<PhysFrame<Size4KiB>> {
+        self.allocate_contiguous_below_4k(count, alignment_frames, u64::MAX)
+    }
+
+    /// Выделяет непрерывные страницы, чей последний байт не превышает
+    /// аппаратный предел адреса устройства (включительно).
+    ///
+    /// Этот метод не заменяет настройку IOMMU и отображение виртуальных адресов.
+    pub fn allocate_contiguous_below_4k(
+        &mut self,
+        count: u64,
+        alignment_frames: u64,
+        max_physical_address: u64,
+    ) -> Option<PhysFrame<Size4KiB>> {
         if count == 0 || !alignment_frames.is_power_of_two() {
             return None;
         }
 
+        // Верхняя граница задаётся количеством полностью адресуемых страниц.
+        // Деление до сложения предотвращает переполнение у u64::MAX.
+        let limit = max_physical_address / FRAME_SIZE;
+        let exclusive_limit = limit.checked_add(
+            u64::from(max_physical_address % FRAME_SIZE == FRAME_SIZE - 1),
+        )?;
+
         for index in 0..self.free_len {
             let range = self.free[index];
-            let start = align_up(range.start, alignment_frames)?;
-            let end = start.checked_add(count)?;
-            if end > range.end {
+            let Some(start) = align_up(range.start, alignment_frames) else {
+                continue;
+            };
+            let Some(end) = start.checked_add(count) else {
+                continue;
+            };
+            if end > range.end || end > exclusive_limit {
                 continue;
             }
 
@@ -671,6 +695,42 @@ mod tests {
             Err(PhysicalMemoryError::FrameAlreadyFree)
         );
         assert_eq!(allocator.free_frames(), 6);
+    }
+
+    #[test]
+    fn contiguous_allocation_respects_device_address_limit() {
+        let regions = [MemoryRegion {
+            start: 0x1000,
+            end: 0x11000,
+            kind: MemoryRegionKind::Usable,
+        }];
+        let mut allocator = SystemFrameAllocator::<8>::from_regions(&regions).unwrap();
+        assert!(allocator.allocate_contiguous_below_4k(2, 1, 0x1fff).is_none());
+        assert_eq!(allocator.free_frames(), 16);
+        let first = allocator.allocate_contiguous_below_4k(2, 1, 0x2fff).unwrap();
+        assert_eq!(first.start_address().as_u64(), 0x1000);
+        assert!(allocator.allocate_contiguous_below_4k(1, 1, 0x2fff).is_none());
+        allocator.release_contiguous_4k(first, 2).unwrap();
+        assert_eq!(allocator.free_frames(), 16);
+    }
+
+    #[test]
+    fn contiguous_allocation_rejects_partial_last_page() {
+        let regions = [MemoryRegion {
+            start: 0x1000,
+            end: 0x4000,
+            kind: MemoryRegionKind::Usable,
+        }];
+        let mut allocator = SystemFrameAllocator::<4>::from_regions(&regions).unwrap();
+        assert!(allocator.allocate_contiguous_below_4k(1, 1, 0x1ffe).is_none());
+        assert_eq!(allocator.free_frames(), 3);
+        assert_eq!(
+            allocator.allocate_contiguous_below_4k(1, 1, 0x1fff)
+                .unwrap()
+                .start_address()
+                .as_u64(),
+            0x1000
+        );
     }
 
     #[test]

@@ -219,9 +219,9 @@ impl<const MAX_RANGES: usize> SystemFrameAllocator<MAX_RANGES> {
         // Верхняя граница задаётся количеством полностью адресуемых страниц.
         // Деление до сложения предотвращает переполнение у u64::MAX.
         let limit = max_physical_address / FRAME_SIZE;
-        let exclusive_limit = limit.checked_add(
-            u64::from(max_physical_address % FRAME_SIZE == FRAME_SIZE - 1),
-        )?;
+        let exclusive_limit = limit.checked_add(u64::from(
+            max_physical_address % FRAME_SIZE == FRAME_SIZE - 1,
+        ))?;
 
         for index in 0..self.free_len {
             let range = self.free[index];
@@ -705,11 +705,21 @@ mod tests {
             kind: MemoryRegionKind::Usable,
         }];
         let mut allocator = SystemFrameAllocator::<8>::from_regions(&regions).unwrap();
-        assert!(allocator.allocate_contiguous_below_4k(2, 1, 0x1fff).is_none());
+        assert!(
+            allocator
+                .allocate_contiguous_below_4k(2, 1, 0x1fff)
+                .is_none()
+        );
         assert_eq!(allocator.free_frames(), 16);
-        let first = allocator.allocate_contiguous_below_4k(2, 1, 0x2fff).unwrap();
+        let first = allocator
+            .allocate_contiguous_below_4k(2, 1, 0x2fff)
+            .unwrap();
         assert_eq!(first.start_address().as_u64(), 0x1000);
-        assert!(allocator.allocate_contiguous_below_4k(1, 1, 0x2fff).is_none());
+        assert!(
+            allocator
+                .allocate_contiguous_below_4k(1, 1, 0x2fff)
+                .is_none()
+        );
         allocator.release_contiguous_4k(first, 2).unwrap();
         assert_eq!(allocator.free_frames(), 16);
     }
@@ -722,10 +732,15 @@ mod tests {
             kind: MemoryRegionKind::Usable,
         }];
         let mut allocator = SystemFrameAllocator::<4>::from_regions(&regions).unwrap();
-        assert!(allocator.allocate_contiguous_below_4k(1, 1, 0x1ffe).is_none());
+        assert!(
+            allocator
+                .allocate_contiguous_below_4k(1, 1, 0x1ffe)
+                .is_none()
+        );
         assert_eq!(allocator.free_frames(), 3);
         assert_eq!(
-            allocator.allocate_contiguous_below_4k(1, 1, 0x1fff)
+            allocator
+                .allocate_contiguous_below_4k(1, 1, 0x1fff)
                 .unwrap()
                 .start_address()
                 .as_u64(),

@@ -114,10 +114,7 @@ impl DmaBuffer {
 
     /// Сначала устройство, затем процессор, последними — физические страницы.
     /// При любой ошибке владение ещё не освобождёнными ресурсами сохраняется.
-    pub fn close<P: DmaBufferPlatform>(
-        &mut self,
-        platform: &mut P,
-    ) -> Result<(), DmaBufferError> {
+    pub fn close<P: DmaBufferPlatform>(&mut self, platform: &mut P) -> Result<(), DmaBufferError> {
         if !self.reserved {
             return Err(DmaBufferError::NotReady);
         }
@@ -199,7 +196,11 @@ mod tests {
             Ok(CpuVirtualAddress::new(0x2000))
         }
 
-        fn unmap_cpu(&mut self, _cpu: CpuVirtualAddress, _layout: DmaLayout) -> Result<(), DmaError> {
+        fn unmap_cpu(
+            &mut self,
+            _cpu: CpuVirtualAddress,
+            _layout: DmaLayout,
+        ) -> Result<(), DmaError> {
             if self.fail_cpu_once {
                 self.fail_cpu_once = false;
                 return Err(DmaError::InvalidRange);
@@ -232,7 +233,10 @@ mod tests {
         let mut buffer = ready(&mut platform);
         assert_eq!(buffer.region().unwrap().device_address().value(), 0x3000);
         buffer.begin_device_access().unwrap();
-        assert_eq!(buffer.close(&mut platform), Err(DmaBufferError::DeviceActive));
+        assert_eq!(
+            buffer.close(&mut platform),
+            Err(DmaBufferError::DeviceActive)
+        );
         assert_eq!(platform.free_count, 0);
         buffer.finish_device_access().unwrap();
         buffer.close(&mut platform).unwrap();
@@ -255,7 +259,10 @@ mod tests {
         assert!(buffer.close(&mut platform).is_err());
         assert_eq!((platform.device_unmap_count, platform.free_count), (0, 0));
         assert!(buffer.close(&mut platform).is_err());
-        assert_eq!((platform.device_unmap_count, platform.cpu_unmap_count), (1, 0));
+        assert_eq!(
+            (platform.device_unmap_count, platform.cpu_unmap_count),
+            (1, 0)
+        );
         assert_eq!(platform.free_count, 0);
         assert!(buffer.close(&mut platform).is_err());
         assert_eq!((platform.cpu_unmap_count, platform.free_count), (1, 0));

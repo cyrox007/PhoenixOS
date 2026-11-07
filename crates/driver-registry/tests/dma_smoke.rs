@@ -91,8 +91,5 @@ fn selected_xhci_driver_obeys_dma_lifecycle() {
     leases.finish_device_access(handle).unwrap();
     leases.release(&mut backing, handle).unwrap();
     assert_eq!(backing.releases, 1);
-    assert_eq!(
-        leases.region(handle),
-        Err(DmaLeaseError::StaleHandle)
-    );
+    assert_eq!(leases.region(handle), Err(DmaLeaseError::StaleHandle));
 }

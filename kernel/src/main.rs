@@ -318,6 +318,19 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         ),
     );
 
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "xhci usb descriptor: OK port={} slot={} vid={:04x} pid={:04x} class={:02x}",
+            ports.first_connected_port,
+            command.slot_id,
+            command.vendor_id,
+            command.product_id,
+            command.device_class
+        ),
+    );
+
     let (dma_pages, page_table_frames) =
         dma_boot::self_test(&mut page_table, &mut frames, physical_memory_offset);
     serial::line(

@@ -86,10 +86,7 @@ impl DeviceMapping {
 
     /// Допустимо только после подтверждённого завершения DMA устройством.
     /// При отказе владение сохраняется для повторной попытки.
-    pub fn close<B: DmaMappingBackend>(
-        &mut self,
-        backend: &mut B,
-    ) -> Result<(), DmaMappingError> {
+    pub fn close<B: DmaMappingBackend>(&mut self, backend: &mut B) -> Result<(), DmaMappingError> {
         if !self.mapped {
             return Err(DmaMappingError::AlreadyUnmapped);
         }
@@ -158,7 +155,10 @@ mod tests {
         assert!(mapping.is_mapped());
         mapping.close(&mut backend).unwrap();
         assert!(!mapping.is_mapped());
-        assert_eq!(mapping.close(&mut backend), Err(DmaMappingError::AlreadyUnmapped));
+        assert_eq!(
+            mapping.close(&mut backend),
+            Err(DmaMappingError::AlreadyUnmapped)
+        );
         assert_eq!((backend.map_count, backend.unmap_count), (1, 1));
     }
 

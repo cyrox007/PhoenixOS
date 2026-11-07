@@ -165,14 +165,13 @@ impl<const N: usize> DmaWindowRegistry<N> {
     ) -> Result<DmaWindowHandle, DmaReservationError> {
         let window = DmaKernelWindow::new(virtual_start, physical_start, page_count)
             .map_err(DmaReservationError::InvalidWindow)?;
-        let length = page_count * PAGE_SIZE;
-        let end = virtual_start + length;
+        let last = virtual_start + page_count * PAGE_SIZE - 1;
         for slot in &self.slots {
             let Some(existing) = slot.window.as_ref() else {
                 continue;
             };
-            let existing_end = existing.virtual_start + existing.page_count * PAGE_SIZE;
-            if virtual_start < existing_end && existing.virtual_start < end {
+            let existing_last = existing.virtual_start + existing.page_count * PAGE_SIZE - 1;
+            if virtual_start <= existing_last && existing.virtual_start <= last {
                 return Err(DmaReservationError::Overlap);
             }
         }
@@ -438,6 +437,15 @@ mod tests {
         assert_eq!(registry.mapped_pages(first), Err(DmaReservationError::StaleHandle));
         registry.release(third).unwrap();
         registry.release(second).unwrap();
+    }
+
+    #[test]
+    fn highest_canonical_page_can_be_reserved_without_overflow() {
+        let mut registry = DmaWindowRegistry::<1>::new();
+        let last_page = 0xffff_ffff_ffff_f000;
+        let handle = registry.reserve(last_page, 0x1000, 1).unwrap();
+        assert_eq!(registry.mapped_pages(handle), Ok(0));
+        registry.release(handle).unwrap();
     }
 
     #[test]

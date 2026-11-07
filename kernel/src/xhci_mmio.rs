@@ -125,20 +125,6 @@ pub unsafe fn probe<const N: usize>(
             xhci_control::MAX_POLLS,
         )
         .map_err(XhciMmioError::ControllerReset)?;
-        let report = unsafe {
-            xhci_command::first_command(&registers, capabilities, frames, physical_memory_offset)
-        }
-        .map_err(XhciMmioError::Command)?;
-        // Второй независимый цикл проверяет повторное выделение страниц,
-        // отсутствие оставшихся отображений и повторный запуск устройства.
-        let repeated = unsafe {
-            xhci_command::first_command(&registers, capabilities, frames, physical_memory_offset)
-        }
-        .map_err(XhciMmioError::Command)?;
-        assert_eq!(
-            report, repeated,
-            "повторный обмен xHCI дал другой результат"
-        );
         let ports = xhci_ports::scan_ports(
             &registers,
             capabilities.operational_offset,
@@ -150,6 +136,34 @@ pub unsafe fn probe<const N: usize>(
         if ports.connected < 2 || ports.enabled < 2 {
             return Err(XhciMmioError::MissingTestDevices);
         }
+        let report = unsafe {
+            xhci_command::first_command(
+                &registers,
+                capabilities,
+                frames,
+                physical_memory_offset,
+                ports.first_connected_port,
+                ports.first_speed,
+            )
+        }
+        .map_err(XhciMmioError::Command)?;
+        // Второй независимый цикл проверяет повторное выделение страниц,
+        // отсутствие оставшихся отображений и повторный запуск устройства.
+        let repeated = unsafe {
+            xhci_command::first_command(
+                &registers,
+                capabilities,
+                frames,
+                physical_memory_offset,
+                ports.first_connected_port,
+                ports.first_speed,
+            )
+        }
+        .map_err(XhciMmioError::Command)?;
+        assert_eq!(
+            report, repeated,
+            "повторный обмен xHCI дал другой результат"
+        );
         Ok((capabilities, reset, report, ports))
     })();
     unmap_pages(table, mapped)?;

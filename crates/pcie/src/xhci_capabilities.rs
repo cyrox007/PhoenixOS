@@ -41,10 +41,7 @@ pub struct XhciCapabilities {
 impl XhciCapabilities {
     /// Смещения проверяются относительно полного диапазона BAR, не только
     /// относительно первых регистров возможностей.
-    pub fn probe<A: RegisterAccess>(
-        registers: &A,
-        bar_size: u64,
-    ) -> Result<Self, CapabilityError> {
+    pub fn probe<A: RegisterAccess>(registers: &A, bar_size: u64) -> Result<Self, CapabilityError> {
         if bar_size < MINIMUM_CAPABILITY_BYTES {
             return Err(CapabilityError::MmioTooSmall);
         }

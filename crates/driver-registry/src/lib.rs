@@ -245,9 +245,7 @@ impl<const CAPACITY: usize> DriverRegistry<CAPACITY, RegisteredDriver> {
     }
 }
 
-impl<const CAPACITY: usize, Context>
-    DriverRegistry<CAPACITY, ContextRegisteredDriver<Context>>
-{
+impl<const CAPACITY: usize, Context> DriverRegistry<CAPACITY, ContextRegisteredDriver<Context>> {
     /// Выбирает драйвер теми же правилами и передаёт ему ресурсы запуска.
     /// При отказе не возвращает свидетельство успешного запуска.
     pub fn start_best_with_context(
@@ -567,20 +565,21 @@ mod tests {
 
     #[test]
     fn starts_context_driver_only_when_resources_are_available() {
-        let mut registry =
-            DriverRegistry::<2, ContextRegisteredDriver<StartResources>>::new();
-        registry.register(ContextRegisteredDriver {
-            descriptor: DriverDescriptor::new(
-                "xhci",
-                DriverVersion::new(1, 0, 0),
-                10,
-                PcieMatchRule {
-                    class_code: Some(0x01),
-                    ..PcieMatchRule::any()
-                },
-            ),
-            start: start_with_resources,
-        }).unwrap();
+        let mut registry = DriverRegistry::<2, ContextRegisteredDriver<StartResources>>::new();
+        registry
+            .register(ContextRegisteredDriver {
+                descriptor: DriverDescriptor::new(
+                    "xhci",
+                    DriverVersion::new(1, 0, 0),
+                    10,
+                    PcieMatchRule {
+                        class_code: Some(0x01),
+                        ..PcieMatchRule::any()
+                    },
+                ),
+                start: start_with_resources,
+            })
+            .unwrap();
 
         let function = nvme_function();
         let mut resources = StartResources::default();
@@ -607,5 +606,4 @@ mod tests {
         );
         assert_eq!(resources.calls, 2);
     }
-
 }

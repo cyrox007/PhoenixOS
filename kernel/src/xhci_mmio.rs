@@ -73,7 +73,16 @@ pub unsafe fn probe<const N: usize>(
     table: &mut ActivePageTable,
     frames: &mut SystemFrameAllocator<N>,
     physical_memory_offset: VirtAddr,
-) -> Result<(XhciCapabilities, ResetResult, CommandReport, CommandReport, PortSummary), XhciMmioError> {
+) -> Result<
+    (
+        XhciCapabilities,
+        ResetResult,
+        CommandReport,
+        CommandReport,
+        PortSummary,
+    ),
+    XhciMmioError,
+> {
     if !controller.memory_enabled {
         return Err(XhciMmioError::MemoryAccessDisabled);
     }

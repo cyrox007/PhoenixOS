@@ -4,6 +4,7 @@ exception: breakpoint
 acpi platform discovery: OK
 pcie ecam enumeration: OK
 xhci pcie discovery: OK
+xhci driver registry start: OK
 xhci mmio capabilities: OK
 xhci controller reset: OK
 xhci dma command completion: OK

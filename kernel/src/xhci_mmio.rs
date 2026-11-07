@@ -1,10 +1,10 @@
-//! Управление xHCI через MMIO и краткоживущие DMA-обмены в QEMU.
+//! Управление xHCI через MMIO и общий сеанс двух USB-устройств в QEMU.
 //!
-//! Контроллер запускается только после установки структур DMA и каждый
-//! раз сбрасывается до освобождения памяти. Диапазон адресов зарезервирован
-//! исключительно для проверочного профиля QEMU.
+//! Контроллер запускается после настройки DMA-колец, сохраняет оба слота
+//! между передачами и сбрасывается один раз перед возвратом всей памяти.
+//! Область регистров зарезервирована только для проверочного профиля QEMU.
 
-use crate::xhci_command::{self, CommandError, CommandReport};
+use crate::xhci_command::{self, CommandError, CommandReport, RetainedSlotsReport};
 use phoenix_memory::SystemFrameAllocator;
 use phoenix_pcie::xhci::XhciPciController;
 use phoenix_pcie::xhci_capabilities::{CapabilityError, RegisterAccess, XhciCapabilities};
@@ -81,6 +81,7 @@ pub unsafe fn probe<const N: usize>(
         CommandReport,
         CommandReport,
         PortSummary,
+        RetainedSlotsReport,
     ),
     XhciMmioError,
 > {
@@ -146,31 +147,22 @@ pub unsafe fn probe<const N: usize>(
         if ports.connected < 2 || ports.enabled < 2 {
             return Err(XhciMmioError::MissingTestDevices);
         }
-        let report = unsafe {
-            xhci_command::first_command(
+        // Единый сеанс: два отдельных слота, два комплекта контекстов,
+        // повторное чтение первой конфигурации после адресации второй.
+        let (report, second, retained) = unsafe {
+            xhci_command::enumerate_pair(
                 &registers,
                 capabilities,
                 frames,
                 physical_memory_offset,
                 ports.first_connected_port,
                 ports.first_speed,
-            )
-        }
-        .map_err(XhciMmioError::Command)?;
-        // Второй независимый цикл проверяет повторное выделение страниц,
-        // отсутствие оставшихся отображений и повторный запуск устройства.
-        let second = unsafe {
-            xhci_command::first_command(
-                &registers,
-                capabilities,
-                frames,
-                physical_memory_offset,
                 ports.second_connected_port,
                 ports.second_speed,
             )
         }
         .map_err(XhciMmioError::Command)?;
-        Ok((capabilities, reset, report, second, ports))
+        Ok((capabilities, reset, report, second, ports, retained))
     })();
     unmap_pages(table, mapped)?;
     result

@@ -365,10 +365,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         "INFO",
         format_args!(
             "xhci usb persistent slots: OK first={} second={} rechecked={} pages={}",
-            retained.first_slot,
-            retained.second_slot,
-            retained.rechecked_slot,
-            retained.pages
+            retained.first_slot, retained.second_slot, retained.rechecked_slot, retained.pages
         ),
     );
 

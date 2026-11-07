@@ -8,9 +8,9 @@ use core::sync::atomic::{Ordering, compiler_fence};
 use phoenix_dma::DmaLayout;
 use phoenix_dma::mapping::{DeviceMapping, DirectDmaAperture, PhysicalAddress, QemuDirectDma};
 use phoenix_memory::SystemFrameAllocator;
+use phoenix_pcie::usb_descriptors::{self, DescriptorError};
 use phoenix_pcie::xhci_capabilities::XhciCapabilities;
 use phoenix_pcie::xhci_control::{self, OperationalRegisters};
-use phoenix_pcie::usb_descriptors::{self, DescriptorError};
 use x86_64::VirtAddr;
 
 const PAGE_BYTES: u64 = 4096;
@@ -349,7 +349,11 @@ fn read_descriptor<R: OperationalRegisters>(
         5,
     )?;
     let mut configuration = [0_u8; 512];
-    for (index, byte) in configuration.iter_mut().take(configuration_size).enumerate() {
+    for (index, byte) in configuration
+        .iter_mut()
+        .take(configuration_size)
+        .enumerate()
+    {
         *byte = memory.read_byte(DESCRIPTOR_PAGE, 128 + index);
     }
     let interface = usb_descriptors::parse_configuration(&configuration[..configuration_size])

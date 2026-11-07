@@ -4,9 +4,7 @@
 use crate::{ActivePageTable, PAGE_SIZE, USER_SPACE_END_EXCLUSIVE};
 use x86_64::{
     PhysAddr, VirtAddr,
-    structures::paging::{
-        FrameAllocator, Page, PageTableFlags, PhysFrame, Size4KiB,
-    },
+    structures::paging::{FrameAllocator, Page, PageTableFlags, PhysFrame, Size4KiB},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,8 +19,7 @@ pub enum DmaWindowError {
 /// Преобразователь одной страницы. Возврат ошибки не должен менять отображение.
 pub trait DmaPageAccess {
     fn map_page(&mut self, virtual_addr: u64, physical_addr: u64) -> Result<(), DmaWindowError>;
-    fn unmap_page(&mut self, virtual_addr: u64, physical_addr: u64)
-        -> Result<(), DmaWindowError>;
+    fn unmap_page(&mut self, virtual_addr: u64, physical_addr: u64) -> Result<(), DmaWindowError>;
 }
 
 /// Не владеет физическими страницами. Они остаются закреплёнными у владельца,
@@ -128,40 +125,31 @@ impl<'a, A: FrameAllocator<Size4KiB>> ActiveDmaPageAccess<'a, A> {
         Self {
             table,
             allocator,
-            flags: (flags | PageTableFlags::NO_EXECUTE)
-                & !PageTableFlags::USER_ACCESSIBLE,
+            flags: (flags | PageTableFlags::NO_EXECUTE) & !PageTableFlags::USER_ACCESSIBLE,
         }
     }
 }
 
 impl<A: FrameAllocator<Size4KiB>> DmaPageAccess for ActiveDmaPageAccess<'_, A> {
     fn map_page(&mut self, virtual_addr: u64, physical_addr: u64) -> Result<(), DmaWindowError> {
-        let virtual_addr = VirtAddr::try_new(virtual_addr)
-            .map_err(|_| DmaWindowError::InvalidRange)?;
-        let physical_addr = PhysAddr::try_new(physical_addr)
-            .map_err(|_| DmaWindowError::InvalidRange)?;
+        let virtual_addr =
+            VirtAddr::try_new(virtual_addr).map_err(|_| DmaWindowError::InvalidRange)?;
+        let physical_addr =
+            PhysAddr::try_new(physical_addr).map_err(|_| DmaWindowError::InvalidRange)?;
         let page = Page::<Size4KiB>::from_start_address(virtual_addr)
             .map_err(|_| DmaWindowError::InvalidRange)?;
         let frame = PhysFrame::<Size4KiB>::from_start_address(physical_addr)
             .map_err(|_| DmaWindowError::InvalidRange)?;
-        unsafe {
-            self.table.map_4k(page, frame, self.flags, self.allocator)
-        }
-        .map_err(|_| DmaWindowError::MappingFailed)
+        unsafe { self.table.map_4k(page, frame, self.flags, self.allocator) }
+            .map_err(|_| DmaWindowError::MappingFailed)
     }
 
-    fn unmap_page(
-        &mut self,
-        virtual_addr: u64,
-        physical_addr: u64,
-    ) -> Result<(), DmaWindowError> {
+    fn unmap_page(&mut self, virtual_addr: u64, physical_addr: u64) -> Result<(), DmaWindowError> {
         let virtual_addr = VirtAddr::try_new(virtual_addr)
             .map_err(|_| DmaWindowError::InvalidRange)?;
         let page = Page::<Size4KiB>::from_start_address(virtual_addr)
             .map_err(|_| DmaWindowError::InvalidRange)?;
-        if self.table.translate_addr(virtual_addr).map(|p| p.as_u64())
-            != Some(physical_addr)
-        {
+        if self.table.translate_addr(virtual_addr).map(|p| p.as_u64()) != Some(physical_addr) {
             return Err(DmaWindowError::WrongPhysicalFrame);
         }
         self.table
@@ -183,7 +171,11 @@ mod tests {
     }
 
     impl DmaPageAccess for FakePages {
-        fn map_page(&mut self, virtual_addr: u64, _physical_addr: u64) -> Result<(), DmaWindowError> {
+        fn map_page(
+            &mut self,
+            virtual_addr: u64,
+            _physical_addr: u64,
+        ) -> Result<(), DmaWindowError> {
             let index = ((virtual_addr - self.start) / PAGE_SIZE) as usize;
             if self.fail_map == Some(index) {
                 return Err(DmaWindowError::MappingFailed);
@@ -219,10 +211,19 @@ mod tests {
             fail_unmap: Some(1),
             start: BASE,
         };
-        assert_eq!(window.map_all(&mut pages), Err(DmaWindowError::MappingFailed));
+        assert_eq!(
+            window.map_all(&mut pages),
+            Err(DmaWindowError::MappingFailed)
+        );
         assert_eq!(window.mapped_pages(), 2);
-        assert_eq!(window.map_all(&mut pages), Err(DmaWindowError::PartialMapping));
-        assert_eq!(window.unmap_all(&mut pages), Err(DmaWindowError::UnmappingFailed));
+        assert_eq!(
+            window.map_all(&mut pages),
+            Err(DmaWindowError::PartialMapping)
+        );
+        assert_eq!(
+            window.unmap_all(&mut pages),
+            Err(DmaWindowError::UnmappingFailed)
+        );
         assert_eq!(window.mapped_pages(), 2);
         pages.fail_unmap = None;
         window.unmap_all(&mut pages).unwrap();

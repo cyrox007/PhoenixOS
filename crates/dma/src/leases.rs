@@ -18,6 +18,7 @@ pub enum DmaLeaseError {
     DeviceActive,
     GenerationExhausted,
     Allocation(DmaError),
+    Release(DmaError),
 }
 
 #[derive(Clone, Copy)]
@@ -32,6 +33,15 @@ struct Slot {
 pub trait DmaBacking {
     fn allocate(&mut self, layout: crate::DmaLayout) -> Result<DmaRegion, DmaError>;
     fn release(&mut self, region: DmaRegion);
+
+    /// Аппаратный слой должен переопределить этот метод, если снятие
+    /// отображения или возврат страниц может завершиться отказом.
+    /// При Err область обязана оставаться под учётом и быть пригодной
+    /// для повторного освобождения либо явного восстановления.
+    fn try_release(&mut self, region: DmaRegion) -> Result<(), DmaError> {
+        self.release(region);
+        Ok(())
+    }
 }
 
 /// Реестр эксклюзивного владения. Не является потокобезопасным:
@@ -117,8 +127,12 @@ impl<const N: usize> DmaLeaseTable<N> {
         if self.slots[handle.slot].active {
             return Err(DmaLeaseError::DeviceActive);
         }
+        // При отказе аппаратного освобождения сохраняем право владения:
+        // прежний идентификатор остаётся действительным для повторной попытки.
+        backing
+            .try_release(region)
+            .map_err(DmaLeaseError::Release)?;
         self.slots[handle.slot].region = None;
-        backing.release(region);
         Ok(())
     }
 }
@@ -240,6 +254,60 @@ mod tests {
         table.finish_device_access(current).unwrap();
         table.release(&mut backing, current).unwrap();
         assert_eq!(backing.frees, 2);
+    }
+
+    struct RetryableBacking {
+        attempts: usize,
+        releases: usize,
+    }
+
+    impl DmaBacking for RetryableBacking {
+        fn allocate(&mut self, layout: DmaLayout) -> Result<DmaRegion, DmaError> {
+            DmaRegion::new(
+                CpuVirtualAddress::new(0x1000),
+                DeviceAddress::new(0x2000),
+                layout,
+            )
+        }
+
+        fn release(&mut self, _region: DmaRegion) {
+            self.releases += 1;
+        }
+
+        fn try_release(&mut self, region: DmaRegion) -> Result<(), DmaError> {
+            self.attempts += 1;
+            if self.attempts == 1 {
+                return Err(DmaError::InvalidRange);
+            }
+            self.release(region);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn failed_release_preserves_ownership_for_retry() {
+        let mut leases = DmaLeaseTable::<1>::new();
+        let mut memory = RetryableBacking {
+            attempts: 0,
+            releases: 0,
+        };
+        let layout = DmaLayout::new(4096, 4096).unwrap();
+        let handle = leases.acquire(&mut memory, layout).unwrap();
+
+        assert_eq!(
+            leases.release(&mut memory, handle),
+            Err(DmaLeaseError::Release(DmaError::InvalidRange))
+        );
+        assert!(leases.region(handle).is_ok());
+        assert_eq!(
+            leases.acquire(&mut memory, layout),
+            Err(DmaLeaseError::Exhausted)
+        );
+        assert_eq!(memory.releases, 0);
+
+        leases.release(&mut memory, handle).unwrap();
+        assert_eq!(memory.releases, 1);
+        assert_eq!(leases.region(handle), Err(DmaLeaseError::StaleHandle));
     }
 
     #[test]

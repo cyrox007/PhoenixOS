@@ -1,6 +1,7 @@
 #![no_std]
 
 pub mod dma_window;
+pub mod kernel_reservations;
 
 use x86_64::registers::control::{Cr3, Cr3Flags};
 use x86_64::structures::paging::mapper::{MapToError, UnmapError};

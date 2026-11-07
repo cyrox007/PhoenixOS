@@ -123,12 +123,7 @@ pub unsafe fn probe<const N: usize>(
         )
         .map_err(XhciMmioError::ControllerReset)?;
         let report = unsafe {
-            xhci_command::first_command(
-                &registers,
-                capabilities,
-                frames,
-                physical_memory_offset,
-            )
+            xhci_command::first_command(&registers, capabilities, frames, physical_memory_offset)
         }
         .map_err(XhciMmioError::Command)?;
         Ok((capabilities, reset, report))

@@ -6,9 +6,7 @@
 
 use core::sync::atomic::{Ordering, compiler_fence};
 use phoenix_dma::DmaLayout;
-use phoenix_dma::mapping::{
-    DeviceMapping, DirectDmaAperture, PhysicalAddress, QemuDirectDma,
-};
+use phoenix_dma::mapping::{DeviceMapping, DirectDmaAperture, PhysicalAddress, QemuDirectDma};
 use phoenix_memory::SystemFrameAllocator;
 use phoenix_pcie::xhci_capabilities::XhciCapabilities;
 use phoenix_pcie::xhci_control::{self, OperationalRegisters};
@@ -73,11 +71,7 @@ fn write_address<R: OperationalRegisters>(registers: &R, offset: u64, address: u
     registers.write_u32(offset + 4, (address >> 32) as u32);
 }
 
-fn wait_halted<R: OperationalRegisters>(
-    registers: &R,
-    operational: u64,
-    expected: bool,
-) -> bool {
+fn wait_halted<R: OperationalRegisters>(registers: &R, operational: u64, expected: bool) -> bool {
     for _ in 0..MAX_POLLS {
         let halted = registers.read_u32(operational + 4) & 1 != 0;
         if halted == expected {
@@ -208,12 +202,9 @@ pub unsafe fn first_command<const N: usize, R: OperationalRegisters>(
     let mut backend = unsafe { QemuDirectDma::<1>::new(aperture) };
     let layout = DmaLayout::new((PAGE_COUNT * PAGE_BYTES) as usize, PAGE_BYTES as usize)
         .expect("некорректный размер буфера xHCI");
-    let mut device_mapping = DeviceMapping::establish(
-        &mut backend,
-        PhysicalAddress::new(base),
-        layout,
-    )
-    .map_err(|_| CommandError::DeviceMappingFailed)?;
+    let mut device_mapping =
+        DeviceMapping::establish(&mut backend, PhysicalAddress::new(base), layout)
+            .map_err(|_| CommandError::DeviceMappingFailed)?;
     assert_eq!(device_mapping.device_address().value(), base);
 
     let result = issue_noop(registers, capabilities, base, &memory);

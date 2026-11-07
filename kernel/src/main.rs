@@ -267,8 +267,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let mut page_table = unsafe { ActivePageTable::from_current(physical_memory_offset) };
 
     // Ранний контролируемый доступ к MMIO модели xHCI в QEMU.
-    let capabilities = unsafe { xhci_mmio::probe(xhci, &mut page_table, &mut frames) }
-        .expect("не удалось прочитать регистры возможностей xHCI через MMIO");
+    let (capabilities, reset) = unsafe { xhci_mmio::probe(xhci, &mut page_table, &mut frames) }
+        .expect("не удалось проверить и сбросить xHCI через MMIO");
     serial::line(
         &mut out,
         "INFO",
@@ -281,6 +281,15 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             capabilities.operational_offset,
             capabilities.doorbell_offset,
             capabilities.runtime_offset
+        ),
+    );
+
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "xhci controller reset: OK halted_before={} status_after={:#x}",
+            reset.halted_before, reset.status_after
         ),
     );
 

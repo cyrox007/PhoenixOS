@@ -102,6 +102,161 @@ impl DmaKernelWindow {
     }
 }
 
+/// Выбор флагов кэширования для уже проверенного физического диапазона.
+///
+/// Итоговый аппаратный тип памяти зависит также от PAT и MTRR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DmaCachePolicy {
+    WriteBack,
+    Uncacheable,
+}
+
+impl DmaCachePolicy {
+    pub fn page_flags(self) -> PageTableFlags {
+        let base = PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
+        match self {
+            Self::WriteBack => base,
+            Self::Uncacheable => base | PageTableFlags::NO_CACHE | PageTableFlags::WRITE_THROUGH,
+        }
+    }
+}
+
+/// Идентификатор резервирования с защитой от повторного использования записи.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DmaWindowHandle {
+    slot: usize,
+    generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DmaReservationError {
+    InvalidWindow(DmaWindowError),
+    Overlap,
+    Exhausted,
+    StaleHandle,
+    StillMapped,
+}
+
+struct ReservationSlot {
+    window: Option<DmaKernelWindow>,
+    generation: u64,
+}
+
+/// Реестр непересекающихся виртуальных окон с фиксированной вместимостью.
+///
+/// Проверяет пересечения только в управляемом им диапазоне. Владелец ядра
+/// обязан предварительно исключить этот диапазон из прочих назначений.
+pub struct DmaWindowRegistry<const N: usize> {
+    slots: [ReservationSlot; N],
+}
+
+impl<const N: usize> DmaWindowRegistry<N> {
+    pub const fn new() -> Self {
+        Self {
+            slots: [const { ReservationSlot { window: None, generation: 0 } }; N],
+        }
+    }
+
+    pub fn reserve(
+        &mut self,
+        virtual_start: u64,
+        physical_start: u64,
+        page_count: u64,
+    ) -> Result<DmaWindowHandle, DmaReservationError> {
+        let window = DmaKernelWindow::new(virtual_start, physical_start, page_count)
+            .map_err(DmaReservationError::InvalidWindow)?;
+        let length = page_count * PAGE_SIZE;
+        let end = virtual_start + length;
+        for slot in &self.slots {
+            let Some(existing) = slot.window.as_ref() else {
+                continue;
+            };
+            let existing_end = existing.virtual_start + existing.page_count * PAGE_SIZE;
+            if virtual_start < existing_end && existing.virtual_start < end {
+                return Err(DmaReservationError::Overlap);
+            }
+        }
+
+        let index = self
+            .slots
+            .iter()
+            .position(|slot| slot.window.is_none() && slot.generation < u64::MAX)
+            .ok_or(DmaReservationError::Exhausted)?;
+        let slot = &mut self.slots[index];
+        slot.generation += 1;
+        slot.window = Some(window);
+        Ok(DmaWindowHandle {
+            slot: index,
+            generation: slot.generation,
+        })
+    }
+
+    fn checked_slot(&self, handle: DmaWindowHandle) -> Result<usize, DmaReservationError> {
+        let slot = self
+            .slots
+            .get(handle.slot)
+            .ok_or(DmaReservationError::StaleHandle)?;
+        if slot.generation != handle.generation || slot.window.is_none() {
+            return Err(DmaReservationError::StaleHandle);
+        }
+        Ok(handle.slot)
+    }
+
+    pub fn map_all<A: DmaPageAccess>(
+        &mut self,
+        handle: DmaWindowHandle,
+        access: &mut A,
+    ) -> Result<(), DmaReservationError> {
+        let index = self.checked_slot(handle)?;
+        self.slots[index]
+            .window
+            .as_mut()
+            .expect("проверенное резервирование")
+            .map_all(access)
+            .map_err(DmaReservationError::InvalidWindow)
+    }
+
+    pub fn unmap_all<A: DmaPageAccess>(
+        &mut self,
+        handle: DmaWindowHandle,
+        access: &mut A,
+    ) -> Result<(), DmaReservationError> {
+        let index = self.checked_slot(handle)?;
+        self.slots[index]
+            .window
+            .as_mut()
+            .expect("проверенное резервирование")
+            .unmap_all(access)
+            .map_err(DmaReservationError::InvalidWindow)
+    }
+
+    pub fn mapped_pages(&self, handle: DmaWindowHandle) -> Result<u64, DmaReservationError> {
+        let index = self.checked_slot(handle)?;
+        Ok(self.slots[index]
+            .window
+            .as_ref()
+            .expect("проверенное резервирование")
+            .mapped_pages())
+    }
+
+    /// Запрещает повторную выдачу окна до полного снятия отображений.
+    pub fn release(&mut self, handle: DmaWindowHandle) -> Result<(), DmaReservationError> {
+        let index = self.checked_slot(handle)?;
+        let slot = &mut self.slots[index];
+        if !slot.window.as_ref().expect("проверенное резервирование").is_clear() {
+            return Err(DmaReservationError::StillMapped);
+        }
+        slot.window = None;
+        Ok(())
+    }
+}
+
+impl<const N: usize> Default for DmaWindowRegistry<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Подключение к существующим активным таблицам ядра x86-64.
 /// Внутренняя память для таблиц выделяется из переданного распределителя.
 /// Права доступа и политику кэширования задаёт вызывающая сторона.
@@ -109,6 +264,22 @@ pub struct ActiveDmaPageAccess<'a, A> {
     table: &'a mut ActivePageTable,
     allocator: &'a mut A,
     flags: PageTableFlags,
+}
+
+impl<'a, A: FrameAllocator<Size4KiB>> ActiveDmaPageAccess<'a, A> {
+    /// Создаёт отображатель с явно выбранной политикой кэширования.
+    ///
+    /// # Безопасность
+    ///
+    /// Вызывающий код обязан проверить PAT/MTRR, свойства физической памяти,
+    /// отсутствие несовместимых псевдонимов и владение виртуальным окном.
+    pub unsafe fn with_cache_policy(
+        table: &'a mut ActivePageTable,
+        allocator: &'a mut A,
+        policy: DmaCachePolicy,
+    ) -> Self {
+        unsafe { Self::new(table, allocator, policy.page_flags()) }
+    }
 }
 
 impl<'a, A: FrameAllocator<Size4KiB>> ActiveDmaPageAccess<'a, A> {
@@ -233,6 +404,55 @@ mod tests {
         window.map_all(&mut pages).unwrap();
         assert_eq!(window.mapped_pages(), 3);
         window.unmap_all(&mut pages).unwrap();
+    }
+
+    #[test]
+    fn reservation_prevents_overlap_and_reuse_until_unmapped() {
+        let mut registry = DmaWindowRegistry::<2>::new();
+        let first = registry.reserve(BASE, 0x4000, 2).unwrap();
+        assert_eq!(
+            registry.reserve(BASE + PAGE_SIZE, 0x8000, 1),
+            Err(DmaReservationError::Overlap)
+        );
+        let second = registry.reserve(BASE + 2 * PAGE_SIZE, 0x8000, 1).unwrap();
+        let mut pages = FakePages {
+            mappings: [false; 4],
+            fail_map: None,
+            fail_unmap: Some(1),
+            start: BASE,
+        };
+        registry.map_all(first, &mut pages).unwrap();
+        assert_eq!(registry.release(first), Err(DmaReservationError::StillMapped));
+        assert_eq!(
+            registry.reserve(BASE, 0x4000, 1),
+            Err(DmaReservationError::Overlap)
+        );
+        assert!(registry.unmap_all(first, &mut pages).is_err());
+        assert_eq!(registry.mapped_pages(first), Ok(2));
+        pages.fail_unmap = None;
+        registry.unmap_all(first, &mut pages).unwrap();
+        registry.release(first).unwrap();
+        assert_eq!(registry.release(first), Err(DmaReservationError::StaleHandle));
+        let third = registry.reserve(BASE, 0xa000, 1).unwrap();
+        assert_ne!(first, third);
+        assert_eq!(registry.mapped_pages(first), Err(DmaReservationError::StaleHandle));
+        registry.release(third).unwrap();
+        registry.release(second).unwrap();
+    }
+
+    #[test]
+    fn reservations_and_cache_flags_are_explicit() {
+        let mut registry = DmaWindowRegistry::<0>::new();
+        assert_eq!(
+            registry.reserve(BASE, 0x1000, 1),
+            Err(DmaReservationError::Exhausted)
+        );
+        let writable = PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
+        assert_eq!(DmaCachePolicy::WriteBack.page_flags(), writable);
+        assert_eq!(
+            DmaCachePolicy::Uncacheable.page_flags(),
+            writable | PageTableFlags::NO_CACHE | PageTableFlags::WRITE_THROUGH
+        );
     }
 
     #[test]

@@ -295,11 +295,11 @@ impl<const N: usize> DmaMappingBackend for QemuDirectDma<N> {
             return Err(DmaError::Unaddressable);
         }
         let end = start.checked_add(length).ok_or(DmaError::AddressOverflow)?;
-        if self.slots.iter().any(|slot| {
-            slot.active
-                && start < slot.start + slot.length
-                && slot.start < end
-        }) {
+        if self
+            .slots
+            .iter()
+            .any(|slot| slot.active && start < slot.start + slot.length && slot.start < end)
+        {
             return Err(DmaError::InvalidRange);
         }
         let slot = self

@@ -1,9 +1,9 @@
-//! Первоначальное перечисление USB-устройств через DMA xHCI в QEMU.
+//! Перечисление двух USB-устройств в одном сеансе xHCI через DMA в QEMU.
 //!
-//! Для испытания используется только явно разрешённый профиль без IOMMU.
-//! Восемь физических страниц: DCBAA, командное и событийное кольца,
-//! таблица сегментов, входной и выходной контексты, кольцо EP0 и данные.
-//! Области закреплены до завершения обмена и сброса контроллера.
+//! Двенадцать страниц закреплены на весь сеанс: четыре общие страницы
+//! и по четыре для каждого USB-устройства. У каждого собственный слот,
+//! контексты и кольцо EP0. Сброс выполняется только после всех обменов.
+//! Это диагностический сеанс, не служба постоянного приёма HID-отчётов.
 
 use core::sync::atomic::{Ordering, compiler_fence};
 use phoenix_dma::DmaLayout;
@@ -15,11 +15,9 @@ use phoenix_pcie::xhci_control::{self, OperationalRegisters};
 use x86_64::VirtAddr;
 
 const PAGE_BYTES: u64 = 4096;
-const PAGE_COUNT: u64 = 8;
-const INPUT_PAGE: u64 = 4;
-const OUTPUT_PAGE: u64 = 5;
-const TRANSFER_PAGE: u64 = 6;
-const DESCRIPTOR_PAGE: u64 = 7;
+const PAGE_COUNT: u64 = 12;
+const FIRST_DEVICE_PAGE: u64 = 4;
+const SECOND_DEVICE_PAGE: u64 = 8;
 const COMMAND_RING_PAGE: u64 = 1;
 const EVENT_RING_PAGE: u64 = 2;
 const EVENT_TABLE_PAGE: u64 = 3;
@@ -50,6 +48,9 @@ pub enum CommandError {
     InvalidTransferEvent,
     InvalidConfiguration,
     Configuration(DescriptorError),
+    DuplicateSlot,
+    RetainedConfigurationChanged,
+    ControllerStopped,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +66,33 @@ pub struct CommandReport {
     pub interface_protocol: u8,
     pub endpoint_count: u8,
     pub configuration_length: u16,
+}
+
+#[derive(Clone, Copy)]
+struct DevicePages {
+    input: u64,
+    output: u64,
+    transfer: u64,
+    descriptor: u64,
+}
+
+impl DevicePages {
+    const fn new(start: u64) -> Self {
+        Self {
+            input: start,
+            output: start + 1,
+            transfer: start + 2,
+            descriptor: start + 3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetainedSlotsReport {
+    pub first_slot: u8,
+    pub second_slot: u8,
+    pub rechecked_slot: u8,
+    pub pages: u64,
 }
 
 struct GuestMemory {
@@ -153,6 +181,7 @@ fn command<R: OperationalRegisters>(
     base: u64,
     memory: &GuestMemory,
     index: usize,
+    event_index: usize,
     parameter: u64,
     control: u32,
 ) -> Result<Completion, CommandError> {
@@ -168,7 +197,7 @@ fn command<R: OperationalRegisters>(
         capabilities.runtime_offset + 0x20,
         base,
         memory,
-        index,
+        event_index,
     )?;
     if event.kind != COMMAND_COMPLETION_EVENT as u8 {
         return Err(CommandError::WrongEventType);
@@ -189,6 +218,7 @@ fn configuration_transfer<R: OperationalRegisters>(
     capabilities: XhciCapabilities,
     base: u64,
     memory: &GuestMemory,
+    pages: DevicePages,
     slot: u8,
     trb: usize,
     length: usize,
@@ -198,9 +228,9 @@ fn configuration_transfer<R: OperationalRegisters>(
     if length == 0 || length > 512 || buffer_offset + length > PAGE_BYTES as usize {
         return Err(CommandError::InvalidConfiguration);
     }
-    let page = TRANSFER_PAGE;
+    let page = pages.transfer;
     let offset = trb * 16;
-    let destination = base + DESCRIPTOR_PAGE * PAGE_BYTES + buffer_offset as u64;
+    let destination = base + pages.descriptor * PAGE_BYTES + buffer_offset as u64;
     memory.write(page, offset, 0x0200_0680);
     memory.write(page, offset + 4, (length as u32) << 16);
     memory.write(page, offset + 8, 8);
@@ -236,10 +266,16 @@ fn read_descriptor<R: OperationalRegisters>(
     capabilities: XhciCapabilities,
     base: u64,
     memory: &GuestMemory,
+    pages: DevicePages,
     port: u8,
     speed: u8,
+    command_index: usize,
+    event_index: usize,
 ) -> Result<CommandReport, CommandError> {
-    let enabled = command(registers, capabilities, base, memory, 1, 0, 9 << 10)?;
+    let enabled = command(
+        registers, capabilities, base, memory,
+        command_index, event_index, 0, 9 << 10,
+    )?;
     if enabled.slot == 0 || enabled.slot > capabilities.max_slots {
         return Err(CommandError::InvalidSlot);
     }
@@ -251,34 +287,34 @@ fn read_descriptor<R: OperationalRegisters>(
         4 => 512,
         _ => return Err(CommandError::InvalidSpeed),
     };
-    let output = base + OUTPUT_PAGE * PAGE_BYTES;
-    let input = base + INPUT_PAGE * PAGE_BYTES;
-    let transfer = base + TRANSFER_PAGE * PAGE_BYTES;
-    let descriptor = base + DESCRIPTOR_PAGE * PAGE_BYTES;
+    let output = base + pages.output * PAGE_BYTES;
+    let input = base + pages.input * PAGE_BYTES;
+    let transfer = base + pages.transfer * PAGE_BYTES;
+    let descriptor = base + pages.descriptor * PAGE_BYTES;
 
     // DCBAA[slot] — адрес выходного контекста устройства.
     memory.write(0, usize::from(slot) * 8, output as u32);
     memory.write(0, usize::from(slot) * 8 + 4, (output >> 32) as u32);
 
     // Контекст управления (Add: Slot + EP0), за ним Slot и EP0.
-    memory.write(INPUT_PAGE, 4, 3);
-    memory.write(INPUT_PAGE, context, (u32::from(speed) << 20) | (1 << 27));
-    memory.write(INPUT_PAGE, context + 4, u32::from(port) << 16);
+    memory.write(pages.input, 4, 3);
+    memory.write(pages.input, context, (u32::from(speed) << 20) | (1 << 27));
+    memory.write(pages.input, context + 4, u32::from(port) << 16);
     let ep = context * 2;
     memory.write(
-        INPUT_PAGE,
+        pages.input,
         ep + 4,
         (3 << 1) | (4 << 3) | (packet_size << 16),
     );
-    memory.write(INPUT_PAGE, ep + 8, (transfer | 1) as u32);
-    memory.write(INPUT_PAGE, ep + 12, (transfer >> 32) as u32);
-    memory.write(INPUT_PAGE, ep + 16, 8);
+    memory.write(pages.input, ep + 8, (transfer | 1) as u32);
+    memory.write(pages.input, ep + 12, (transfer >> 32) as u32);
+    memory.write(pages.input, ep + 16, 8);
 
     // Link TRB на конце управляющего кольца.
     let link = (RING_ITEMS as usize - 1) * 16;
-    memory.write(TRANSFER_PAGE, link, transfer as u32);
-    memory.write(TRANSFER_PAGE, link + 4, (transfer >> 32) as u32);
-    memory.write(TRANSFER_PAGE, link + 12, LINK_TRB);
+    memory.write(pages.transfer, link, transfer as u32);
+    memory.write(pages.transfer, link + 4, (transfer >> 32) as u32);
+    memory.write(pages.transfer, link + 12, LINK_TRB);
 
     compiler_fence(Ordering::SeqCst);
     let _addressed = command(
@@ -286,24 +322,25 @@ fn read_descriptor<R: OperationalRegisters>(
         capabilities,
         base,
         memory,
-        2,
+        command_index + 1,
+        event_index + 1,
         input,
         (11 << 10) | (u32::from(slot) << 24),
     )?;
 
     // GET_DESCRIPTOR(Device, 18): Setup -> Data IN -> Status OUT.
-    memory.write(TRANSFER_PAGE, 0, 0x0100_0680);
-    memory.write(TRANSFER_PAGE, 4, 18 << 16);
-    memory.write(TRANSFER_PAGE, 8, 8);
-    memory.write(TRANSFER_PAGE, 12, (2 << 10) | (3 << 16) | (1 << 6) | 1);
-    memory.write(TRANSFER_PAGE, 16, descriptor as u32);
-    memory.write(TRANSFER_PAGE, 20, (descriptor >> 32) as u32);
-    memory.write(TRANSFER_PAGE, 24, 18);
-    memory.write(TRANSFER_PAGE, 28, (3 << 10) | (1 << 16) | 1);
-    memory.write(TRANSFER_PAGE, 32, 0);
-    memory.write(TRANSFER_PAGE, 36, 0);
-    memory.write(TRANSFER_PAGE, 40, 0);
-    memory.write(TRANSFER_PAGE, 44, (4 << 10) | (1 << 5) | 1);
+    memory.write(pages.transfer, 0, 0x0100_0680);
+    memory.write(pages.transfer, 4, 18 << 16);
+    memory.write(pages.transfer, 8, 8);
+    memory.write(pages.transfer, 12, (2 << 10) | (3 << 16) | (1 << 6) | 1);
+    memory.write(pages.transfer, 16, descriptor as u32);
+    memory.write(pages.transfer, 20, (descriptor >> 32) as u32);
+    memory.write(pages.transfer, 24, 18);
+    memory.write(pages.transfer, 28, (3 << 10) | (1 << 16) | 1);
+    memory.write(pages.transfer, 32, 0);
+    memory.write(pages.transfer, 36, 0);
+    memory.write(pages.transfer, 40, 0);
+    memory.write(pages.transfer, 44, (4 << 10) | (1 << 5) | 1);
     compiler_fence(Ordering::SeqCst);
     // Doorbell[slot], DB Target 1 = управляющая конечная точка.
     registers.write_u32(capabilities.doorbell_offset + u64::from(slot) * 4, 1);
@@ -312,7 +349,7 @@ fn read_descriptor<R: OperationalRegisters>(
         capabilities.runtime_offset + 0x20,
         base,
         memory,
-        3,
+        event_index + 2,
     )?;
     if event.kind != 32 || event.code != 1 || event.slot != slot {
         return Err(CommandError::InvalidTransferEvent);
@@ -321,16 +358,18 @@ fn read_descriptor<R: OperationalRegisters>(
         return Err(CommandError::InvalidTransferEvent);
     }
 
-    let first = memory.read(DESCRIPTOR_PAGE, 0);
-    let second = memory.read(DESCRIPTOR_PAGE, 4);
+    let first = memory.read(pages.descriptor, 0);
+    let second = memory.read(pages.descriptor, 4);
     if first & 0xffff != 0x0112 {
         return Err(CommandError::InvalidDescriptor);
     }
-    let identifiers = memory.read(DESCRIPTOR_PAGE, 8);
+    let identifiers = memory.read(pages.descriptor, 8);
 
     // Сначала короткий заголовок конфигурации, затем весь заявленный объём.
-    configuration_transfer(registers, capabilities, base, memory, slot, 3, 9, 64, 4)?;
-    let header = memory.read(DESCRIPTOR_PAGE, 64);
+    configuration_transfer(
+        registers, capabilities, base, memory, pages, slot, 3, 9, 64, event_index + 3,
+    )?;
+    let header = memory.read(pages.descriptor, 64);
     if header & 0xffff != 0x0209 {
         return Err(CommandError::InvalidConfiguration);
     }
@@ -343,11 +382,12 @@ fn read_descriptor<R: OperationalRegisters>(
         capabilities,
         base,
         memory,
+        pages,
         slot,
         6,
         configuration_size,
         128,
-        5,
+        event_index + 4,
     )?;
     let mut configuration = [0_u8; 512];
     for (index, byte) in configuration
@@ -355,7 +395,7 @@ fn read_descriptor<R: OperationalRegisters>(
         .take(configuration_size)
         .enumerate()
     {
-        *byte = memory.read_byte(DESCRIPTOR_PAGE, 128 + index);
+        *byte = memory.read_byte(pages.descriptor, 128 + index);
     }
     let interface = usb_descriptors::parse_configuration(&configuration[..configuration_size])
         .map_err(CommandError::Configuration)?;
@@ -379,9 +419,11 @@ fn issue_enumeration<R: OperationalRegisters>(
     capabilities: XhciCapabilities,
     base: u64,
     memory: &GuestMemory,
-    port: u8,
-    speed: u8,
-) -> Result<CommandReport, CommandError> {
+    first_port: u8,
+    first_speed: u8,
+    second_port: u8,
+    second_speed: u8,
+) -> Result<(CommandReport, CommandReport, RetainedSlotsReport), CommandError> {
     let operational = capabilities.operational_offset;
     let runtime = capabilities.runtime_offset + 0x20;
     let command_address = base + COMMAND_RING_PAGE * PAGE_BYTES;
@@ -432,11 +474,53 @@ fn issue_enumeration<R: OperationalRegisters>(
     }
 
     // Проверяем старый безопасный путь No Op до выдачи слота.
-    let noop = command(registers, capabilities, base, memory, 0, 0, 23 << 10)?;
+    let noop = command(registers, capabilities, base, memory, 0, 0, 0, 23 << 10)?;
     if noop.code != SUCCESS_COMPLETION as u8 {
         return Err(CommandError::WrongCompletionCode);
     }
-    read_descriptor(registers, capabilities, base, memory, port, speed)
+    let first_pages = DevicePages::new(FIRST_DEVICE_PAGE);
+    let second_pages = DevicePages::new(SECOND_DEVICE_PAGE);
+    let first = read_descriptor(
+        registers, capabilities, base, memory, first_pages,
+        first_port, first_speed, 1, 1,
+    )?;
+    // Индексы команд 3/4; индексы событий 6..10 с учётом передач первого USB.
+    let second = read_descriptor(
+        registers, capabilities, base, memory, second_pages,
+        second_port, second_speed, 3, 6,
+    )?;
+    if first.slot_id == second.slot_id {
+        return Err(CommandError::DuplicateSlot);
+    }
+    if !wait_halted(registers, operational, false) {
+        return Err(CommandError::ControllerStopped);
+    }
+    // Повторная передача к ПЕРВОМУ устройству после полного перечисления второго.
+    // Без новой адресации и без сброса, с живыми DCBAA и собственным кольцом EP0.
+    configuration_transfer(
+        registers, capabilities, base, memory, first_pages,
+        first.slot_id, 9, usize::from(first.configuration_length), 768, 11,
+    )?;
+    for index in 0..usize::from(first.configuration_length) {
+        let previous = memory.read_byte(first_pages.descriptor, 128 + index);
+        let repeated = memory.read_byte(first_pages.descriptor, 768 + index);
+        if previous != repeated {
+            return Err(CommandError::RetainedConfigurationChanged);
+        }
+    }
+    if !wait_halted(registers, operational, false) {
+        return Err(CommandError::ControllerStopped);
+    }
+    Ok((
+        first,
+        second,
+        RetainedSlotsReport {
+            first_slot: first.slot_id,
+            second_slot: second.slot_id,
+            rechecked_slot: first.slot_id,
+            pages: PAGE_COUNT,
+        },
+    ))
 }
 
 /// Контроллер должен быть предварительно сброшен и остановлен.
@@ -447,14 +531,16 @@ fn issue_enumeration<R: OperationalRegisters>(
 /// гостевые физические адреса и обеспечивает согласованность памяти x86.
 /// При невозможности остановить/сбросить контроллер страницы намеренно
 /// остаются закреплёнными: освобождать их небезопасно.
-pub unsafe fn first_command<const N: usize, R: OperationalRegisters>(
+pub unsafe fn enumerate_pair<const N: usize, R: OperationalRegisters>(
     registers: &R,
     capabilities: XhciCapabilities,
     frames: &mut SystemFrameAllocator<N>,
     physical_memory_offset: VirtAddr,
-    port: u8,
-    speed: u8,
-) -> Result<CommandReport, CommandError> {
+    first_port: u8,
+    first_speed: u8,
+    second_port: u8,
+    second_speed: u8,
+) -> Result<(CommandReport, CommandReport, RetainedSlotsReport), CommandError> {
     let free_before = frames.free_frames();
     let first = frames
         .allocate_contiguous_below_4k(PAGE_COUNT, 1, 0xffff_ffff)
@@ -488,10 +574,13 @@ pub unsafe fn first_command<const N: usize, R: OperationalRegisters>(
         };
     assert_eq!(device_mapping.device_address().value(), base);
 
-    let result = issue_enumeration(registers, capabilities, base, &memory, port, speed);
+    let result = issue_enumeration(
+        registers, capabilities, base, &memory,
+        first_port, first_speed, second_port, second_speed,
+    );
 
-    // Независимо от результата прекращаем доступ контроллера к памяти.
-    // Сброс удаляет ранее запрограммированные адреса колец.
+    // Одна остановка и сброс после всех передач и проверки обоих слотов.
+    // При отказе безопасного завершения DMA-страницы остаются закреплёнными.
     if xhci_control::stop_and_reset(
         registers,
         capabilities.operational_offset,

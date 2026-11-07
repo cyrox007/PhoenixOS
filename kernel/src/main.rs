@@ -269,7 +269,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let mut page_table = unsafe { ActivePageTable::from_current(physical_memory_offset) };
 
     // Реальный запуск выбранного драйвера с ресурсами ядра.
-    let (launch, (capabilities, reset, command, second, ports)) =
+    let (launch, (capabilities, reset, command, second, ports, retained)) =
         unsafe { xhci_driver::start(xhci, &mut page_table, &mut frames, physical_memory_offset) }
             .expect("штатный драйвер xHCI не смог инициализировать контроллер");
     serial::line(
@@ -350,6 +350,25 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             second.vendor_id,
             second.product_id,
             second.device_class
+        ),
+    );
+
+    assert_ne!(
+        command.slot_id, second.slot_id,
+        "клавиатура и мышь не должны разделять один слот xHCI"
+    );
+    assert_eq!(retained.first_slot, command.slot_id);
+    assert_eq!(retained.second_slot, second.slot_id);
+    assert_eq!(retained.rechecked_slot, command.slot_id);
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "xhci usb persistent slots: OK first={} second={} rechecked={} pages={}",
+            retained.first_slot,
+            retained.second_slot,
+            retained.rechecked_slot,
+            retained.pages
         ),
     );
 

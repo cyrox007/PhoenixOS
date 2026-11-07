@@ -73,7 +73,7 @@ pub unsafe fn probe<const N: usize>(
     table: &mut ActivePageTable,
     frames: &mut SystemFrameAllocator<N>,
     physical_memory_offset: VirtAddr,
-) -> Result<(XhciCapabilities, ResetResult, CommandReport, PortSummary), XhciMmioError> {
+) -> Result<(XhciCapabilities, ResetResult, CommandReport, CommandReport, PortSummary), XhciMmioError> {
     if !controller.memory_enabled {
         return Err(XhciMmioError::MemoryAccessDisabled);
     }
@@ -149,22 +149,18 @@ pub unsafe fn probe<const N: usize>(
         .map_err(XhciMmioError::Command)?;
         // Второй независимый цикл проверяет повторное выделение страниц,
         // отсутствие оставшихся отображений и повторный запуск устройства.
-        let repeated = unsafe {
+        let second = unsafe {
             xhci_command::first_command(
                 &registers,
                 capabilities,
                 frames,
                 physical_memory_offset,
-                ports.first_connected_port,
-                ports.first_speed,
+                ports.second_connected_port,
+                ports.second_speed,
             )
         }
         .map_err(XhciMmioError::Command)?;
-        assert_eq!(
-            report, repeated,
-            "повторный обмен xHCI дал другой результат"
-        );
-        Ok((capabilities, reset, report, ports))
+        Ok((capabilities, reset, report, second, ports))
     })();
     unmap_pages(table, mapped)?;
     result

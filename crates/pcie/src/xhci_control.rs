@@ -67,21 +67,9 @@ pub fn stop_and_reset<R: OperationalRegisters>(
     let command_value = registers.read_u32(command);
     registers.write_u32(command, (command_value & !RUN_STOP) | HOST_CONTROLLER_RESET);
 
-    wait_for(
-        registers,
-        command,
-        HOST_CONTROLLER_RESET,
-        0,
-        max_polls,
-    )
+    wait_for(registers, command, HOST_CONTROLLER_RESET, 0, max_polls)
     .map_err(|_| ResetError::ResetTimeout)?;
-    wait_for(
-        registers,
-        status,
-        CONTROLLER_NOT_READY,
-        0,
-        max_polls,
-    )
+    wait_for(registers, status, CONTROLLER_NOT_READY, 0, max_polls)
     .map_err(|_| ResetError::ReadyTimeout)?;
 
     let status_after = registers.read_u32(status);
@@ -107,9 +95,6 @@ fn wait_for<R: OperationalRegisters>(
 ) -> Result<(), ()> {
     for _ in 0..polls {
         let value = registers.read_u32(offset);
-        if value & HOST_CONTROLLER_ERROR != 0 && offset % 0x100 == USBSTS {
-            return Err(());
-        }
         if value & mask == expected {
             return Ok(());
         }

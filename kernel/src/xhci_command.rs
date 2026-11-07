@@ -11,8 +11,8 @@ use phoenix_dma::mapping::{DeviceMapping, DirectDmaAperture, PhysicalAddress, Qe
 use phoenix_memory::SystemFrameAllocator;
 use phoenix_pcie::usb_descriptors::{self, DescriptorError};
 use phoenix_pcie::xhci_capabilities::XhciCapabilities;
-use phoenix_pcie::xhci_session::{self, SessionDevice};
 use phoenix_pcie::xhci_control::{self, OperationalRegisters};
+use phoenix_pcie::xhci_session::{self, SessionDevice};
 use x86_64::VirtAddr;
 
 const PAGE_BYTES: u64 = 4096;
@@ -255,8 +255,14 @@ fn read_descriptor<R: OperationalRegisters>(
     let command_index = pages.command_index;
     let event_index = pages.event_index;
     let enabled = command(
-        registers, capabilities, base, memory,
-        command_index, event_index, 0, 9 << 10,
+        registers,
+        capabilities,
+        base,
+        memory,
+        command_index,
+        event_index,
+        0,
+        9 << 10,
     )?;
     if enabled.slot == 0 || enabled.slot > capabilities.max_slots {
         return Err(CommandError::InvalidSlot);
@@ -349,7 +355,16 @@ fn read_descriptor<R: OperationalRegisters>(
 
     // Сначала короткий заголовок конфигурации, затем весь заявленный объём.
     configuration_transfer(
-        registers, capabilities, base, memory, pages, slot, 3, 9, 64, event_index + 3,
+        registers,
+        capabilities,
+        base,
+        memory,
+        pages,
+        slot,
+        3,
+        9,
+        64,
+        event_index + 3,
     )?;
     let header = memory.read(pages.descriptor, 64);
     if header & 0xffff != 0x0209 {
@@ -463,11 +478,23 @@ fn issue_enumeration<R: OperationalRegisters>(
     let first_pages = xhci_session::FIRST_DEVICE;
     let second_pages = xhci_session::SECOND_DEVICE;
     let first = read_descriptor(
-        registers, capabilities, base, memory, first_pages, first_port, first_speed,
+        registers,
+        capabilities,
+        base,
+        memory,
+        first_pages,
+        first_port,
+        first_speed,
     )?;
     // Индексы команд и событий берём из проверенной общей схемы сеанса.
     let second = read_descriptor(
-        registers, capabilities, base, memory, second_pages, second_port, second_speed,
+        registers,
+        capabilities,
+        base,
+        memory,
+        second_pages,
+        second_port,
+        second_speed,
     )?;
     if first.slot_id == second.slot_id {
         return Err(CommandError::DuplicateSlot);
@@ -478,9 +505,15 @@ fn issue_enumeration<R: OperationalRegisters>(
     // Повторная передача к ПЕРВОМУ устройству после полного перечисления второго.
     // Без новой адресации и без сброса, с живыми DCBAA и собственным кольцом EP0.
     configuration_transfer(
-        registers, capabilities, base, memory, first_pages,
-        first.slot_id, xhci_session::RECHECK_TRANSFER_TRB,
-        usize::from(first.configuration_length), 768,
+        registers,
+        capabilities,
+        base,
+        memory,
+        first_pages,
+        first.slot_id,
+        xhci_session::RECHECK_TRANSFER_TRB,
+        usize::from(first.configuration_length),
+        768,
         xhci_session::RECHECK_EVENT_INDEX,
     )?;
     for index in 0..usize::from(first.configuration_length) {
@@ -557,8 +590,14 @@ pub unsafe fn enumerate_pair<const N: usize, R: OperationalRegisters>(
     assert_eq!(device_mapping.device_address().value(), base);
 
     let result = issue_enumeration(
-        registers, capabilities, base, &memory,
-        first_port, first_speed, second_port, second_speed,
+        registers,
+        capabilities,
+        base,
+        &memory,
+        first_port,
+        first_speed,
+        second_port,
+        second_speed,
     );
 
     // Одна остановка и сброс после всех передач и проверки обоих слотов.

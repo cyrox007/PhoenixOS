@@ -4,6 +4,7 @@ pub mod xhci;
 pub mod xhci_capabilities;
 pub mod xhci_control;
 pub mod xhci_ports;
+pub mod xhci_session;
 
 pub const CONFIG_SPACE_BYTES: u64 = 4096;
 pub const DEVICE_COUNT_PER_BUS: u8 = 32;

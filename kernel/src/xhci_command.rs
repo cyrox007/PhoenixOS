@@ -124,8 +124,11 @@ fn await_completion<R: OperationalRegisters>(
                 | (u64::from(memory.read(EVENT_RING_PAGE, offset + 4)) << 32),
         };
         // Указываем следующий свободный элемент, учитывая бит EHB.
-        write_address(registers, runtime + 0x18, base + EVENT_RING_PAGE * PAGE_BYTES
-            + ((index + 1) * 16) as u64 | (1 << 3));
+        write_address(
+            registers,
+            runtime + 0x18,
+            base + EVENT_RING_PAGE * PAGE_BYTES + ((index + 1) * 16) as u64 | (1 << 3),
+        );
         return Ok(event);
     }
     Err(CommandError::CommandTimeout)
@@ -217,7 +220,12 @@ fn read_descriptor<R: OperationalRegisters>(
 
     compiler_fence(Ordering::SeqCst);
     let _addressed = command(
-        registers, capabilities, base, memory, 2, input,
+        registers,
+        capabilities,
+        base,
+        memory,
+        2,
+        input,
         (11 << 10) | (u32::from(slot) << 24),
     )?;
 
@@ -331,7 +339,6 @@ fn issue_noop<R: OperationalRegisters>(
         return Err(CommandError::WrongCompletionCode);
     }
     read_descriptor(registers, capabilities, base, memory, port, speed)
-
 }
 
 /// Контроллер должен быть предварительно сброшен и остановлен.

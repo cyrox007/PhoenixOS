@@ -185,11 +185,15 @@ pub unsafe fn first_command<const N: usize, R: OperationalRegisters>(
     frames: &mut SystemFrameAllocator<N>,
     physical_memory_offset: VirtAddr,
 ) -> Result<CommandReport, CommandError> {
+    let free_before = frames.free_frames();
     let first = frames
         .allocate_contiguous_below_4k(PAGE_COUNT, 1, 0xffff_ffff)
         .ok_or(CommandError::NoFrames)?;
     let base = first.start_address().as_u64();
     let Some(cpu_base) = physical_memory_offset.as_u64().checked_add(base) else {
+        frames
+            .release_contiguous_4k(first, PAGE_COUNT)
+            .map_err(|_| CommandError::FrameReleaseFailed)?;
         return Err(CommandError::InvalidPhysicalAddress);
     };
     let memory = GuestMemory {
@@ -203,8 +207,15 @@ pub unsafe fn first_command<const N: usize, R: OperationalRegisters>(
     let layout = DmaLayout::new((PAGE_COUNT * PAGE_BYTES) as usize, PAGE_BYTES as usize)
         .expect("некорректный размер буфера xHCI");
     let mut device_mapping =
-        DeviceMapping::establish(&mut backend, PhysicalAddress::new(base), layout)
-            .map_err(|_| CommandError::DeviceMappingFailed)?;
+        match DeviceMapping::establish(&mut backend, PhysicalAddress::new(base), layout) {
+            Ok(mapping) => mapping,
+            Err(_) => {
+                frames
+                    .release_contiguous_4k(first, PAGE_COUNT)
+                    .map_err(|_| CommandError::FrameReleaseFailed)?;
+                return Err(CommandError::DeviceMappingFailed);
+            }
+        };
     assert_eq!(device_mapping.device_address().value(), base);
 
     let result = issue_noop(registers, capabilities, base, &memory);
@@ -226,5 +237,10 @@ pub unsafe fn first_command<const N: usize, R: OperationalRegisters>(
     frames
         .release_contiguous_4k(first, PAGE_COUNT)
         .map_err(|_| CommandError::FrameReleaseFailed)?;
+    assert_eq!(
+        frames.free_frames(),
+        free_before,
+        "DMA-обмен xHCI не вернул все физические страницы"
+    );
     result
 }

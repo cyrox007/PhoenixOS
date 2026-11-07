@@ -10,6 +10,7 @@ use phoenix_dma::mapping::{DeviceMapping, DirectDmaAperture, PhysicalAddress, Qe
 use phoenix_memory::SystemFrameAllocator;
 use phoenix_pcie::xhci_capabilities::XhciCapabilities;
 use phoenix_pcie::xhci_control::{self, OperationalRegisters};
+use phoenix_pcie::usb_descriptors::{self, DescriptorError};
 use x86_64::VirtAddr;
 
 const PAGE_BYTES: u64 = 4096;
@@ -46,6 +47,8 @@ pub enum CommandError {
     InvalidSpeed,
     InvalidDescriptor,
     InvalidTransferEvent,
+    InvalidConfiguration,
+    Configuration(DescriptorError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +60,10 @@ pub struct CommandReport {
     pub vendor_id: u16,
     pub product_id: u16,
     pub device_class: u8,
+    pub interface_class: u8,
+    pub interface_protocol: u8,
+    pub endpoint_count: u8,
+    pub configuration_length: u16,
 }
 
 struct GuestMemory {
@@ -74,6 +81,11 @@ impl GuestMemory {
 
     fn read(&self, page: u64, offset: usize) -> u32 {
         unsafe { self.address(page, offset).read_volatile() }
+    }
+
+    fn read_byte(&self, page: u64, offset: usize) -> u8 {
+        let pointer = (self.virtual_start + page * PAGE_BYTES + offset as u64).as_ptr::<u8>();
+        unsafe { pointer.read_volatile() }
     }
 }
 
@@ -167,6 +179,55 @@ fn command<R: OperationalRegisters>(
         return Err(CommandError::WrongCompletionCode);
     }
     Ok(event)
+}
+
+/// Одна управляющая передача GET_DESCRIPTOR(Configuration).
+/// Длина данных ограничена заранее выделенной страницей.
+fn configuration_transfer<R: OperationalRegisters>(
+    registers: &R,
+    capabilities: XhciCapabilities,
+    base: u64,
+    memory: &GuestMemory,
+    slot: u8,
+    trb: usize,
+    length: usize,
+    buffer_offset: usize,
+    event_index: usize,
+) -> Result<(), CommandError> {
+    if length == 0 || length > 512 || buffer_offset + length > PAGE_BYTES as usize {
+        return Err(CommandError::InvalidConfiguration);
+    }
+    let page = TRANSFER_PAGE;
+    let offset = trb * 16;
+    let destination = base + DESCRIPTOR_PAGE * PAGE_BYTES + buffer_offset as u64;
+    memory.write(page, offset, 0x0200_0680);
+    memory.write(page, offset + 4, (length as u32) << 16);
+    memory.write(page, offset + 8, 8);
+    memory.write(page, offset + 12, (2 << 10) | (3 << 16) | (1 << 6) | 1);
+    memory.write(page, offset + 16, destination as u32);
+    memory.write(page, offset + 20, (destination >> 32) as u32);
+    memory.write(page, offset + 24, length as u32);
+    memory.write(page, offset + 28, (3 << 10) | (1 << 16) | 1);
+    memory.write(page, offset + 32, 0);
+    memory.write(page, offset + 36, 0);
+    memory.write(page, offset + 40, 0);
+    memory.write(page, offset + 44, (4 << 10) | (1 << 5) | 1);
+    compiler_fence(Ordering::SeqCst);
+    registers.write_u32(capabilities.doorbell_offset + u64::from(slot) * 4, 1);
+    let event = await_completion(
+        registers,
+        capabilities.runtime_offset + 0x20,
+        base,
+        memory,
+        event_index,
+    )?;
+    if event.kind != 32 || event.code != 1 || event.slot != slot {
+        return Err(CommandError::InvalidTransferEvent);
+    }
+    if event.pointer != base + page * PAGE_BYTES + offset as u64 + 32 {
+        return Err(CommandError::InvalidTransferEvent);
+    }
+    Ok(())
 }
 
 fn read_descriptor<R: OperationalRegisters>(
@@ -265,6 +326,34 @@ fn read_descriptor<R: OperationalRegisters>(
         return Err(CommandError::InvalidDescriptor);
     }
     let identifiers = memory.read(DESCRIPTOR_PAGE, 8);
+
+    // Сначала короткий заголовок конфигурации, затем весь заявленный объём.
+    configuration_transfer(registers, capabilities, base, memory, slot, 3, 9, 64, 4)?;
+    let header = memory.read(DESCRIPTOR_PAGE, 64);
+    if header & 0xffff != 0x0209 {
+        return Err(CommandError::InvalidConfiguration);
+    }
+    let configuration_size = (header >> 16) as usize;
+    if !(9..=512).contains(&configuration_size) {
+        return Err(CommandError::InvalidConfiguration);
+    }
+    configuration_transfer(
+        registers,
+        capabilities,
+        base,
+        memory,
+        slot,
+        6,
+        configuration_size,
+        128,
+        5,
+    )?;
+    let mut configuration = [0_u8; 512];
+    for (index, byte) in configuration.iter_mut().take(configuration_size).enumerate() {
+        *byte = memory.read_byte(DESCRIPTOR_PAGE, 128 + index);
+    }
+    let interface = usb_descriptors::parse_configuration(&configuration[..configuration_size])
+        .map_err(CommandError::Configuration)?;
     Ok(CommandReport {
         completion_code: event.code,
         event_type: event.kind,
@@ -273,6 +362,10 @@ fn read_descriptor<R: OperationalRegisters>(
         vendor_id: identifiers as u16,
         product_id: (identifiers >> 16) as u16,
         device_class: second as u8,
+        interface_class: interface.class,
+        interface_protocol: interface.protocol,
+        endpoint_count: interface.endpoint_count,
+        configuration_length: interface.total_length,
     })
 }
 

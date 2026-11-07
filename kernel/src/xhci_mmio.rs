@@ -3,6 +3,7 @@
 //! Не запускает контроллер и не разрешает DMA. Фиксированный диапазон
 //! зарезервирован исключительно для ранней диагностики ядра в QEMU.
 
+use crate::xhci_command::{self, CommandError, CommandReport};
 use phoenix_memory::SystemFrameAllocator;
 use phoenix_pcie::xhci::XhciPciController;
 use phoenix_pcie::xhci_capabilities::{CapabilityError, RegisterAccess, XhciCapabilities};
@@ -27,6 +28,7 @@ pub enum XhciMmioError {
     UnmappingFailed,
     InvalidCapabilities(CapabilityError),
     ControllerReset(ResetError),
+    Command(CommandError),
 }
 
 struct MappedRegisters {
@@ -67,7 +69,8 @@ pub unsafe fn probe<const N: usize>(
     controller: XhciPciController,
     table: &mut ActivePageTable,
     frames: &mut SystemFrameAllocator<N>,
-) -> Result<(XhciCapabilities, ResetResult), XhciMmioError> {
+    physical_memory_offset: VirtAddr,
+) -> Result<(XhciCapabilities, ResetResult, CommandReport), XhciMmioError> {
     if !controller.memory_enabled {
         return Err(XhciMmioError::MemoryAccessDisabled);
     }
@@ -119,7 +122,16 @@ pub unsafe fn probe<const N: usize>(
             xhci_control::MAX_POLLS,
         )
         .map_err(XhciMmioError::ControllerReset)?;
-        Ok((capabilities, reset))
+        let report = unsafe {
+            xhci_command::first_command(
+                &registers,
+                capabilities,
+                frames,
+                physical_memory_offset,
+            )
+        }
+        .map_err(XhciMmioError::Command)?;
+        Ok((capabilities, reset, report))
     })();
     unmap_pages(table, mapped)?;
     result

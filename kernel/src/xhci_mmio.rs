@@ -35,8 +35,8 @@ struct MappedRegisters {
 
 impl RegisterAccess for MappedRegisters {
     fn read_u32(&self, offset: u64) -> u32 {
-        // Только проверенные смещения регистров возможностей: 0x00..0x18.
-        debug_assert!(offset <= 0x18 && offset % 4 == 0);
+        // Диапазон временного окна включает возможности и рабочие регистры.
+        debug_assert!(offset < QEMU_XHCI_MMIO_BYTES && offset % 4 == 0);
         let pointer = (self.base + offset).as_ptr::<u32>();
         unsafe { pointer.read_volatile() }
     }
@@ -48,6 +48,7 @@ impl OperationalRegisters for MappedRegisters {
     }
 
     fn write_u32(&self, offset: u64, value: u32) {
+        debug_assert!(offset < QEMU_XHCI_MMIO_BYTES && offset % 4 == 0);
         let pointer = (self.base + offset).as_mut_ptr::<u32>();
         unsafe { pointer.write_volatile(value) };
     }

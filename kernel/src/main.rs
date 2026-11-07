@@ -269,10 +269,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let mut page_table = unsafe { ActivePageTable::from_current(physical_memory_offset) };
 
     // Реальный запуск выбранного драйвера с ресурсами ядра.
-    let (launch, (capabilities, reset, command, second, ports)) = unsafe {
-        xhci_driver::start(xhci, &mut page_table, &mut frames, physical_memory_offset)
-    }
-    .expect("штатный драйвер xHCI не смог инициализировать контроллер");
+    let (launch, (capabilities, reset, command, second, ports)) =
+        unsafe { xhci_driver::start(xhci, &mut page_table, &mut frames, physical_memory_offset) }
+            .expect("штатный драйвер xHCI не смог инициализировать контроллер");
     serial::line(
         &mut out,
         "INFO",

@@ -268,7 +268,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let mut page_table = unsafe { ActivePageTable::from_current(physical_memory_offset) };
 
     // Ранний контролируемый доступ к MMIO модели xHCI в QEMU.
-    let (capabilities, reset, command) =
+    let (capabilities, reset, command, ports) =
         unsafe { xhci_mmio::probe(xhci, &mut page_table, &mut frames, physical_memory_offset) }
             .expect("не удалось выполнить DMA-команду xHCI в QEMU");
     serial::line(
@@ -301,6 +301,20 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!(
             "xhci dma command completion: OK type={} code={} pages={}",
             command.event_type, command.completion_code, command.used_pages
+        ),
+    );
+
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "xhci usb port discovery: OK total={} connected={} enabled={} reset={} first_port={} speed={}",
+            ports.total,
+            ports.connected,
+            ports.enabled,
+            ports.reset,
+            ports.first_connected_port,
+            ports.first_speed
         ),
     );
 

@@ -284,11 +284,15 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         ),
     );
 
-    let dma_pages = dma_boot::self_test(&mut page_table, &mut frames, physical_memory_offset);
+    let (dma_pages, page_table_frames) =
+        dma_boot::self_test(&mut page_table, &mut frames, physical_memory_offset);
     serial::line(
         &mut out,
         "INFO",
-        format_args!("dma kernel mapping self-test: OK pages={}", dma_pages),
+        format_args!(
+            "dma kernel mapping self-test: OK pages={} page_table_frames={}",
+            dma_pages, page_table_frames
+        ),
     );
 
     virtual_memory_self_test(&mut page_table, &mut frames);

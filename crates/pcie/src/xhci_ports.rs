@@ -176,7 +176,8 @@ mod tests {
             assert_eq!(value & PORT_ENABLED, 0);
             self.writes.set(self.writes.get() + 1);
             if value & PORT_RESET != 0 && self.finish_reset {
-                self.port_one.set(PORT_CONNECTED | PORT_ENABLED | PORT_POWER | (3 << 10));
+                self.port_one
+                    .set(PORT_CONNECTED | PORT_ENABLED | PORT_POWER | (3 << 10));
             }
         }
     }

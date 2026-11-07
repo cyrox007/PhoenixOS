@@ -68,9 +68,9 @@ pub fn stop_and_reset<R: OperationalRegisters>(
     registers.write_u32(command, (command_value & !RUN_STOP) | HOST_CONTROLLER_RESET);
 
     wait_for(registers, command, HOST_CONTROLLER_RESET, 0, max_polls)
-    .map_err(|_| ResetError::ResetTimeout)?;
+        .map_err(|_| ResetError::ResetTimeout)?;
     wait_for(registers, status, CONTROLLER_NOT_READY, 0, max_polls)
-    .map_err(|_| ResetError::ReadyTimeout)?;
+        .map_err(|_| ResetError::ReadyTimeout)?;
 
     let status_after = registers.read_u32(status);
     if status_after & HOST_CONTROLLER_ERROR != 0 {

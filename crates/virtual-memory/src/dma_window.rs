@@ -171,17 +171,17 @@ impl<const N: usize> DmaWindowRegistry<N> {
     ) -> Result<DmaWindowHandle, DmaReservationError> {
         let window = DmaKernelWindow::new(virtual_start, physical_start, page_count)
             .map_err(DmaReservationError::InvalidWindow)?;
-        let last = virtual_start + page_count * PAGE_SIZE - 1;
-        let last_physical = physical_start + page_count * PAGE_SIZE - 1;
+        let last = virtual_start + (page_count * PAGE_SIZE - 1);
+        let last_physical = physical_start + (page_count * PAGE_SIZE - 1);
         for slot in &self.slots {
             let Some(existing) = slot.window.as_ref() else {
                 continue;
             };
-            let existing_last = existing.virtual_start + existing.page_count * PAGE_SIZE - 1;
+            let existing_last = existing.virtual_start + (existing.page_count * PAGE_SIZE - 1);
             if virtual_start <= existing_last && existing.virtual_start <= last {
                 return Err(DmaReservationError::Overlap);
             }
-            let physical_end = existing.physical_start + existing.page_count * PAGE_SIZE - 1;
+            let physical_end = existing.physical_start + (existing.page_count * PAGE_SIZE - 1);
             if physical_start <= physical_end && existing.physical_start <= last_physical {
                 return Err(DmaReservationError::PhysicalAlias);
             }

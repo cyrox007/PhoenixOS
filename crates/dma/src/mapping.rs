@@ -176,9 +176,16 @@ mod tests {
             Err(DmaMappingError::InvalidRange(DmaError::MisalignedAddress))
         ));
         assert_eq!(backend.map_count, 0);
-        let result =
-            DeviceMapping::establish(&mut backend, PhysicalAddress::new(u64::MAX - 4095), layout);
-        assert!(matches!(result, Err(DmaMappingError::InvalidRange(_))));
+        let byte_layout = DmaLayout::new(4096, 1).unwrap();
+        let result = DeviceMapping::establish(
+            &mut backend,
+            PhysicalAddress::new(u64::MAX - 1),
+            byte_layout,
+        );
+        assert!(matches!(
+            result,
+            Err(DmaMappingError::InvalidRange(DmaError::AddressOverflow))
+        ));
         assert_eq!(backend.map_count, 0);
     }
 

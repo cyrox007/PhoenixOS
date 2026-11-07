@@ -214,6 +214,21 @@ impl<const N: usize> ManagedDmaWindows<N> {
         }
     }
 
+    /// Возвращает начало окна только при действительных обоих резервированиях.
+    pub fn virtual_start<const M: usize>(
+        &self,
+        ranges: &KernelVirtualRanges<M>,
+        handle: ManagedDmaHandle,
+    ) -> Result<u64, ManagedDmaError> {
+        let (start, _) = ranges
+            .range(handle.virtual_range)
+            .map_err(ManagedDmaError::Virtual)?;
+        self.dma
+            .mapped_pages(handle.dma)
+            .map_err(ManagedDmaError::Dma)?;
+        Ok(start)
+    }
+
     pub fn map_all<A: DmaPageAccess>(
         &mut self,
         handle: ManagedDmaHandle,
@@ -300,6 +315,7 @@ mod tests {
         let other = ranges.reserve_at(BASE, 1).unwrap();
         let mut dma = ManagedDmaWindows::<2>::new();
         let first = dma.reserve(&mut ranges, 0x2000, 2).unwrap();
+        assert_eq!(dma.virtual_start(&ranges, first), Ok(BASE + PAGE_SIZE));
         let second = dma.reserve(&mut ranges, 0x8000, 1).unwrap();
         assert!(ranges.reserve_at(BASE + PAGE_SIZE, 1).is_err());
         assert!(dma.reserve(&mut ranges, 0x2000, 1).is_err());

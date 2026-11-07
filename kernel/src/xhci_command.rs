@@ -264,7 +264,7 @@ fn read_descriptor<R: OperationalRegisters>(
         slot_id: slot,
         vendor_id: identifiers as u16,
         product_id: (identifiers >> 16) as u16,
-        device_class: (second >> 8) as u8,
+        device_class: second as u8,
     })
 }
 
@@ -294,7 +294,6 @@ fn issue_noop<R: OperationalRegisters>(
     }
 
     // Командный сегмент завершается Link TRB, замыкающим кольцо.
-    memory.write(COMMAND_RING_PAGE, 12, NOOP_COMMAND);
     let link_offset = (RING_ITEMS as usize - 1) * 16;
     memory.write(COMMAND_RING_PAGE, link_offset, command_address as u32);
     memory.write(

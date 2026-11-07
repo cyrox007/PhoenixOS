@@ -7,6 +7,7 @@ extern crate alloc;
 
 mod acpi;
 mod arch;
+mod dma_boot;
 mod elf_user_loader;
 mod file_user_memory;
 mod heap;
@@ -280,6 +281,17 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             capabilities.operational_offset,
             capabilities.doorbell_offset,
             capabilities.runtime_offset
+        ),
+    );
+
+    let (dma_pages, page_table_frames) =
+        dma_boot::self_test(&mut page_table, &mut frames, physical_memory_offset);
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "dma kernel mapping self-test: OK pages={} page_table_frames={}",
+            dma_pages, page_table_frames
         ),
     );
 

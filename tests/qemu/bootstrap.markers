@@ -5,6 +5,7 @@ acpi platform discovery: OK
 pcie ecam enumeration: OK
 xhci pcie discovery: OK
 xhci mmio capabilities: OK
+dma kernel mapping self-test: OK
 virtual memory self-test: OK
 kernel heap self-test: OK
 apic timer self-test: OK

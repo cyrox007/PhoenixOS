@@ -45,7 +45,7 @@ if [[ ! -c /dev/kvm ]]; then
 fi
 
 set +e
-timeout 30s sudo qemu-system-x86_64   -machine q35,accel=kvm   -cpu host   -m 512M   -display none   -serial stdio   -no-reboot   -device isa-debug-exit,iobase=0xf4,iosize=0x04   -drive "if=pflash,format=raw,unit=0,file=$OVMF_CODE,readonly=on"   -drive "if=pflash,format=raw,unit=1,file=$vars_copy"   -drive "format=raw,file=$IMAGE" 2>&1 | tee "$serial_log"
+timeout 30s sudo qemu-system-x86_64   -machine q35,accel=kvm   -cpu host   -m 512M   -display none   -serial stdio   -no-reboot   -device isa-debug-exit,iobase=0xf4,iosize=0x04   -device qemu-xhci,id=phoenix-xhci   -drive "if=pflash,format=raw,unit=0,file=$OVMF_CODE,readonly=on"   -drive "if=pflash,format=raw,unit=1,file=$vars_copy"   -drive "format=raw,file=$IMAGE" 2>&1 | tee "$serial_log"
 status=${PIPESTATUS[0]}
 set -e
 

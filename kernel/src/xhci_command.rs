@@ -11,13 +11,12 @@ use phoenix_dma::mapping::{DeviceMapping, DirectDmaAperture, PhysicalAddress, Qe
 use phoenix_memory::SystemFrameAllocator;
 use phoenix_pcie::usb_descriptors::{self, DescriptorError};
 use phoenix_pcie::xhci_capabilities::XhciCapabilities;
+use phoenix_pcie::xhci_session::{self, SessionDevice};
 use phoenix_pcie::xhci_control::{self, OperationalRegisters};
 use x86_64::VirtAddr;
 
 const PAGE_BYTES: u64 = 4096;
-const PAGE_COUNT: u64 = 12;
-const FIRST_DEVICE_PAGE: u64 = 4;
-const SECOND_DEVICE_PAGE: u64 = 8;
+const PAGE_COUNT: u64 = xhci_session::DMA_PAGE_COUNT;
 const COMMAND_RING_PAGE: u64 = 1;
 const EVENT_RING_PAGE: u64 = 2;
 const EVENT_TABLE_PAGE: u64 = 3;
@@ -68,24 +67,7 @@ pub struct CommandReport {
     pub configuration_length: u16,
 }
 
-#[derive(Clone, Copy)]
-struct DevicePages {
-    input: u64,
-    output: u64,
-    transfer: u64,
-    descriptor: u64,
-}
-
-impl DevicePages {
-    const fn new(start: u64) -> Self {
-        Self {
-            input: start,
-            output: start + 1,
-            transfer: start + 2,
-            descriptor: start + 3,
-        }
-    }
-}
+type DevicePages = SessionDevice;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetainedSlotsReport {
@@ -269,9 +251,9 @@ fn read_descriptor<R: OperationalRegisters>(
     pages: DevicePages,
     port: u8,
     speed: u8,
-    command_index: usize,
-    event_index: usize,
 ) -> Result<CommandReport, CommandError> {
+    let command_index = pages.command_index;
+    let event_index = pages.event_index;
     let enabled = command(
         registers, capabilities, base, memory,
         command_index, event_index, 0, 9 << 10,
@@ -478,16 +460,14 @@ fn issue_enumeration<R: OperationalRegisters>(
     if noop.code != SUCCESS_COMPLETION as u8 {
         return Err(CommandError::WrongCompletionCode);
     }
-    let first_pages = DevicePages::new(FIRST_DEVICE_PAGE);
-    let second_pages = DevicePages::new(SECOND_DEVICE_PAGE);
+    let first_pages = xhci_session::FIRST_DEVICE;
+    let second_pages = xhci_session::SECOND_DEVICE;
     let first = read_descriptor(
-        registers, capabilities, base, memory, first_pages,
-        first_port, first_speed, 1, 1,
+        registers, capabilities, base, memory, first_pages, first_port, first_speed,
     )?;
-    // Индексы команд 3/4; индексы событий 6..10 с учётом передач первого USB.
+    // Индексы команд и событий берём из проверенной общей схемы сеанса.
     let second = read_descriptor(
-        registers, capabilities, base, memory, second_pages,
-        second_port, second_speed, 3, 6,
+        registers, capabilities, base, memory, second_pages, second_port, second_speed,
     )?;
     if first.slot_id == second.slot_id {
         return Err(CommandError::DuplicateSlot);
@@ -499,7 +479,9 @@ fn issue_enumeration<R: OperationalRegisters>(
     // Без новой адресации и без сброса, с живыми DCBAA и собственным кольцом EP0.
     configuration_transfer(
         registers, capabilities, base, memory, first_pages,
-        first.slot_id, 9, usize::from(first.configuration_length), 768, 11,
+        first.slot_id, xhci_session::RECHECK_TRANSFER_TRB,
+        usize::from(first.configuration_length), 768,
+        xhci_session::RECHECK_EVENT_INDEX,
     )?;
     for index in 0..usize::from(first.configuration_length) {
         let previous = memory.read_byte(first_pages.descriptor, 128 + index);

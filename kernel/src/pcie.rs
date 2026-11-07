@@ -101,8 +101,7 @@ pub fn enumerate(
             }
         })?;
         summary.include(segment_summary);
-        summary.xhci_controller_count =
-            summary.xhci_controller_count.saturating_add(xhci_count);
+        summary.xhci_controller_count = summary.xhci_controller_count.saturating_add(xhci_count);
         if let Some(probe) = first_probe {
             summary.first_xhci = Some(probe.map_err(PlatformPcieError::InvalidXhci)?);
         }

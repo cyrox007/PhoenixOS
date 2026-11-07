@@ -8,7 +8,10 @@ use phoenix_dma::{
     mapping::{DmaMappingBackend, PhysicalAddress},
 };
 use phoenix_memory::{FRAME_SIZE, SystemFrameAllocator};
-use x86_64::{PhysAddr, structures::paging::{PhysFrame, Size4KiB}};
+use x86_64::{
+    PhysAddr,
+    structures::paging::{PhysFrame, Size4KiB},
+};
 
 struct TestPlatform {
     frames: SystemFrameAllocator<8>,
@@ -69,7 +72,9 @@ impl DmaBufferPlatform for TestPlatform {
         physical: PhysicalAddress,
         _layout: DmaLayout,
     ) -> Result<CpuVirtualAddress, DmaError> {
-        Ok(CpuVirtualAddress::new((physical.value() + 0x100_0000) as usize))
+        Ok(CpuVirtualAddress::new(
+            (physical.value() + 0x100_0000) as usize,
+        ))
     }
 
     fn unmap_cpu(&mut self, _cpu: CpuVirtualAddress, _layout: DmaLayout) -> Result<(), DmaError> {

@@ -60,8 +60,8 @@ impl KernelDmaArena {
 
         // В проверочном профиле QEMU нет IOMMU; здесь проверяется только
         // адресная модель, не аппаратная передача DMA.
-        let aperture = DirectDmaAperture::new(0, 0x1_0000_0000)
-            .expect("некорректное адресное окно QEMU");
+        let aperture =
+            DirectDmaAperture::new(0, 0x1_0000_0000).expect("некорректное адресное окно QEMU");
         let mut backend = unsafe { QemuDirectDma::<2>::new(aperture) };
         let layout = DmaLayout::new((TEST_PAGES * phoenix_vm::PAGE_SIZE) as usize, 4096)
             .expect("некорректный размер DMA-области");

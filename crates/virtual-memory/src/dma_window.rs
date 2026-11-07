@@ -132,6 +132,7 @@ pub struct DmaWindowHandle {
 pub enum DmaReservationError {
     InvalidWindow(DmaWindowError),
     Overlap,
+    PhysicalAlias,
     Exhausted,
     StaleHandle,
     StillMapped,
@@ -166,6 +167,7 @@ impl<const N: usize> DmaWindowRegistry<N> {
         let window = DmaKernelWindow::new(virtual_start, physical_start, page_count)
             .map_err(DmaReservationError::InvalidWindow)?;
         let last = virtual_start + page_count * PAGE_SIZE - 1;
+        let last_physical = physical_start + page_count * PAGE_SIZE - 1;
         for slot in &self.slots {
             let Some(existing) = slot.window.as_ref() else {
                 continue;
@@ -173,6 +175,10 @@ impl<const N: usize> DmaWindowRegistry<N> {
             let existing_last = existing.virtual_start + existing.page_count * PAGE_SIZE - 1;
             if virtual_start <= existing_last && existing.virtual_start <= last {
                 return Err(DmaReservationError::Overlap);
+            }
+            let physical_end = existing.physical_start + existing.page_count * PAGE_SIZE - 1;
+            if physical_start <= physical_end && existing.physical_start <= last_physical {
+                return Err(DmaReservationError::PhysicalAlias);
             }
         }
 
@@ -412,6 +418,10 @@ mod tests {
         assert_eq!(
             registry.reserve(BASE + PAGE_SIZE, 0x8000, 1),
             Err(DmaReservationError::Overlap)
+        );
+        assert_eq!(
+            registry.reserve(BASE + 2 * PAGE_SIZE, 0x5000, 1),
+            Err(DmaReservationError::PhysicalAlias)
         );
         let second = registry.reserve(BASE + 2 * PAGE_SIZE, 0x8000, 1).unwrap();
         let mut pages = FakePages {

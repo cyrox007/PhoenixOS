@@ -17,7 +17,7 @@ use phoenix_pcie::xhci_ports::PortSummary;
 use phoenix_vm::ActivePageTable;
 use x86_64::VirtAddr;
 
-use crate::xhci_command::CommandReport;
+use crate::xhci_command::{CommandReport, RetainedSlotsReport};
 
 pub type ProbeReport = (
     XhciCapabilities,
@@ -25,6 +25,7 @@ pub type ProbeReport = (
     CommandReport,
     CommandReport,
     PortSummary,
+    RetainedSlotsReport,
 );
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,7 +79,8 @@ fn start_xhci<const N: usize>(
 
 /// Находит и действительно запускает xHCI через тот же механизм выбора,
 /// что и остальные драйверы PCIe. Возвращает результат лишь после проверки
-/// регистров, сброса и двух обменов DMA с эмулируемыми USB-устройствами.
+/// регистров, перечисления двух USB-устройств за один запуск и
+/// повторной передачи к первому устройству без сброса xHCI.
 ///
 /// # Безопасность
 ///

@@ -1,8 +1,9 @@
-//! Первый реальный DMA-обмен с контроллером xHCI в QEMU.
+//! Первоначальное перечисление USB-устройств через DMA xHCI в QEMU.
 //!
 //! Для испытания используется только явно разрешённый профиль без IOMMU.
-//! Четыре физические страницы: DCBAA, командное кольцо, событийное кольцо,
-//! таблица сегментов событий. Кольца остаются закреплёнными до сброса xHCI.
+//! Восемь физических страниц: DCBAA, командное и событийное кольца,
+//! таблица сегментов, входной и выходной контексты, кольцо EP0 и данные.
+//! Области закреплены до завершения обмена и сброса контроллера.
 
 use core::sync::atomic::{Ordering, compiler_fence};
 use phoenix_dma::DmaLayout;
@@ -373,7 +374,7 @@ fn read_descriptor<R: OperationalRegisters>(
     })
 }
 
-fn issue_noop<R: OperationalRegisters>(
+fn issue_enumeration<R: OperationalRegisters>(
     registers: &R,
     capabilities: XhciCapabilities,
     base: u64,
@@ -487,7 +488,7 @@ pub unsafe fn first_command<const N: usize, R: OperationalRegisters>(
         };
     assert_eq!(device_mapping.device_address().value(), base);
 
-    let result = issue_noop(registers, capabilities, base, &memory, port, speed);
+    let result = issue_enumeration(registers, capabilities, base, &memory, port, speed);
 
     // Независимо от результата прекращаем доступ контроллера к памяти.
     // Сброс удаляет ранее запрограммированные адреса колец.

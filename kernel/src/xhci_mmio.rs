@@ -6,6 +6,7 @@
 use phoenix_memory::SystemFrameAllocator;
 use phoenix_pcie::xhci::XhciPciController;
 use phoenix_pcie::xhci_capabilities::{CapabilityError, RegisterAccess, XhciCapabilities};
+use phoenix_pcie::xhci_control::{self, OperationalRegisters, ResetError, ResetResult};
 use phoenix_vm::{ActivePageTable, PAGE_SIZE};
 use x86_64::{
     PhysAddr, VirtAddr,
@@ -25,6 +26,7 @@ pub enum XhciMmioError {
     MappingFailed,
     UnmappingFailed,
     InvalidCapabilities(CapabilityError),
+    ControllerReset(ResetError),
 }
 
 struct MappedRegisters {
@@ -33,10 +35,22 @@ struct MappedRegisters {
 
 impl RegisterAccess for MappedRegisters {
     fn read_u32(&self, offset: u64) -> u32 {
-        // Только проверенные смещения регистров возможностей: 0x00..0x18.
-        debug_assert!(offset <= 0x18 && offset % 4 == 0);
+        // Диапазон временного окна включает возможности и рабочие регистры.
+        debug_assert!(offset < QEMU_XHCI_MMIO_BYTES && offset % 4 == 0);
         let pointer = (self.base + offset).as_ptr::<u32>();
         unsafe { pointer.read_volatile() }
+    }
+}
+
+impl OperationalRegisters for MappedRegisters {
+    fn read_u32(&self, offset: u64) -> u32 {
+        RegisterAccess::read_u32(self, offset)
+    }
+
+    fn write_u32(&self, offset: u64, value: u32) {
+        debug_assert!(offset < QEMU_XHCI_MMIO_BYTES && offset % 4 == 0);
+        let pointer = (self.base + offset).as_mut_ptr::<u32>();
+        unsafe { pointer.write_volatile(value) };
     }
 }
 
@@ -53,7 +67,7 @@ pub unsafe fn probe<const N: usize>(
     controller: XhciPciController,
     table: &mut ActivePageTable,
     frames: &mut SystemFrameAllocator<N>,
-) -> Result<XhciCapabilities, XhciMmioError> {
+) -> Result<(XhciCapabilities, ResetResult), XhciMmioError> {
     if !controller.memory_enabled {
         return Err(XhciMmioError::MemoryAccessDisabled);
     }
@@ -96,8 +110,17 @@ pub unsafe fn probe<const N: usize>(
     let registers = MappedRegisters {
         base: VirtAddr::new(XHCI_MMIO_VIRTUAL_START),
     };
-    let result = XhciCapabilities::probe(&registers, QEMU_XHCI_MMIO_BYTES)
-        .map_err(XhciMmioError::InvalidCapabilities);
+    let result = (|| {
+        let capabilities = XhciCapabilities::probe(&registers, QEMU_XHCI_MMIO_BYTES)
+            .map_err(XhciMmioError::InvalidCapabilities)?;
+        let reset = xhci_control::stop_and_reset(
+            &registers,
+            capabilities.operational_offset,
+            xhci_control::MAX_POLLS,
+        )
+        .map_err(XhciMmioError::ControllerReset)?;
+        Ok((capabilities, reset))
+    })();
     unmap_pages(table, mapped)?;
     result
 }

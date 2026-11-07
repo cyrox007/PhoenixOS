@@ -1,5 +1,6 @@
 use bootloader_api::info::MemoryRegion;
 use phoenix_acpi::McfgInfo;
+use phoenix_pcie::xhci::{self, XhciPciController, XhciPciError};
 use phoenix_pcie::{ConfigAccess, EcamSegment, EnumerationSummary, PcieError};
 use x86_64::VirtAddr;
 
@@ -8,6 +9,7 @@ const MINIMUM_BOOTLOADER_PHYSICAL_MAPPING: u64 = 0x1_0000_0000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlatformPcieError {
     InvalidSegment(PcieError),
+    InvalidXhci(XhciPciError),
     EcamOutsidePhysicalMapping,
     AddressOverflow,
 }
@@ -24,6 +26,8 @@ pub struct PlatformPcieSummary {
     pub bridge_count: u32,
     pub storage_controller_count: u32,
     pub usb_controller_count: u32,
+    pub xhci_controller_count: u32,
+    pub first_xhci: Option<XhciPciController>,
 }
 
 impl PlatformPcieSummary {
@@ -33,6 +37,8 @@ impl PlatformPcieSummary {
             bridge_count: 0,
             storage_controller_count: 0,
             usb_controller_count: 0,
+            xhci_controller_count: 0,
+            first_xhci: None,
         }
     }
 
@@ -83,8 +89,23 @@ pub fn enumerate(
             allocation.end_bus,
         )?;
         validate_segment_mapping(segment, mapped_physical_end)?;
-        let segment_summary = phoenix_pcie::enumerate_segment(&access, segment, |_| {})?;
+        let mut first_probe = None;
+        let mut xhci_count = 0_u32;
+        let segment_summary = phoenix_pcie::enumerate_segment(&access, segment, |function| {
+            if !xhci::is_xhci(function) {
+                return;
+            }
+            xhci_count = xhci_count.saturating_add(1);
+            if summary.first_xhci.is_none() && first_probe.is_none() {
+                first_probe = Some(xhci::probe(&access, function));
+            }
+        })?;
         summary.include(segment_summary);
+        summary.xhci_controller_count =
+            summary.xhci_controller_count.saturating_add(xhci_count);
+        if let Some(probe) = first_probe {
+            summary.first_xhci = Some(probe.map_err(PlatformPcieError::InvalidXhci)?);
+        }
     }
 
     Ok(summary)

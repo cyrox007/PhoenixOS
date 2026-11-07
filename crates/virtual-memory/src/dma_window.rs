@@ -145,8 +145,8 @@ impl<A: FrameAllocator<Size4KiB>> DmaPageAccess for ActiveDmaPageAccess<'_, A> {
     }
 
     fn unmap_page(&mut self, virtual_addr: u64, physical_addr: u64) -> Result<(), DmaWindowError> {
-        let virtual_addr = VirtAddr::try_new(virtual_addr)
-            .map_err(|_| DmaWindowError::InvalidRange)?;
+        let virtual_addr =
+            VirtAddr::try_new(virtual_addr).map_err(|_| DmaWindowError::InvalidRange)?;
         let page = Page::<Size4KiB>::from_start_address(virtual_addr)
             .map_err(|_| DmaWindowError::InvalidRange)?;
         if self.table.translate_addr(virtual_addr).map(|p| p.as_u64()) != Some(physical_addr) {

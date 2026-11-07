@@ -129,7 +129,9 @@ impl<const N: usize> DmaLeaseTable<N> {
         }
         // При отказе аппаратного освобождения сохраняем право владения:
         // прежний идентификатор остаётся действительным для повторной попытки.
-        backing.try_release(region).map_err(DmaLeaseError::Release)?;
+        backing
+            .try_release(region)
+            .map_err(DmaLeaseError::Release)?;
         self.slots[handle.slot].region = None;
         Ok(())
     }

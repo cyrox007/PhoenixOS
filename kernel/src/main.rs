@@ -242,6 +242,26 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         ),
     );
 
+    let xhci = pcie
+        .first_xhci
+        .expect("QEMU-профиль обязан содержать контроллер xHCI");
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "xhci pcie discovery: OK controllers={} bus={} device={} function={} vendor={:04x} id={:04x} bar0={:#x} memory={} bus_master={}",
+            pcie.xhci_controller_count,
+            xhci.function.bus,
+            xhci.function.device,
+            xhci.function.function,
+            xhci.function.vendor_id,
+            xhci.function.device_id,
+            xhci.mmio_base,
+            xhci.memory_enabled,
+            xhci.bus_master_enabled
+        ),
+    );
+
     let mut page_table = unsafe { ActivePageTable::from_current(physical_memory_offset) };
 
     virtual_memory_self_test(&mut page_table, &mut frames);

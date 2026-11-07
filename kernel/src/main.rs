@@ -19,6 +19,7 @@ mod serial;
 mod thread;
 mod thread_manager;
 mod xhci_command;
+mod xhci_driver;
 mod xhci_mmio;
 
 use alloc::boxed::Box;
@@ -267,10 +268,18 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     let mut page_table = unsafe { ActivePageTable::from_current(physical_memory_offset) };
 
-    // Ранний контролируемый доступ к MMIO модели xHCI в QEMU.
-    let (capabilities, reset, command, second, ports) =
-        unsafe { xhci_mmio::probe(xhci, &mut page_table, &mut frames, physical_memory_offset) }
-            .expect("не удалось выполнить DMA-команду xHCI в QEMU");
+    // Реальный запуск выбранного драйвера с ресурсами ядра.
+    let (launch, (capabilities, reset, command, second, ports)) =
+        unsafe { xhci_driver::start(xhci, &mut page_table, &mut frames, physical_memory_offset) }
+            .expect("штатный драйвер xHCI не смог инициализировать контроллер");
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "xhci driver registry start: OK name={} version={}.{}.{}",
+            launch.name, launch.version.major, launch.version.minor, launch.version.patch
+        ),
+    );
     serial::line(
         &mut out,
         "INFO",

@@ -11,6 +11,7 @@ linked_list_allocator = "=0.10.6"
 phoenix-acpi = { path = "../crates/acpi" }
 phoenix-capability = { path = "../crates/capability-model" }
 phoenix-dma = { path = "../crates/dma" }
+phoenix-driver-registry = { path = "../crates/driver-registry" }
 phoenix-elf-loader = { path = "../crates/elf-loader" }
 phoenix-framebuffer = { path = "../crates/phoenix-framebuffer" }
 phoenix-ipc = { path = "../crates/ipc-model" }

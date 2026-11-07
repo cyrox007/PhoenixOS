@@ -117,6 +117,39 @@ pub struct RegisteredDriver {
     pub start: DriverStart,
 }
 
+/// Обработчик с ресурсами, которыми владеет вызывающее ядро.
+/// Ссылки на таблицу страниц, распределитель и состояние контроллера
+/// не сохраняются в глобальных переменных.
+pub struct ContextRegisteredDriver<Context> {
+    pub descriptor: DriverDescriptor,
+    pub start: fn(PcieFunction, &mut Context) -> Result<(), DriverStartError>,
+}
+
+impl<Context> Copy for ContextRegisteredDriver<Context> {}
+
+impl<Context> Clone for ContextRegisteredDriver<Context> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+/// Общий механизм проверки и выбора драйвера для обоих видов запуска.
+pub trait DriverRegistration: Copy {
+    fn descriptor(self) -> DriverDescriptor;
+}
+
+impl DriverRegistration for RegisteredDriver {
+    fn descriptor(self) -> DriverDescriptor {
+        self.descriptor
+    }
+}
+
+impl<Context> DriverRegistration for ContextRegisteredDriver<Context> {
+    fn descriptor(self) -> DriverDescriptor {
+        self.descriptor
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DriverLaunch {
     pub name: &'static str,
@@ -133,12 +166,12 @@ pub enum DriverRegistryError {
     StartFailed(DriverStartError),
 }
 
-pub struct DriverRegistry<const CAPACITY: usize> {
-    drivers: [Option<RegisteredDriver>; CAPACITY],
+pub struct DriverRegistry<const CAPACITY: usize, Driver: DriverRegistration = RegisteredDriver> {
+    drivers: [Option<Driver>; CAPACITY],
     count: usize,
 }
 
-impl<const CAPACITY: usize> DriverRegistry<CAPACITY> {
+impl<const CAPACITY: usize, Driver: DriverRegistration> DriverRegistry<CAPACITY, Driver> {
     pub const fn new() -> Self {
         Self {
             drivers: [None; CAPACITY],
@@ -154,10 +187,10 @@ impl<const CAPACITY: usize> DriverRegistry<CAPACITY> {
         self.count == 0
     }
 
-    pub fn register(&mut self, driver: RegisteredDriver) -> Result<(), DriverRegistryError> {
-        validate_descriptor(driver.descriptor)?;
+    pub fn register(&mut self, driver: Driver) -> Result<(), DriverRegistryError> {
+        validate_descriptor(driver.descriptor())?;
 
-        if self.contains(driver.descriptor) {
+        if self.contains(driver.descriptor()) {
             return Err(DriverRegistryError::DuplicateDriver);
         }
         if self.count == CAPACITY {
@@ -169,11 +202,11 @@ impl<const CAPACITY: usize> DriverRegistry<CAPACITY> {
         Ok(())
     }
 
-    pub fn select(&self, function: PcieFunction) -> Option<RegisteredDriver> {
-        let mut selected: Option<RegisteredDriver> = None;
+    pub fn select(&self, function: PcieFunction) -> Option<Driver> {
+        let mut selected: Option<Driver> = None;
 
         for driver in self.drivers[..self.count].iter().flatten().copied() {
-            if !driver.descriptor.pcie_match.matches(function) {
+            if !driver.descriptor().pcie_match.matches(function) {
                 continue;
             }
 
@@ -185,6 +218,19 @@ impl<const CAPACITY: usize> DriverRegistry<CAPACITY> {
         selected
     }
 
+    fn contains(&self, descriptor: DriverDescriptor) -> bool {
+        self.drivers[..self.count]
+            .iter()
+            .flatten()
+            .any(|registered| {
+                registered.descriptor().name == descriptor.name
+                    && registered.descriptor().version == descriptor.version
+            })
+    }
+}
+
+impl<const CAPACITY: usize> DriverRegistry<CAPACITY, RegisteredDriver> {
+    /// Сохраняет существующий запуск драйверов без контекста.
     pub fn start_best(&self, function: PcieFunction) -> Result<DriverLaunch, DriverRegistryError> {
         let driver = self
             .select(function)
@@ -197,19 +243,32 @@ impl<const CAPACITY: usize> DriverRegistry<CAPACITY> {
             version: driver.descriptor.version,
         })
     }
+}
 
-    fn contains(&self, descriptor: DriverDescriptor) -> bool {
-        self.drivers[..self.count]
-            .iter()
-            .flatten()
-            .any(|registered| {
-                registered.descriptor.name == descriptor.name
-                    && registered.descriptor.version == descriptor.version
-            })
+impl<const CAPACITY: usize, Context> DriverRegistry<CAPACITY, ContextRegisteredDriver<Context>> {
+    /// Выбирает драйвер теми же правилами и передаёт ему ресурсы запуска.
+    /// При отказе не возвращает свидетельство успешного запуска.
+    pub fn start_best_with_context(
+        &self,
+        function: PcieFunction,
+        context: &mut Context,
+    ) -> Result<DriverLaunch, DriverRegistryError> {
+        let driver = self
+            .select(function)
+            .ok_or(DriverRegistryError::NoMatchingDriver)?;
+
+        (driver.start)(function, context).map_err(DriverRegistryError::StartFailed)?;
+
+        Ok(DriverLaunch {
+            name: driver.descriptor.name,
+            version: driver.descriptor.version,
+        })
     }
 }
 
-impl<const CAPACITY: usize> Default for DriverRegistry<CAPACITY> {
+impl<const CAPACITY: usize, Driver: DriverRegistration> Default
+    for DriverRegistry<CAPACITY, Driver>
+{
     fn default() -> Self {
         Self::new()
     }
@@ -225,12 +284,15 @@ fn validate_descriptor(descriptor: DriverDescriptor) -> Result<(), DriverRegistr
     Ok(())
 }
 
-fn is_better_match(candidate: RegisteredDriver, selected: Option<RegisteredDriver>) -> bool {
+fn is_better_match<Driver: DriverRegistration>(
+    candidate: Driver,
+    selected: Option<Driver>,
+) -> bool {
     let Some(selected) = selected else {
         return true;
     };
 
-    match_rank(candidate.descriptor) > match_rank(selected.descriptor)
+    match_rank(candidate.descriptor()) > match_rank(selected.descriptor())
 }
 
 fn match_rank(descriptor: DriverDescriptor) -> (u8, u16, DriverVersion) {
@@ -483,5 +545,65 @@ mod tests {
             )),
             Err(DriverRegistryError::CapacityExceeded)
         );
+    }
+    #[derive(Default)]
+    struct StartResources {
+        calls: usize,
+        ready: bool,
+    }
+
+    fn start_with_resources(
+        _: PcieFunction,
+        context: &mut StartResources,
+    ) -> Result<(), DriverStartError> {
+        context.calls += 1;
+        if !context.ready {
+            return Err(DriverStartError::ResourceUnavailable);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn starts_context_driver_only_when_resources_are_available() {
+        let mut registry = DriverRegistry::<2, ContextRegisteredDriver<StartResources>>::new();
+        registry
+            .register(ContextRegisteredDriver {
+                descriptor: DriverDescriptor::new(
+                    "xhci",
+                    DriverVersion::new(1, 0, 0),
+                    10,
+                    PcieMatchRule {
+                        class_code: Some(0x01),
+                        ..PcieMatchRule::any()
+                    },
+                ),
+                start: start_with_resources,
+            })
+            .unwrap();
+
+        let function = nvme_function();
+        let mut resources = StartResources::default();
+        assert_eq!(
+            registry.start_best_with_context(function, &mut resources),
+            Err(DriverRegistryError::StartFailed(
+                DriverStartError::ResourceUnavailable
+            ))
+        );
+        assert_eq!(resources.calls, 1);
+
+        resources.ready = true;
+        let launch = registry
+            .start_best_with_context(function, &mut resources)
+            .unwrap();
+        assert_eq!(launch.name, "xhci");
+        assert_eq!(resources.calls, 2);
+
+        let mut unmatched = function;
+        unmatched.class_code = 0x0c;
+        assert_eq!(
+            registry.start_best_with_context(unmatched, &mut resources),
+            Err(DriverRegistryError::NoMatchingDriver)
+        );
+        assert_eq!(resources.calls, 2);
     }
 }

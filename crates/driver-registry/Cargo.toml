@@ -9,3 +9,6 @@ phoenix-pcie = { path = "../pcie" }
 
 [lib]
 path = "src/lib.rs"
+
+[dev-dependencies]
+phoenix-dma = { path = "../dma" }

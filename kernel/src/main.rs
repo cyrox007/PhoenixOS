@@ -17,6 +17,7 @@ mod qemu;
 mod serial;
 mod thread;
 mod thread_manager;
+mod xhci_mmio;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -263,6 +264,24 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     );
 
     let mut page_table = unsafe { ActivePageTable::from_current(physical_memory_offset) };
+
+    // Ранний контролируемый доступ к MMIO модели xHCI в QEMU.
+    let capabilities = unsafe { xhci_mmio::probe(xhci, &mut page_table, &mut frames) }
+        .expect("не удалось прочитать регистры возможностей xHCI через MMIO");
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "xhci mmio capabilities: OK version={:#x} slots={} ports={} context={} operational={:#x} doorbell={:#x} runtime={:#x}",
+            capabilities.version,
+            capabilities.max_slots,
+            capabilities.max_ports,
+            capabilities.context_size_bytes,
+            capabilities.operational_offset,
+            capabilities.doorbell_offset,
+            capabilities.runtime_offset
+        ),
+    );
 
     virtual_memory_self_test(&mut page_table, &mut frames);
     serial::line(

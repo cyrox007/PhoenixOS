@@ -132,25 +132,42 @@ impl KernelDmaArena {
         self.windows
             .release(&mut self.ranges, handle)
             .expect("не удалось вернуть виртуальное DMA-окно");
+        let before_data_release = frames.free_frames();
         frames
             .release_contiguous_4k(first_frame, TEST_PAGES)
             .expect("не удалось вернуть физические страницы DMA");
         assert_eq!(
             frames.free_frames(),
-            before,
-            "не все физические страницы DMA возвращены распределителю"
+            before_data_release + TEST_PAGES,
+            "физические страницы DMA не возвращены распределителю"
+        );
+        // OffsetPageTable не удаляет пустые промежуточные таблицы P4/P3/P2.
+        // Эти служебные кадры остаются собственностью ядра и должны
+        // использоваться повторно, а не учитываться как утечка DMA-данных.
+        assert!(
+            frames.free_frames() <= before,
+            "число свободных кадров превысило исходное значение"
         );
         TEST_PAGES
     }
 }
 
-/// Полный ранний цикл: физические страницы → виртуальные отображения → данные
-/// → снятие отображений → возврат обоих резервирований.
+/// Полный ранний цикл повторяется: второй проход не должен выделять
+/// дополнительные промежуточные таблицы страниц для того же окна.
 pub fn self_test<const N: usize>(
     table: &mut ActivePageTable,
     frames: &mut SystemFrameAllocator<N>,
     physical_memory_offset: VirtAddr,
-) -> u64 {
+) -> (u64, u64) {
+    let before = frames.free_frames();
     let mut arena = KernelDmaArena::new(table);
-    arena.verify(table, frames, physical_memory_offset)
+    arena.verify(table, frames, physical_memory_offset);
+    let after_first = frames.free_frames();
+    arena.verify(table, frames, physical_memory_offset);
+    assert_eq!(
+        frames.free_frames(),
+        after_first,
+        "повторное использование DMA-окна расходует новые служебные кадры"
+    );
+    (TEST_PAGES, before - after_first)
 }

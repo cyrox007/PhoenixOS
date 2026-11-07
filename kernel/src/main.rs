@@ -268,7 +268,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let mut page_table = unsafe { ActivePageTable::from_current(physical_memory_offset) };
 
     // Ранний контролируемый доступ к MMIO модели xHCI в QEMU.
-    let (capabilities, reset, command, ports) =
+    let (capabilities, reset, command, second, ports) =
         unsafe { xhci_mmio::probe(xhci, &mut page_table, &mut frames, physical_memory_offset) }
             .expect("не удалось выполнить DMA-команду xHCI в QEMU");
     serial::line(
@@ -315,6 +315,56 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             ports.reset,
             ports.first_connected_port,
             ports.first_speed
+        ),
+    );
+
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "xhci usb descriptor: OK port={} slot={} vid={:04x} pid={:04x} class={:02x}",
+            ports.first_connected_port,
+            command.slot_id,
+            command.vendor_id,
+            command.product_id,
+            command.device_class
+        ),
+    );
+
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "xhci usb second descriptor: OK port={} slot={} vid={:04x} pid={:04x} class={:02x}",
+            ports.second_connected_port,
+            second.slot_id,
+            second.vendor_id,
+            second.product_id,
+            second.device_class
+        ),
+    );
+
+    assert_eq!(
+        (command.interface_class, second.interface_class),
+        (3, 3),
+        "USB-клавиатура и мышь должны представлять HID-интерфейсы"
+    );
+    assert_eq!(
+        (command.interface_protocol, second.interface_protocol),
+        (1, 2),
+        "QEMU-профиль ожидает загрузочные протоколы клавиатуры и мыши"
+    );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "xhci usb interfaces: OK first_protocol={} second_protocol={} endpoints={}/{} configuration={}/{}",
+            command.interface_protocol,
+            second.interface_protocol,
+            command.endpoint_count,
+            second.endpoint_count,
+            command.configuration_length,
+            second.configuration_length
         ),
     );
 

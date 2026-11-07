@@ -1,7 +1,8 @@
-//! Диагностическое чтение MMIO-регистров xHCI из проверочного профиля QEMU.
+//! Управление xHCI через MMIO и краткоживущие DMA-обмены в QEMU.
 //!
-//! Не запускает контроллер и не разрешает DMA. Фиксированный диапазон
-//! зарезервирован исключительно для ранней диагностики ядра в QEMU.
+//! Контроллер запускается только после установки структур DMA и каждый
+//! раз сбрасывается до освобождения памяти. Диапазон адресов зарезервирован
+//! исключительно для проверочного профиля QEMU.
 
 use crate::xhci_command::{self, CommandError, CommandReport};
 use phoenix_memory::SystemFrameAllocator;
@@ -73,7 +74,16 @@ pub unsafe fn probe<const N: usize>(
     table: &mut ActivePageTable,
     frames: &mut SystemFrameAllocator<N>,
     physical_memory_offset: VirtAddr,
-) -> Result<(XhciCapabilities, ResetResult, CommandReport, PortSummary), XhciMmioError> {
+) -> Result<
+    (
+        XhciCapabilities,
+        ResetResult,
+        CommandReport,
+        CommandReport,
+        PortSummary,
+    ),
+    XhciMmioError,
+> {
     if !controller.memory_enabled {
         return Err(XhciMmioError::MemoryAccessDisabled);
     }
@@ -125,20 +135,6 @@ pub unsafe fn probe<const N: usize>(
             xhci_control::MAX_POLLS,
         )
         .map_err(XhciMmioError::ControllerReset)?;
-        let report = unsafe {
-            xhci_command::first_command(&registers, capabilities, frames, physical_memory_offset)
-        }
-        .map_err(XhciMmioError::Command)?;
-        // Второй независимый цикл проверяет повторное выделение страниц,
-        // отсутствие оставшихся отображений и повторный запуск устройства.
-        let repeated = unsafe {
-            xhci_command::first_command(&registers, capabilities, frames, physical_memory_offset)
-        }
-        .map_err(XhciMmioError::Command)?;
-        assert_eq!(
-            report, repeated,
-            "повторный обмен xHCI дал другой результат"
-        );
         let ports = xhci_ports::scan_ports(
             &registers,
             capabilities.operational_offset,
@@ -150,7 +146,31 @@ pub unsafe fn probe<const N: usize>(
         if ports.connected < 2 || ports.enabled < 2 {
             return Err(XhciMmioError::MissingTestDevices);
         }
-        Ok((capabilities, reset, report, ports))
+        let report = unsafe {
+            xhci_command::first_command(
+                &registers,
+                capabilities,
+                frames,
+                physical_memory_offset,
+                ports.first_connected_port,
+                ports.first_speed,
+            )
+        }
+        .map_err(XhciMmioError::Command)?;
+        // Второй независимый цикл проверяет повторное выделение страниц,
+        // отсутствие оставшихся отображений и повторный запуск устройства.
+        let second = unsafe {
+            xhci_command::first_command(
+                &registers,
+                capabilities,
+                frames,
+                physical_memory_offset,
+                ports.second_connected_port,
+                ports.second_speed,
+            )
+        }
+        .map_err(XhciMmioError::Command)?;
+        Ok((capabilities, reset, report, second, ports))
     })();
     unmap_pages(table, mapped)?;
     result

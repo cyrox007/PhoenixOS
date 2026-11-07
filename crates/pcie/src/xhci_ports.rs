@@ -35,6 +35,8 @@ pub struct PortSummary {
     pub reset: u8,
     pub first_connected_port: u8,
     pub first_speed: u8,
+    pub second_connected_port: u8,
+    pub second_speed: u8,
 }
 
 fn register_offset(operational: u64, port: u8, bar_bytes: u64) -> Result<u64, PortError> {
@@ -76,6 +78,8 @@ pub fn scan_ports<R: OperationalRegisters>(
         reset: 0,
         first_connected_port: 0,
         first_speed: 0,
+        second_connected_port: 0,
+        second_speed: 0,
     };
 
     for port in 1..=ports {
@@ -91,6 +95,8 @@ pub fn scan_ports<R: OperationalRegisters>(
         summary.connected += 1;
         if summary.first_connected_port == 0 {
             summary.first_connected_port = port;
+        } else if summary.second_connected_port == 0 {
+            summary.second_connected_port = port;
         }
 
         let final_status = if initial & PORT_ENABLED != 0 {
@@ -127,6 +133,8 @@ pub fn scan_ports<R: OperationalRegisters>(
         summary.enabled += 1;
         if port == summary.first_connected_port {
             summary.first_speed = speed(final_status);
+        } else if port == summary.second_connected_port {
+            summary.second_speed = speed(final_status);
         }
 
         // Очищаем только прочитанные признаки изменений; сохраняем питание.
@@ -194,6 +202,8 @@ mod tests {
         assert_eq!(summary.reset, 1);
         assert_eq!(summary.first_connected_port, 1);
         assert_eq!(summary.first_speed, 3);
+        assert_eq!(summary.second_connected_port, 2);
+        assert_eq!(summary.second_speed, 1);
         assert_eq!(ports.writes.get(), 1);
     }
 

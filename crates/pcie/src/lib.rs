@@ -266,3 +266,5 @@ mod tests {
         assert_eq!(function.device, 2);
     }
 }
+
+pub mod usb_descriptors;

@@ -8,6 +8,9 @@ xhci mmio capabilities: OK
 xhci controller reset: OK
 xhci dma command completion: OK
 xhci usb port discovery: OK
+xhci usb descriptor: OK
+xhci usb second descriptor: OK
+xhci usb interfaces: OK
 dma kernel mapping self-test: OK
 dma direct address self-test: OK
 virtual memory self-test: OK

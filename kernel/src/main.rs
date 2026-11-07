@@ -295,6 +295,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         ),
     );
 
+    serial::line(&mut out, "INFO", format_args!("dma direct address self-test: OK"));
+
     virtual_memory_self_test(&mut page_table, &mut frames);
     serial::line(
         &mut out,

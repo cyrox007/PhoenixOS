@@ -344,6 +344,30 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         ),
     );
 
+    assert_eq!(
+        (command.interface_class, second.interface_class),
+        (3, 3),
+        "USB-клавиатура и мышь должны представлять HID-интерфейсы"
+    );
+    assert_eq!(
+        (command.interface_protocol, second.interface_protocol),
+        (1, 2),
+        "QEMU-профиль ожидает загрузочные протоколы клавиатуры и мыши"
+    );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "xhci usb interfaces: OK first_protocol={} second_protocol={} endpoints={}/{} configuration={}/{}",
+            command.interface_protocol,
+            second.interface_protocol,
+            command.endpoint_count,
+            second.endpoint_count,
+            command.configuration_length,
+            second.configuration_length
+        ),
+    );
+
     let (dma_pages, page_table_frames) =
         dma_boot::self_test(&mut page_table, &mut frames, physical_memory_offset);
     serial::line(

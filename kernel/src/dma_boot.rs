@@ -90,7 +90,9 @@ impl KernelDmaArena {
             let virtual_address = VirtAddr::new(virtual_start + offset);
             let physical_address = physical + offset;
             assert_eq!(
-                table.translate_addr(virtual_address).map(|address| address.as_u64()),
+                table
+                    .translate_addr(virtual_address)
+                    .map(|address| address.as_u64()),
                 Some(physical_address),
                 "DMA-окно указывает не на зарезервированную физическую страницу"
             );

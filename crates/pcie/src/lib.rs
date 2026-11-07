@@ -1,5 +1,7 @@
 #![no_std]
 
+pub mod xhci;
+
 pub const CONFIG_SPACE_BYTES: u64 = 4096;
 pub const DEVICE_COUNT_PER_BUS: u8 = 32;
 pub const FUNCTION_COUNT_PER_DEVICE: u8 = 8;

@@ -67,9 +67,9 @@ mod tests {
 
     #[test]
     fn recognizes_hid_keyboard() {
-        let config = [9, 2, 25, 0, 1, 1, 0, 0xa0, 50,
-            9, 4, 0, 0, 1, 3, 1, 1, 0,
-            7, 5, 0x81, 3, 8, 0, 10];
+        let config = [
+            9, 2, 25, 0, 1, 1, 0, 0xa0, 50, 9, 4, 0, 0, 1, 3, 1, 1, 0, 7, 5, 0x81, 3, 8, 0, 10,
+        ];
         assert_eq!(
             parse_configuration(&config),
             Ok(UsbInterface {
@@ -84,7 +84,10 @@ mod tests {
 
     #[test]
     fn rejects_truncated_and_zero_length_descriptors() {
-        assert_eq!(parse_configuration(&[9, 2]), Err(DescriptorError::Truncated));
+        assert_eq!(
+            parse_configuration(&[9, 2]),
+            Err(DescriptorError::Truncated)
+        );
         let config = [9, 2, 11, 0, 1, 1, 0, 0, 0, 0, 4];
         assert_eq!(
             parse_configuration(&config),
@@ -94,10 +97,10 @@ mod tests {
 
     #[test]
     fn recognizes_mouse_interface_after_other_descriptors() {
-        let config = [9, 2, 28, 0, 1, 1, 0, 0x80, 50,
-            4, 0xff, 1, 2,
-            9, 4, 0, 0, 1, 3, 1, 2, 0,
-            6, 0x21, 0x11, 1, 0, 1];
+        let config = [
+            9, 2, 28, 0, 1, 1, 0, 0x80, 50, 4, 0xff, 1, 2, 9, 4, 0, 0, 1, 3, 1, 2, 0, 6, 0x21,
+            0x11, 1, 0, 1,
+        ];
         assert_eq!(parse_configuration(&config).unwrap().protocol, 2);
     }
 }

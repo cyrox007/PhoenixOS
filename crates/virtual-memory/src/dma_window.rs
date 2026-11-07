@@ -154,7 +154,12 @@ pub struct DmaWindowRegistry<const N: usize> {
 impl<const N: usize> DmaWindowRegistry<N> {
     pub const fn new() -> Self {
         Self {
-            slots: [const { ReservationSlot { window: None, generation: 0 } }; N],
+            slots: [const {
+                ReservationSlot {
+                    window: None,
+                    generation: 0,
+                }
+            }; N],
         }
     }
 
@@ -248,7 +253,12 @@ impl<const N: usize> DmaWindowRegistry<N> {
     pub fn release(&mut self, handle: DmaWindowHandle) -> Result<(), DmaReservationError> {
         let index = self.checked_slot(handle)?;
         let slot = &mut self.slots[index];
-        if !slot.window.as_ref().expect("проверенное резервирование").is_clear() {
+        if !slot
+            .window
+            .as_ref()
+            .expect("проверенное резервирование")
+            .is_clear()
+        {
             return Err(DmaReservationError::StillMapped);
         }
         slot.window = None;
@@ -431,7 +441,10 @@ mod tests {
             start: BASE,
         };
         registry.map_all(first, &mut pages).unwrap();
-        assert_eq!(registry.release(first), Err(DmaReservationError::StillMapped));
+        assert_eq!(
+            registry.release(first),
+            Err(DmaReservationError::StillMapped)
+        );
         assert_eq!(
             registry.reserve(BASE, 0x4000, 1),
             Err(DmaReservationError::Overlap)
@@ -441,10 +454,16 @@ mod tests {
         pages.fail_unmap = None;
         registry.unmap_all(first, &mut pages).unwrap();
         registry.release(first).unwrap();
-        assert_eq!(registry.release(first), Err(DmaReservationError::StaleHandle));
+        assert_eq!(
+            registry.release(first),
+            Err(DmaReservationError::StaleHandle)
+        );
         let third = registry.reserve(BASE, 0xa000, 1).unwrap();
         assert_ne!(first, third);
-        assert_eq!(registry.mapped_pages(first), Err(DmaReservationError::StaleHandle));
+        assert_eq!(
+            registry.mapped_pages(first),
+            Err(DmaReservationError::StaleHandle)
+        );
         registry.release(third).unwrap();
         registry.release(second).unwrap();
     }

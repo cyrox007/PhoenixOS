@@ -3,10 +3,8 @@
 //! Передача одного экземпляра между подсистемами исключает пересечения
 //! программных резервирований. Аппаратную карту активных таблиц проверяет ядро.
 
-use crate::dma_window::{
-    DmaPageAccess, DmaReservationError, DmaWindowHandle, DmaWindowRegistry,
-};
 use crate::PAGE_SIZE;
+use crate::dma_window::{DmaPageAccess, DmaReservationError, DmaWindowHandle, DmaWindowRegistry};
 use x86_64::VirtAddr;
 
 const KERNEL_CANONICAL_START: u64 = 0xffff_8000_0000_0000;
@@ -75,12 +73,11 @@ impl<const N: usize> KernelVirtualRanges<N> {
         if start < self.start || end > self.end_exclusive {
             return Err(VirtualRangeError::InvalidRange);
         }
-        if self
-            .slots
-            .iter()
-            .any(|slot| slot.occupied && u128::from(start) < slot.end_exclusive()
-                && u128::from(slot.start) < end)
-        {
+        if self.slots.iter().any(|slot| {
+            slot.occupied
+                && u128::from(start) < slot.end_exclusive()
+                && u128::from(slot.start) < end
+        }) {
             return Err(VirtualRangeError::Overlap);
         }
         let slot = self
@@ -119,16 +116,14 @@ impl<const N: usize> KernelVirtualRanges<N> {
                 if !slot.occupied {
                     continue;
                 }
-                if candidate < slot.end_exclusive()
-                    && u128::from(slot.start) < candidate + bytes
-                {
+                if candidate < slot.end_exclusive() && u128::from(slot.start) < candidate + bytes {
                     let end = slot.end_exclusive();
                     next = Some(next.map_or(end, |current: u128| current.max(end)));
                 }
             }
             let Some(end) = next else {
-                let address = u64::try_from(candidate)
-                    .map_err(|_| VirtualRangeError::InvalidRange)?;
+                let address =
+                    u64::try_from(candidate).map_err(|_| VirtualRangeError::InvalidRange)?;
                 let handle = self.reserve_at(address, pages)?;
                 return Ok((handle, address));
             };
@@ -137,7 +132,10 @@ impl<const N: usize> KernelVirtualRanges<N> {
     }
 
     pub fn range(&self, handle: VirtualRangeHandle) -> Result<(u64, u64), VirtualRangeError> {
-        let slot = self.slots.get(handle.slot).ok_or(VirtualRangeError::StaleHandle)?;
+        let slot = self
+            .slots
+            .get(handle.slot)
+            .ok_or(VirtualRangeError::StaleHandle)?;
         if !slot.occupied || slot.generation != handle.generation {
             return Err(VirtualRangeError::StaleHandle);
         }
@@ -208,7 +206,9 @@ impl<const N: usize> ManagedDmaWindows<N> {
             Ok(dma) => Ok(ManagedDmaHandle { virtual_range, dma }),
             Err(error) => {
                 // Резервирование диапазона ещё не создало отображений.
-                ranges.release(virtual_range).map_err(ManagedDmaError::Virtual)?;
+                ranges
+                    .release(virtual_range)
+                    .map_err(ManagedDmaError::Virtual)?;
                 Err(ManagedDmaError::Dma(error))
             }
         }
@@ -240,9 +240,13 @@ impl<const N: usize> ManagedDmaWindows<N> {
         handle: ManagedDmaHandle,
     ) -> Result<(), ManagedDmaError> {
         // Сначала проверяем, что общее резервирование всё ещё действительно.
-        ranges.range(handle.virtual_range).map_err(ManagedDmaError::Virtual)?;
+        ranges
+            .range(handle.virtual_range)
+            .map_err(ManagedDmaError::Virtual)?;
         self.dma.release(handle.dma).map_err(ManagedDmaError::Dma)?;
-        ranges.release(handle.virtual_range).map_err(ManagedDmaError::Virtual)
+        ranges
+            .release(handle.virtual_range)
+            .map_err(ManagedDmaError::Virtual)
     }
 }
 
@@ -265,7 +269,11 @@ mod tests {
     }
 
     impl DmaPageAccess for FakePageAccess {
-        fn map_page(&mut self, virtual_addr: u64, _physical_addr: u64) -> Result<(), DmaWindowError> {
+        fn map_page(
+            &mut self,
+            virtual_addr: u64,
+            _physical_addr: u64,
+        ) -> Result<(), DmaWindowError> {
             let index = ((virtual_addr - BASE) / PAGE_SIZE) as usize;
             self.mapped[index] = true;
             Ok(())

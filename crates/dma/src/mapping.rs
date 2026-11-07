@@ -208,3 +208,197 @@ mod tests {
         assert_eq!(backend.unmap_count, 1);
     }
 }
+
+/// Явно разрешённый диапазон физических адресов, доступных устройству.
+/// Для QEMU без IOMMU адрес шины совпадает с гостевым физическим адресом
+/// только при соответствующей конфигурации виртуальной машины.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectDmaAperture {
+    start: u64,
+    end_exclusive: u64,
+}
+
+impl DirectDmaAperture {
+    pub fn new(start: u64, end_exclusive: u64) -> Result<Self, DmaError> {
+        if start >= end_exclusive {
+            return Err(DmaError::InvalidRange);
+        }
+        Ok(Self {
+            start,
+            end_exclusive,
+        })
+    }
+
+    fn contains(self, physical: u64, length: u64) -> bool {
+        let Some(end) = physical.checked_add(length) else {
+            return false;
+        };
+        physical >= self.start && end <= self.end_exclusive
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DirectSlot {
+    start: u64,
+    length: u64,
+    active: bool,
+}
+
+impl DirectSlot {
+    const EMPTY: Self = Self {
+        start: 0,
+        length: 0,
+        active: false,
+    };
+}
+
+/// Проверяемый вариант адресации без IOMMU для фиксированного профиля QEMU.
+///
+/// Не закрепляет физические страницы, не включает PCI Bus Master и не
+/// подтверждает завершение операции. Эти действия обязательны для драйвера.
+/// При нехватке слотов и при пересечении уже активных областей возвращает
+/// ошибку до выдачи устройству адреса.
+pub struct QemuDirectDma<const N: usize> {
+    aperture: DirectDmaAperture,
+    slots: [DirectSlot; N],
+}
+
+impl<const N: usize> QemuDirectDma<N> {
+    /// # Безопасность
+    ///
+    /// Вызывающий код обязан подтвердить отсутствие IOMMU-перевода для
+    /// выбранного устройства, доступность всего диапазона адресов устройству,
+    /// корректную настройку PCI и закрепление выделяемых страниц до unmap.
+    /// Этот контракт предназначен только для явно проверенного профиля QEMU.
+    pub unsafe fn new(aperture: DirectDmaAperture) -> Self {
+        Self {
+            aperture,
+            slots: [DirectSlot::EMPTY; N],
+        }
+    }
+
+    pub fn active_count(&self) -> usize {
+        self.slots.iter().filter(|slot| slot.active).count()
+    }
+}
+
+impl<const N: usize> DmaMappingBackend for QemuDirectDma<N> {
+    fn map(
+        &mut self,
+        physical: PhysicalAddress,
+        layout: DmaLayout,
+    ) -> Result<DeviceAddress, DmaError> {
+        validate_range(physical.value(), layout)?;
+        let length = u64::try_from(layout.length()).map_err(|_| DmaError::Unaddressable)?;
+        let start = physical.value();
+        if !self.aperture.contains(start, length) {
+            return Err(DmaError::Unaddressable);
+        }
+        let end = start.checked_add(length).ok_or(DmaError::AddressOverflow)?;
+        if self
+            .slots
+            .iter()
+            .any(|slot| slot.active && start < slot.start + slot.length && slot.start < end)
+        {
+            return Err(DmaError::InvalidRange);
+        }
+        let slot = self
+            .slots
+            .iter_mut()
+            .find(|slot| !slot.active)
+            .ok_or(DmaError::Unaddressable)?;
+        *slot = DirectSlot {
+            start,
+            length,
+            active: true,
+        };
+        Ok(DeviceAddress::new(start))
+    }
+
+    fn unmap(&mut self, device: DeviceAddress, layout: DmaLayout) -> Result<(), DmaError> {
+        let length = u64::try_from(layout.length()).map_err(|_| DmaError::Unaddressable)?;
+        let slot = self
+            .slots
+            .iter_mut()
+            .find(|slot| slot.active && slot.start == device.value() && slot.length == length)
+            .ok_or(DmaError::InvalidRange)?;
+        slot.active = false;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod direct_tests {
+    use super::*;
+
+    fn backend<const N: usize>() -> QemuDirectDma<N> {
+        let aperture = DirectDmaAperture::new(0x1000, 0x9000).unwrap();
+        unsafe { QemuDirectDma::new(aperture) }
+    }
+
+    #[test]
+    fn maps_physical_to_device_only_inside_aperture() {
+        let mut backend = backend::<2>();
+        let layout = DmaLayout::new(0x1000, 0x1000).unwrap();
+        let mut first =
+            DeviceMapping::establish(&mut backend, PhysicalAddress::new(0x2000), layout).unwrap();
+        assert_eq!(first.device_address().value(), 0x2000);
+        assert_eq!(backend.active_count(), 1);
+        assert!(matches!(
+            DeviceMapping::establish(&mut backend, PhysicalAddress::new(0x8001), layout),
+            Err(DmaMappingError::InvalidRange(DmaError::MisalignedAddress))
+        ));
+        assert!(matches!(
+            DeviceMapping::establish(&mut backend, PhysicalAddress::new(0x9000), layout),
+            Err(DmaMappingError::Backend(DmaError::Unaddressable))
+        ));
+        first.close(&mut backend).unwrap();
+        assert_eq!(backend.active_count(), 0);
+    }
+
+    #[test]
+    fn refuses_aliases_and_exhaustion_without_losing_existing_mapping() {
+        let mut backend = backend::<1>();
+        let layout = DmaLayout::new(0x1000, 0x1000).unwrap();
+        let mut first =
+            DeviceMapping::establish(&mut backend, PhysicalAddress::new(0x2000), layout).unwrap();
+        assert!(matches!(
+            DeviceMapping::establish(&mut backend, PhysicalAddress::new(0x2000), layout),
+            Err(DmaMappingError::Backend(DmaError::InvalidRange))
+        ));
+        assert!(matches!(
+            DeviceMapping::establish(&mut backend, PhysicalAddress::new(0x4000), layout),
+            Err(DmaMappingError::Backend(DmaError::Unaddressable))
+        ));
+        assert_eq!(backend.active_count(), 1);
+        first.close(&mut backend).unwrap();
+        let mut second =
+            DeviceMapping::establish(&mut backend, PhysicalAddress::new(0x4000), layout).unwrap();
+        second.close(&mut backend).unwrap();
+    }
+
+    #[test]
+    fn validates_bounds_and_unmap_identity() {
+        assert_eq!(
+            DirectDmaAperture::new(0x2000, 0x2000),
+            Err(DmaError::InvalidRange)
+        );
+        let mut backend = backend::<1>();
+        let layout = DmaLayout::new(0x1000, 0x1000).unwrap();
+        assert_eq!(
+            backend.unmap(DeviceAddress::new(0x2000), layout),
+            Err(DmaError::InvalidRange)
+        );
+        let mut mapping =
+            DeviceMapping::establish(&mut backend, PhysicalAddress::new(0x8000), layout).unwrap();
+        assert_eq!(
+            backend.unmap(DeviceAddress::new(0x7000), layout),
+            Err(DmaError::InvalidRange)
+        );
+        mapping.close(&mut backend).unwrap();
+        assert_eq!(
+            backend.unmap(DeviceAddress::new(0x8000), layout),
+            Err(DmaError::InvalidRange)
+        );
+    }
+}

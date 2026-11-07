@@ -4,6 +4,8 @@
 //! активные таблицы страниц, владение виртуальным окном и обратный порядок
 //! освобождения. Политику PAT/MTRR аппаратного устройства оно не подтверждает.
 
+use phoenix_dma::DmaLayout;
+use phoenix_dma::mapping::{DeviceMapping, DirectDmaAperture, PhysicalAddress, QemuDirectDma};
 use phoenix_memory::SystemFrameAllocator;
 use phoenix_vm::ActivePageTable;
 use phoenix_vm::dma_window::{ActiveDmaPageAccess, DmaCachePolicy};
@@ -55,6 +57,23 @@ impl KernelDmaArena {
             .allocate_contiguous_below_4k(TEST_PAGES, 1, u64::MAX)
             .expect("системный распределитель не смог выделить физические страницы DMA");
         let physical = first_frame.start_address().as_u64();
+
+        // В проверочном профиле QEMU нет IOMMU; здесь проверяется только
+        // адресная модель, не аппаратная передача DMA.
+        let aperture = DirectDmaAperture::new(0, 0x1_0000_0000)
+            .expect("некорректное адресное окно QEMU");
+        let mut backend = unsafe { QemuDirectDma::<2>::new(aperture) };
+        let layout = DmaLayout::new((TEST_PAGES * phoenix_vm::PAGE_SIZE) as usize, 4096)
+            .expect("некорректный размер DMA-области");
+        let mut device_mapping =
+            DeviceMapping::establish(&mut backend, PhysicalAddress::new(physical), layout)
+                .expect("не удалось передать физический диапазон механизму прямой адресации");
+        assert_eq!(
+            device_mapping.device_address().value(),
+            physical,
+            "QEMU без IOMMU должен использовать гостевой физический адрес"
+        );
+        assert_eq!(backend.active_count(), 1);
 
         let handle = self
             .windows
@@ -128,6 +147,13 @@ impl KernelDmaArena {
                 "после освобождения DMA-окна осталось отображение"
             );
         }
+
+        // Устройство в испытании не запускалось, поэтому безопасно
+        // снять отображение перед возвратом физических страниц.
+        device_mapping
+            .close(&mut backend)
+            .expect("не удалось снять адресное отображение DMA");
+        assert_eq!(backend.active_count(), 0);
 
         self.windows
             .release(&mut self.ranges, handle)

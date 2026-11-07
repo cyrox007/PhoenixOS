@@ -5,6 +5,7 @@
 //! механизмом. Сам этот модуль не выделяет память и не включает DMA.
 
 pub mod leases;
+pub mod mapping;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DmaError {

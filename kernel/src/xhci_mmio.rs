@@ -132,7 +132,10 @@ pub unsafe fn probe<const N: usize>(
             xhci_command::first_command(&registers, capabilities, frames, physical_memory_offset)
         }
         .map_err(XhciMmioError::Command)?;
-        assert_eq!(report, repeated, "повторный обмен xHCI дал другой результат");
+        assert_eq!(
+            report, repeated,
+            "повторный обмен xHCI дал другой результат"
+        );
         Ok((capabilities, reset, report))
     })();
     unmap_pages(table, mapped)?;

@@ -18,6 +18,7 @@ mod qemu;
 mod serial;
 mod thread;
 mod thread_manager;
+mod xhci_command;
 mod xhci_mmio;
 
 use alloc::boxed::Box;
@@ -267,8 +268,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let mut page_table = unsafe { ActivePageTable::from_current(physical_memory_offset) };
 
     // Ранний контролируемый доступ к MMIO модели xHCI в QEMU.
-    let (capabilities, reset) = unsafe { xhci_mmio::probe(xhci, &mut page_table, &mut frames) }
-        .expect("не удалось проверить и сбросить xHCI через MMIO");
+    let (capabilities, reset, command) =
+        unsafe { xhci_mmio::probe(xhci, &mut page_table, &mut frames, physical_memory_offset) }
+            .expect("не удалось выполнить DMA-команду xHCI в QEMU");
     serial::line(
         &mut out,
         "INFO",
@@ -290,6 +292,15 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!(
             "xhci controller reset: OK halted_before={} status_after={:#x}",
             reset.halted_before, reset.status_after
+        ),
+    );
+
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "xhci dma command completion: OK type={} code={} pages={}",
+            command.event_type, command.completion_code, command.used_pages
         ),
     );
 

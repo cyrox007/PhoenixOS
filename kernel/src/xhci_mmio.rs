@@ -8,6 +8,7 @@ use phoenix_memory::SystemFrameAllocator;
 use phoenix_pcie::xhci::XhciPciController;
 use phoenix_pcie::xhci_capabilities::{CapabilityError, RegisterAccess, XhciCapabilities};
 use phoenix_pcie::xhci_control::{self, OperationalRegisters, ResetError, ResetResult};
+use phoenix_pcie::xhci_ports::{self, PortError, PortSummary};
 use phoenix_vm::{ActivePageTable, PAGE_SIZE};
 use x86_64::{
     PhysAddr, VirtAddr,
@@ -29,6 +30,8 @@ pub enum XhciMmioError {
     InvalidCapabilities(CapabilityError),
     ControllerReset(ResetError),
     Command(CommandError),
+    Ports(PortError),
+    MissingTestDevices,
 }
 
 struct MappedRegisters {
@@ -70,7 +73,7 @@ pub unsafe fn probe<const N: usize>(
     table: &mut ActivePageTable,
     frames: &mut SystemFrameAllocator<N>,
     physical_memory_offset: VirtAddr,
-) -> Result<(XhciCapabilities, ResetResult, CommandReport), XhciMmioError> {
+) -> Result<(XhciCapabilities, ResetResult, CommandReport, PortSummary), XhciMmioError> {
     if !controller.memory_enabled {
         return Err(XhciMmioError::MemoryAccessDisabled);
     }
@@ -136,7 +139,18 @@ pub unsafe fn probe<const N: usize>(
             report, repeated,
             "повторный обмен xHCI дал другой результат"
         );
-        Ok((capabilities, reset, report))
+        let ports = xhci_ports::scan_ports(
+            &registers,
+            capabilities.operational_offset,
+            capabilities.max_ports,
+            QEMU_XHCI_MMIO_BYTES,
+            xhci_control::MAX_POLLS,
+        )
+        .map_err(XhciMmioError::Ports)?;
+        if ports.connected < 2 || ports.enabled < 2 {
+            return Err(XhciMmioError::MissingTestDevices);
+        }
+        Ok((capabilities, reset, report, ports))
     })();
     unmap_pages(table, mapped)?;
     result

@@ -13,13 +13,16 @@ use phoenix_pcie::xhci_control::{self, OperationalRegisters};
 use x86_64::VirtAddr;
 
 const PAGE_BYTES: u64 = 4096;
-const PAGE_COUNT: u64 = 4;
+const PAGE_COUNT: u64 = 8;
+const INPUT_PAGE: u64 = 4;
+const OUTPUT_PAGE: u64 = 5;
+const TRANSFER_PAGE: u64 = 6;
+const DESCRIPTOR_PAGE: u64 = 7;
 const COMMAND_RING_PAGE: u64 = 1;
 const EVENT_RING_PAGE: u64 = 2;
 const EVENT_TABLE_PAGE: u64 = 3;
 const RING_ITEMS: u32 = 256;
 const MAX_POLLS: usize = 5_000_000;
-const NOOP_COMMAND: u32 = (23 << 10) | 1;
 const LINK_TRB: u32 = (6 << 10) | 2 | 1;
 const COMMAND_COMPLETION_EVENT: u32 = 33;
 const SUCCESS_COMPLETION: u32 = 1;
@@ -39,6 +42,10 @@ pub enum CommandError {
     UnsafeShutdown,
     DeviceUnmapFailed,
     FrameReleaseFailed,
+    InvalidSlot,
+    InvalidSpeed,
+    InvalidDescriptor,
+    InvalidTransferEvent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +53,10 @@ pub struct CommandReport {
     pub completion_code: u8,
     pub event_type: u8,
     pub used_pages: u64,
+    pub slot_id: u8,
+    pub vendor_id: u16,
+    pub product_id: u16,
+    pub device_class: u8,
 }
 
 struct GuestMemory {
@@ -82,11 +93,188 @@ fn wait_halted<R: OperationalRegisters>(registers: &R, operational: u64, expecte
     false
 }
 
+#[derive(Clone, Copy)]
+struct Completion {
+    kind: u8,
+    code: u8,
+    slot: u8,
+    pointer: u64,
+}
+
+fn await_completion<R: OperationalRegisters>(
+    registers: &R,
+    runtime: u64,
+    base: u64,
+    memory: &GuestMemory,
+    index: usize,
+) -> Result<Completion, CommandError> {
+    let offset = index * 16;
+    for _ in 0..MAX_POLLS {
+        let control = memory.read(EVENT_RING_PAGE, offset + 12);
+        if control & 1 == 0 {
+            core::hint::spin_loop();
+            continue;
+        }
+        compiler_fence(Ordering::SeqCst);
+        let event = Completion {
+            kind: ((control >> 10) & 0x3f) as u8,
+            code: (memory.read(EVENT_RING_PAGE, offset + 8) >> 24) as u8,
+            slot: (control >> 24) as u8,
+            pointer: u64::from(memory.read(EVENT_RING_PAGE, offset))
+                | (u64::from(memory.read(EVENT_RING_PAGE, offset + 4)) << 32),
+        };
+        // Указываем следующий свободный элемент, учитывая бит EHB.
+        write_address(registers, runtime + 0x18, base + EVENT_RING_PAGE * PAGE_BYTES
+            + ((index + 1) * 16) as u64 | (1 << 3));
+        return Ok(event);
+    }
+    Err(CommandError::CommandTimeout)
+}
+
+fn command<R: OperationalRegisters>(
+    registers: &R,
+    capabilities: XhciCapabilities,
+    base: u64,
+    memory: &GuestMemory,
+    index: usize,
+    parameter: u64,
+    control: u32,
+) -> Result<Completion, CommandError> {
+    let address = base + COMMAND_RING_PAGE * PAGE_BYTES + (index * 16) as u64;
+    memory.write(COMMAND_RING_PAGE, index * 16, parameter as u32);
+    memory.write(COMMAND_RING_PAGE, index * 16 + 4, (parameter >> 32) as u32);
+    memory.write(COMMAND_RING_PAGE, index * 16 + 8, 0);
+    memory.write(COMMAND_RING_PAGE, index * 16 + 12, control | 1);
+    compiler_fence(Ordering::SeqCst);
+    registers.write_u32(capabilities.doorbell_offset, 0);
+    let event = await_completion(
+        registers,
+        capabilities.runtime_offset + 0x20,
+        base,
+        memory,
+        index,
+    )?;
+    if event.kind != COMMAND_COMPLETION_EVENT as u8 {
+        return Err(CommandError::WrongEventType);
+    }
+    if event.pointer != address {
+        return Err(CommandError::WrongCommandPointer);
+    }
+    if event.code != SUCCESS_COMPLETION as u8 {
+        return Err(CommandError::WrongCompletionCode);
+    }
+    Ok(event)
+}
+
+fn read_descriptor<R: OperationalRegisters>(
+    registers: &R,
+    capabilities: XhciCapabilities,
+    base: u64,
+    memory: &GuestMemory,
+    port: u8,
+    speed: u8,
+) -> Result<CommandReport, CommandError> {
+    let enabled = command(registers, capabilities, base, memory, 1, 0, 9 << 10)?;
+    if enabled.slot == 0 || enabled.slot > capabilities.max_slots {
+        return Err(CommandError::InvalidSlot);
+    }
+    let slot = enabled.slot;
+    let context = usize::from(capabilities.context_size_bytes);
+    let packet_size = match speed {
+        1 | 2 => 8,
+        3 => 64,
+        4 => 512,
+        _ => return Err(CommandError::InvalidSpeed),
+    };
+    let output = base + OUTPUT_PAGE * PAGE_BYTES;
+    let input = base + INPUT_PAGE * PAGE_BYTES;
+    let transfer = base + TRANSFER_PAGE * PAGE_BYTES;
+    let descriptor = base + DESCRIPTOR_PAGE * PAGE_BYTES;
+
+    // DCBAA[slot] — адрес выходного контекста устройства.
+    memory.write(0, usize::from(slot) * 8, output as u32);
+    memory.write(0, usize::from(slot) * 8 + 4, (output >> 32) as u32);
+
+    // Контекст управления (Add: Slot + EP0), за ним Slot и EP0.
+    memory.write(INPUT_PAGE, 4, 3);
+    memory.write(INPUT_PAGE, context, (u32::from(speed) << 20) | (1 << 27));
+    memory.write(INPUT_PAGE, context + 4, u32::from(port) << 16);
+    let ep = context * 2;
+    memory.write(
+        INPUT_PAGE,
+        ep + 4,
+        (3 << 1) | (4 << 3) | (packet_size << 16),
+    );
+    memory.write(INPUT_PAGE, ep + 8, (transfer | 1) as u32);
+    memory.write(INPUT_PAGE, ep + 12, (transfer >> 32) as u32);
+    memory.write(INPUT_PAGE, ep + 16, 8);
+
+    // Link TRB на конце управляющего кольца.
+    let link = (RING_ITEMS as usize - 1) * 16;
+    memory.write(TRANSFER_PAGE, link, transfer as u32);
+    memory.write(TRANSFER_PAGE, link + 4, (transfer >> 32) as u32);
+    memory.write(TRANSFER_PAGE, link + 12, LINK_TRB);
+
+    compiler_fence(Ordering::SeqCst);
+    let _addressed = command(
+        registers, capabilities, base, memory, 2, input,
+        (11 << 10) | (u32::from(slot) << 24),
+    )?;
+
+    // GET_DESCRIPTOR(Device, 18): Setup -> Data IN -> Status OUT.
+    memory.write(TRANSFER_PAGE, 0, 0x0100_0680);
+    memory.write(TRANSFER_PAGE, 4, 18 << 16);
+    memory.write(TRANSFER_PAGE, 8, 8);
+    memory.write(TRANSFER_PAGE, 12, (2 << 10) | (3 << 16) | (1 << 6) | 1);
+    memory.write(TRANSFER_PAGE, 16, descriptor as u32);
+    memory.write(TRANSFER_PAGE, 20, (descriptor >> 32) as u32);
+    memory.write(TRANSFER_PAGE, 24, 18);
+    memory.write(TRANSFER_PAGE, 28, (3 << 10) | (1 << 16) | 1);
+    memory.write(TRANSFER_PAGE, 32, 0);
+    memory.write(TRANSFER_PAGE, 36, 0);
+    memory.write(TRANSFER_PAGE, 40, 0);
+    memory.write(TRANSFER_PAGE, 44, (4 << 10) | (1 << 5) | 1);
+    compiler_fence(Ordering::SeqCst);
+    // Doorbell[slot], DB Target 1 = управляющая конечная точка.
+    registers.write_u32(capabilities.doorbell_offset + u64::from(slot) * 4, 1);
+    let event = await_completion(
+        registers,
+        capabilities.runtime_offset + 0x20,
+        base,
+        memory,
+        3,
+    )?;
+    if event.kind != 32 || event.code != 1 || event.slot != slot {
+        return Err(CommandError::InvalidTransferEvent);
+    }
+    if event.pointer != transfer + 32 {
+        return Err(CommandError::InvalidTransferEvent);
+    }
+
+    let first = memory.read(DESCRIPTOR_PAGE, 0);
+    let second = memory.read(DESCRIPTOR_PAGE, 4);
+    if first & 0xffff != 0x0112 {
+        return Err(CommandError::InvalidDescriptor);
+    }
+    let identifiers = memory.read(DESCRIPTOR_PAGE, 8);
+    Ok(CommandReport {
+        completion_code: event.code,
+        event_type: event.kind,
+        used_pages: PAGE_COUNT,
+        slot_id: slot,
+        vendor_id: identifiers as u16,
+        product_id: (identifiers >> 16) as u16,
+        device_class: (second >> 8) as u8,
+    })
+}
+
 fn issue_noop<R: OperationalRegisters>(
     registers: &R,
     capabilities: XhciCapabilities,
     base: u64,
     memory: &GuestMemory,
+    port: u8,
+    speed: u8,
 ) -> Result<CommandReport, CommandError> {
     let operational = capabilities.operational_offset;
     let runtime = capabilities.runtime_offset + 0x20;
@@ -138,37 +326,13 @@ fn issue_noop<R: OperationalRegisters>(
         return Err(CommandError::StartTimeout);
     }
 
-    // Уведомляем контроллер о первой команде в кольце.
-    registers.write_u32(capabilities.doorbell_offset, 0);
-    for _ in 0..MAX_POLLS {
-        let control = memory.read(EVENT_RING_PAGE, 12);
-        if control & 1 == 0 {
-            core::hint::spin_loop();
-            continue;
-        }
-        compiler_fence(Ordering::SeqCst);
-        let kind = ((control >> 10) & 0x3f) as u8;
-        let code = (memory.read(EVENT_RING_PAGE, 8) >> 24) as u8;
-        let pointer = u64::from(memory.read(EVENT_RING_PAGE, 0))
-            | (u64::from(memory.read(EVENT_RING_PAGE, 4)) << 32);
-        if kind != COMMAND_COMPLETION_EVENT as u8 {
-            return Err(CommandError::WrongEventType);
-        }
-        if pointer != command_address {
-            return Err(CommandError::WrongCommandPointer);
-        }
-        if code != SUCCESS_COMPLETION as u8 {
-            return Err(CommandError::WrongCompletionCode);
-        }
-        // Объявляем контроллеру, что запись события обработана.
-        write_address(registers, runtime + 0x18, event_address + 16 | (1 << 3));
-        return Ok(CommandReport {
-            completion_code: code,
-            event_type: kind,
-            used_pages: PAGE_COUNT,
-        });
+    // Проверяем старый безопасный путь No Op до выдачи слота.
+    let noop = command(registers, capabilities, base, memory, 0, 0, 23 << 10)?;
+    if noop.code != SUCCESS_COMPLETION as u8 {
+        return Err(CommandError::WrongCompletionCode);
     }
-    Err(CommandError::CommandTimeout)
+    read_descriptor(registers, capabilities, base, memory, port, speed)
+
 }
 
 /// Контроллер должен быть предварительно сброшен и остановлен.
@@ -184,6 +348,8 @@ pub unsafe fn first_command<const N: usize, R: OperationalRegisters>(
     capabilities: XhciCapabilities,
     frames: &mut SystemFrameAllocator<N>,
     physical_memory_offset: VirtAddr,
+    port: u8,
+    speed: u8,
 ) -> Result<CommandReport, CommandError> {
     let free_before = frames.free_frames();
     let first = frames
@@ -218,7 +384,7 @@ pub unsafe fn first_command<const N: usize, R: OperationalRegisters>(
         };
     assert_eq!(device_mapping.device_address().value(), base);
 
-    let result = issue_noop(registers, capabilities, base, &memory);
+    let result = issue_noop(registers, capabilities, base, &memory, port, speed);
 
     // Независимо от результата прекращаем доступ контроллера к памяти.
     // Сброс удаляет ранее запрограммированные адреса колец.

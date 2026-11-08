@@ -9,10 +9,12 @@
 
 import json
 import os
+import selectors
 import socket
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -82,6 +84,50 @@ def verify_firmware_screenshot(path):
     if observed != (24, 31, 46):
         raise RuntimeError(f"GOP: панель была перерисована после передачи: {observed}")
     print(f"Сохранность раннего GOP: OK {width}x{height}", flush=True)
+
+
+def read_guest_lines(process, total_seconds, idle_seconds):
+    """Читать последовательный порт без зависания на неполной строке.
+
+    Оба срока отсчитываются монотонными часами. Отдельное ограничение
+    простоя отличает зависшую загрузку от медленного, но живого сценария.
+    """
+    start = time.monotonic()
+    last_output = start
+    pending = bytearray()
+    with selectors.DefaultSelector() as selector:
+        selector.register(process.stdout, selectors.EVENT_READ)
+        while True:
+            now = time.monotonic()
+            if now - start >= total_seconds:
+                raise TimeoutError(f"QEMU: превышен общий срок {total_seconds} с")
+            if now - last_output >= idle_seconds:
+                raise TimeoutError(f"QEMU: нет вывода {idle_seconds} с")
+            remaining = min(1.0, total_seconds - (now - start),
+                            idle_seconds - (now - last_output))
+            if not selector.select(remaining):
+                continue
+            chunk = os.read(process.stdout.fileno(), 65536)
+            if not chunk:
+                if pending:
+                    yield pending.decode("utf-8", errors="replace")
+                return
+            last_output = time.monotonic()
+            pending.extend(chunk)
+            if len(pending) > 1024 * 1024:
+                raise RuntimeError("QEMU: строка последовательного порта слишком длинная")
+            while b"\n" in pending:
+                line, _, rest = pending.partition(b"\n")
+                pending = bytearray(rest)
+                yield line.decode("utf-8", errors="replace") + "\n"
+
+
+def positive_timeout(name, default):
+    """Проверить ограничение времени из окружения."""
+    value = os.environ.get(name, str(default))
+    if not value.isdecimal() or int(value) == 0:
+        raise ValueError(f"Некорректное ограничение времени {name}: {value!r}")
+    return int(value)
 
 
 class Qmp:
@@ -230,12 +276,14 @@ def main():
             disk.truncate(16 * 1024 * 1024)
         command = build_qemu_command(image, code, vars_path, nvme_image, path)
         validate_modern_qemu_profile(command)
+        overall = positive_timeout("PHOENIXOS_QEMU_TIMEOUT_SECONDS", 180)
+        idle = positive_timeout("PHOENIXOS_QEMU_IDLE_TIMEOUT_SECONDS", 60)
+        print(f"QEMU: начало испытаний, предел {overall} с, простой {idle} с", flush=True)
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
+            bufsize=0,
         )
         monitor = Qmp(path)
         gpu_screen_verified = False
@@ -256,9 +304,12 @@ def main():
         scheduled_released = False
         scheduled_moved = False
         scheduled_stopped = False
+        last_checkpoint = "последовательный порт ещё не ответил"
         try:
             with open(serial_log, "w", encoding="utf-8") as log:
-                for line in process.stdout:
+                for line in read_guest_lines(process, overall, idle):
+                    if ": OK" in line:
+                        last_checkpoint = line.strip()
                     sys.stdout.write(line)
                     sys.stdout.flush()
                     log.write(line)
@@ -410,6 +461,10 @@ def main():
                 raise RuntimeError("Постоянная USB-служба не завершила полный жизненный цикл")
             if result != 33:
                 raise RuntimeError(f"QEMU завершился с кодом {result}, ожидается 33")
+        except Exception as error:
+            print(f"QEMU: отказ: {error}; последняя контрольная точка: "
+                  f"{last_checkpoint}", file=sys.stderr, flush=True)
+            raise
         finally:
             monitor.close()
             if process.poll() is None:

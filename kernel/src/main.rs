@@ -351,8 +351,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     assert_eq!(nvme_admin.completed_commands, 2);
     assert_eq!(nvme_admin.controller_vendor, nvme.function.vendor_id);
     assert!(nvme_admin.namespace_blocks > 0);
-    assert_eq!(nvme_admin.io_commands, 5);
-    assert_eq!(nvme_admin.verified_blocks, 2);
+    assert_eq!(nvme_admin.io_commands, 17);
+    assert_eq!(nvme_admin.verified_blocks, 40);
     assert_eq!(nvme_admin.returned_dma_pages, 6);
     serial::line(
         &mut out,
@@ -390,9 +390,17 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         &mut out,
         "INFO",
         format_args!(
-            "nvme block read write restore: OK verified={} lba={}",
+            "nvme block read write restore: OK verified={} lba_start={} count=10",
             nvme_admin.verified_blocks,
-            nvme_admin.namespace_blocks - 1
+            nvme_admin.namespace_blocks - 10
+        ),
+    );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "nvme block device: OK read_write_flush=17 verified_blocks={} queue_wrap=1",
+            nvme_admin.verified_blocks
         ),
     );
     serial::line(

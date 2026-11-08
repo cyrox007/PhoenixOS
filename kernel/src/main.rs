@@ -870,6 +870,46 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     init_apic_timer(&mut out);
 
+    // Эталонный драйвер обращается только к виртуальному QEMU EDU:
+    // настоящий PCIe, MSI на выделенном векторе и двусторонний DMA.
+    let edu_function = pcie
+        .first_edu
+        .expect("профиль QEMU обязан содержать учебный контроллер EDU");
+    let edu_report = unsafe {
+        reference_edu::self_test(
+            edu_function,
+            &mut page_table,
+            &mut frames,
+            physical_memory_offset,
+        )
+    }
+    .expect("эталонный EDU-драйвер не прошёл аппаратную проверку");
+    assert_eq!(edu_report.driver_name, "qemu-edu-reference");
+    assert_eq!(edu_report.verified_bytes, 256);
+    assert_eq!(edu_report.returned_dma_pages, 1);
+    assert_eq!(edu_report.irq_mask & 0x142, 0x142);
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "reference edu driver: OK bus={} device={} bytes={} driver={}",
+            edu_report.pci_bus,
+            edu_report.pci_device,
+            edu_report.verified_bytes,
+            edu_report.driver_name
+        ),
+    );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "reference edu irq dma: OK mask={:#x} returned_pages={}",
+            edu_report.irq_mask,
+            edu_report.returned_dma_pages
+        ),
+    );
+
+
     // GOP больше не используется для штатных графических обновлений.
     display_route
         .native_access()

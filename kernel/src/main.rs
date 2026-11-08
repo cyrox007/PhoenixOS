@@ -269,7 +269,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let mut page_table = unsafe { ActivePageTable::from_current(physical_memory_offset) };
 
     // Реальный запуск выбранного драйвера с ресурсами ядра.
-    let (launch, (capabilities, reset, command, second, ports, retained)) =
+    let (launch, (capabilities, reset, command, second, ports, retained), mut active_xhci) =
         unsafe { xhci_driver::start(xhci, &mut page_table, &mut frames, physical_memory_offset) }
             .expect("штатный драйвер xHCI не смог инициализировать контроллер");
     serial::line(
@@ -553,6 +553,46 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     init_apic_timer(&mut out);
 
     render_boot_banner(boot_info, &mut out);
+
+    // Контроллер пережил все системные проверки ядра: MMIO и физические
+    // DMA-страницы закреплены, слотам не требуется повторная адресация.
+    for _ in 0..3 {
+        assert!(
+            active_xhci.is_running(),
+            "xHCI завершил работу до конца загрузки ядра"
+        );
+        let event = active_xhci
+            .poll_port_event()
+            .expect("не удалось обслужить кольцо событий xHCI");
+        assert_eq!(
+            event,
+            None,
+            "проверочный профиль не должен отключать USB-устройства"
+        );
+    }
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "xhci resident service: OK first={} second={} dma_pages={}",
+            retained.first_slot, retained.second_slot, retained.pages
+        ),
+    );
+
+    let free_before_shutdown = frames.free_frames();
+    active_xhci
+        .shutdown(&mut page_table, &mut frames)
+        .expect("не удалось безопасно остановить работающий xHCI");
+    assert_eq!(
+        frames.free_frames(),
+        free_before_shutdown + retained.pages,
+        "при остановке xHCI не возвращены закреплённые DMA-страницы"
+    );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("xhci resident shutdown: OK pages={}", retained.pages),
+    );
 
     serial::line(&mut out, "INFO", format_args!("bootstrap: OK"));
     qemu::exit(ExitCode::Success);

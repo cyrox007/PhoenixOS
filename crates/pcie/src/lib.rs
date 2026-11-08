@@ -2,6 +2,7 @@
 
 pub mod nvme;
 pub mod nvme_admin;
+pub mod nvme_io;
 pub mod xhci;
 pub mod xhci_capabilities;
 pub mod xhci_control;

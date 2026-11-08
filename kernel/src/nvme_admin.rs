@@ -610,7 +610,8 @@ pub unsafe fn self_test<const N: usize>(
         nvme::read_capabilities(&registers).map_err(|_| AdminRuntimeError::InvalidQueueParameters);
     let outcome = capabilities.and_then(|cap| {
         if cap.minimum_page_size != PAGE_SIZE
-            || cap.doorbell_stride_bytes > ((REGISTERS_PAGES * PAGE_SIZE - nvme_admin::REG_DOORBELL - 4) / 3) as u32
+            || cap.doorbell_stride_bytes
+                > ((REGISTERS_PAGES * PAGE_SIZE - nvme_admin::REG_DOORBELL - 4) / 3) as u32
             || cap.maximum_queue_entries < u32::from(QUEUE_DEPTH)
         {
             return Err(AdminRuntimeError::InvalidQueueParameters);

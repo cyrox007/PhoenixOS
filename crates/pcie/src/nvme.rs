@@ -319,7 +319,10 @@ mod tests {
             Err(NvmeCapabilityError::InvalidCapabilities)
         );
         assert_eq!(
-            read_capabilities(&FakeRegisters { version: 0, ..baseline }),
+            read_capabilities(&FakeRegisters {
+                version: 0,
+                ..baseline
+            }),
             Err(NvmeCapabilityError::InvalidVersion)
         );
         assert_eq!(
@@ -337,7 +340,10 @@ mod tests {
             Err(NvmeCapabilityError::UnsupportedPageSize)
         );
         assert_eq!(
-            read_capabilities(&FakeRegisters { status: 2, ..baseline }),
+            read_capabilities(&FakeRegisters {
+                status: 2,
+                ..baseline
+            }),
             Err(NvmeCapabilityError::ControllerFault)
         );
     }

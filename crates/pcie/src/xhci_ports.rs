@@ -147,6 +147,86 @@ pub fn scan_ports<R: OperationalRegisters>(
     Ok(summary)
 }
 
+/// Состояние одного порта после подтверждения изменений в PORTSC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortSnapshot {
+    pub port: u8,
+    pub connected: bool,
+    pub enabled: bool,
+    pub speed: u8,
+}
+
+/// Подтверждает уведомление о смене состояния конкретного порта.
+/// Если устройство подключено, но ещё не активно, выполняет
+/// безопасный аппаратный сброс и дожидается завершения.
+pub fn acknowledge_change<R: OperationalRegisters>(
+    registers: &R,
+    operational: u64,
+    port: u8,
+    bar_bytes: u64,
+    max_polls: usize,
+) -> Result<PortSnapshot, PortError> {
+    let offset = register_offset(operational, port, bar_bytes)?;
+    let status = registers.read_u32(offset);
+    if status & PORT_OVERCURRENT != 0 {
+        return Err(PortError::Overcurrent(port));
+    }
+
+    // Вначале подтверждаем все флаги изменения, но не копируем PED.
+    let changed = status & PORT_CHANGE_MASK;
+    if changed != 0 {
+        registers.write_u32(offset, (status & PORT_POWER) | changed);
+    }
+
+    if status & PORT_CONNECTED == 0 {
+        return Ok(PortSnapshot {
+            port,
+            connected: false,
+            enabled: false,
+            speed: 0,
+        });
+    }
+
+    let current = if status & PORT_ENABLED != 0 {
+        status
+    } else {
+        // Сброс разрешён только для подключённого, ещё не активного порта.
+        registers.write_u32(offset, (status & PORT_POWER) | PORT_RESET);
+        let mut result = None;
+        for _ in 0..max_polls {
+            let next = registers.read_u32(offset);
+            if next & PORT_CONNECTED == 0 {
+                return Err(PortError::DeviceDisconnected(port));
+            }
+            if next & PORT_OVERCURRENT != 0 {
+                return Err(PortError::Overcurrent(port));
+            }
+            if next & PORT_RESET == 0 {
+                result = Some(next);
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        result.ok_or(PortError::ResetTimeout(port))?
+    };
+
+    if current & PORT_ENABLED == 0 || speed(current) == 0 {
+        return Err(PortError::PortNotEnabled(port));
+    }
+
+    // Сам сброс порта может сформировать PRC. Подтверждаем только W1C.
+    let changes = current & PORT_CHANGE_MASK;
+    if changes != 0 {
+        registers.write_u32(offset, (current & PORT_POWER) | changes);
+    }
+    Ok(PortSnapshot {
+        port,
+        connected: true,
+        enabled: true,
+        speed: speed(current),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,4 +327,35 @@ mod tests {
             Err(PortError::InvalidPortCount)
         );
     }
+    #[test]
+    fn unplug_acks_only_change_flags_and_does_not_reset() {
+        let ports = FakePorts::new(PORT_POWER | (1 << 17), 0);
+        let result = acknowledge_change(&ports, 0x40, 1, 0x4000, 4).unwrap();
+        assert_eq!(
+            result,
+            PortSnapshot { port: 1, connected: false, enabled: false, speed: 0 }
+        );
+        assert_eq!(ports.writes.get(), 1);
+    }
+
+    #[test]
+    fn hotplug_resets_new_device_and_reports_speed() {
+        let ports = FakePorts::new(PORT_CONNECTED | PORT_POWER | (3 << 10), 0);
+        let result = acknowledge_change(&ports, 0x40, 1, 0x4000, 4).unwrap();
+        assert_eq!(
+            result,
+            PortSnapshot { port: 1, connected: true, enabled: true, speed: 3 }
+        );
+        assert_eq!(ports.writes.get(), 1);
+    }
+
+    #[test]
+    fn attached_device_does_not_receive_a_second_reset() {
+        let ports = FakePorts::new(PORT_CONNECTED | PORT_ENABLED | PORT_POWER | (3 << 10), 0);
+        let result = acknowledge_change(&ports, 0x40, 1, 0x4000, 4).unwrap();
+        assert!(result.connected);
+        assert_eq!(ports.writes.get(), 0);
+    }
+
+
 }

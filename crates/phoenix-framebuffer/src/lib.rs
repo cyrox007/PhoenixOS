@@ -63,6 +63,32 @@ pub fn draw_boot_banner(framebuffer: &mut FrameBuffer) -> Result<BannerInfo, Ren
     })
 }
 
+/// Аварийный экран при отказе штатного видеодрайвера. Не запускает
+/// GOP повторно: используется только сохранённый загрузчиком буфер.
+pub fn draw_emergency_banner(framebuffer: &mut FrameBuffer) -> Result<BannerInfo, RenderError> {
+    let info = framebuffer.info();
+    validate_info(info, framebuffer.buffer().len())?;
+
+    let mut canvas = Canvas {
+        buffer: framebuffer.buffer_mut(),
+        info,
+    };
+    canvas.clear(BACKGROUND)?;
+    let panel_height = core::cmp::min(info.height, 112);
+    canvas.fill_rect(0, 0, info.width, panel_height, ACCENT)?;
+
+    if info.width >= 160 && info.height >= 64 {
+        canvas.draw_text(24, 18, "PhoenixOS", PRIMARY_TEXT, ACCENT, 2)?;
+        canvas.draw_text(24, 62, "EMERGENCY DISPLAY", PRIMARY_TEXT, ACCENT, 1)?;
+    }
+
+    Ok(BannerInfo {
+        width: info.width,
+        height: info.height,
+        bytes_per_pixel: info.bytes_per_pixel,
+    })
+}
+
 fn validate_info(info: FrameBufferInfo, buffer_len: usize) -> Result<(), RenderError> {
     if info.width == 0
         || info.height == 0

@@ -8,6 +8,7 @@ nvme pcie discovery: OK
 nvme driver registry probe: OK
 nvme mmio capabilities: OK
 nvme read-only probe: OK
+nvme fault model: OK
 nvme admin queues: OK
 nvme identify controller: OK
 nvme identify namespace: OK

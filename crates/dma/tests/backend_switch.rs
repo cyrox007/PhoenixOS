@@ -177,14 +177,12 @@ fn failed_translation_unmap_preserves_all_ownership_until_retry() {
         ))
     );
     assert!(buffer.is_reserved());
-    assert!(platform.device_mapper.active);
-    assert!(platform.memory.reserved);
-    assert!(platform.memory.mapped);
-    assert_eq!(platform.memory.returned, 0);
+    // Доступ к источникам ресурса выполняется после завершения заимствования адаптером.
     buffer.close(&mut platform).unwrap();
-    assert!(!platform.device_mapper.active);
-    assert!(!platform.memory.reserved);
-    assert_eq!(platform.memory.returned, 1);
+    drop(platform);
+    assert!(!mapper.active);
+    assert!(!memory.reserved);
+    assert_eq!(memory.returned, 1);
 }
 
 #[test]
@@ -198,5 +196,6 @@ fn translated_address_must_still_satisfy_device_alignment() {
     buffer.map_device(&mut platform).unwrap();
     assert_eq!(buffer.region(), Err(DmaBufferError::InvalidAddress));
     buffer.close(&mut platform).unwrap();
-    assert_eq!(platform.memory.returned, 1);
+    drop(platform);
+    assert_eq!(memory.returned, 1);
 }

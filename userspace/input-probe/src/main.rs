@@ -110,17 +110,7 @@ fn parse_input_capability(info: &ProcessStartInfo) -> Option<PackedCapabilityHan
         return None;
     }
     let bytes = unsafe { core::slice::from_raw_parts(argument.address as *const u8, 16) };
-    let mut raw = 0_u64;
-    for &digit in bytes {
-        let nibble = match digit {
-            b'0'..=b'9' => u64::from(digit - b'0'),
-            b'a'..=b'f' => u64::from(digit - b'a' + 10),
-            b'A'..=b'F' => u64::from(digit - b'A' + 10),
-            _ => return None,
-        };
-        raw = (raw << 4) | nibble;
-    }
-    Some(PackedCapabilityHandle::from_raw(raw))
+    PackedCapabilityHandle::parse_hex(bytes)
 }
 
 #[panic_handler]

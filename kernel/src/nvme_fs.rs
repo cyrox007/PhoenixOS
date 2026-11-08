@@ -13,7 +13,7 @@ const EXPECTED_GEOMETRY: BlockGeometry = BlockGeometry {
     block_size: 512,
     block_count: 32_768,
 };
-const VOLUME_ID: [u8; 16] = *b"PhoenixNVMeTest01";
+const VOLUME_ID: [u8; 16] = *b"PhoenixNVMeTest1";
 const FILE_CONTENT: &[u8] = b"PhoenixOS: PhoenixFS na NVMe";
 const FILE_APPEND: &[u8] = b" - proverka zapisi";
 

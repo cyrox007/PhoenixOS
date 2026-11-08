@@ -95,7 +95,9 @@ pub fn check_dma_range(address: u64, length: usize) -> Result<(), ExampleError> 
         return Err(ExampleError::InvalidDmaRange);
     }
     let length = u64::try_from(length).map_err(|_| ExampleError::InvalidDmaRange)?;
-    let end = address.checked_add(length).ok_or(ExampleError::InvalidDmaRange)?;
+    let end = address
+        .checked_add(length)
+        .ok_or(ExampleError::InvalidDmaRange)?;
     if end > EDU_DMA_LIMIT {
         return Err(ExampleError::InvalidDmaRange);
     }
@@ -198,10 +200,12 @@ mod tests {
             Err(DriverRegistryError::UnsupportedAbi(DRIVER_ABI_VERSION + 1))
         );
         assert!(registry.is_empty());
-        registry.register(ContextRegisteredDriver {
-            descriptor: descriptor(),
-            start: probe,
-        }).unwrap();
+        registry
+            .register(ContextRegisteredDriver {
+                descriptor: descriptor(),
+                start: probe,
+            })
+            .unwrap();
         assert_eq!(
             registry.register(ContextRegisteredDriver {
                 descriptor: descriptor(),
@@ -214,9 +218,15 @@ mod tests {
     #[test]
     fn dma_mask_rejects_boundary_and_overflow() {
         assert_eq!(check_dma_range(0x0fff_f000, 4096), Ok(()));
-        assert_eq!(check_dma_range(0x0fff_f001, 4096), Err(ExampleError::InvalidDmaRange));
+        assert_eq!(
+            check_dma_range(0x0fff_f001, 4096),
+            Err(ExampleError::InvalidDmaRange)
+        );
         assert_eq!(check_dma_range(0, 0), Err(ExampleError::InvalidDmaRange));
-        assert_eq!(check_dma_range(u64::MAX, 4), Err(ExampleError::InvalidDmaRange));
+        assert_eq!(
+            check_dma_range(u64::MAX, 4),
+            Err(ExampleError::InvalidDmaRange)
+        );
     }
 
     #[test]
@@ -292,14 +302,18 @@ mod tests {
         assert_eq!(platform.frees, 0);
         buffer.finish_device_access().unwrap();
         buffer.close(&mut platform).unwrap();
-        assert_eq!((platform.device_unmaps, platform.cpu_unmaps, platform.frees), (1, 1, 1));
+        assert_eq!(
+            (platform.device_unmaps, platform.cpu_unmaps, platform.frees),
+            (1, 1, 1)
+        );
         assert_eq!(buffer.close(&mut platform), Err(DmaBufferError::NotReady));
     }
 
     #[test]
     fn dma_buffer_is_not_ready_before_device_mapping() {
         let mut platform = FakeMemory::default();
-        let mut buffer = DmaBuffer::reserve(&mut platform, DmaLayout::new(4096, 4096).unwrap()).unwrap();
+        let mut buffer =
+            DmaBuffer::reserve(&mut platform, DmaLayout::new(4096, 4096).unwrap()).unwrap();
         assert_eq!(buffer.begin_device_access(), Err(DmaBufferError::NotReady));
         buffer.close(&mut platform).unwrap();
         assert_eq!(platform.frees, 1);

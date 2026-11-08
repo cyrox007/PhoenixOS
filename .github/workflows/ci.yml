@@ -29,6 +29,9 @@ jobs:
       - name: Выбрать инструментарий Rust
         run: rustup show
 
+      - name: Проверить только современную загрузку и контроллеры
+        run: python3 tests/platform/test-modern-profile.py
+
       - name: Проверить форматирование
         run: cargo fmt --all -- --check
 

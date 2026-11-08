@@ -286,7 +286,7 @@ pub unsafe fn probe<const N: usize>(
         }
         // Один живой сеанс: два слота сохраняются за пределами загрузочных
         // проверок; DMA принадлежит ActiveXhci до безопасного завершения.
-        let (report, second, retained, dma) = unsafe {
+        let (report, second, retained, mut dma) = unsafe {
             xhci_command::start_pair(
                 &registers,
                 capabilities,
@@ -300,20 +300,26 @@ pub unsafe fn probe<const N: usize>(
         }
         .map_err(XhciMmioError::Command)?;
         let mut service = UsbService::new();
-        service
-            .attach(UsbBinding {
+        for binding in [
+            UsbBinding {
                 port: ports.first_connected_port,
                 slot: report.slot_id,
                 protocol: report.interface_protocol,
-            })
-            .map_err(XhciMmioError::UsbService)?;
-        service
-            .attach(UsbBinding {
+            },
+            UsbBinding {
                 port: ports.second_connected_port,
                 slot: second.slot_id,
                 protocol: second.interface_protocol,
-            })
-            .map_err(XhciMmioError::UsbService)?;
+            },
+        ] {
+            if let Err(error) = service.attach(binding) {
+                // Если сведения о двух устройствах противоречивы, нельзя
+                // снимать MMIO, пока аппаратный DMA не остановлен.
+                dma.shutdown(&registers, capabilities, frames)
+                    .map_err(XhciMmioError::Command)?;
+                return Err(XhciMmioError::UsbService(error));
+            }
+        }
         Ok((
             capabilities,
             reset,
@@ -334,6 +340,14 @@ pub unsafe fn probe<const N: usize>(
     // При успешном запуске окно остаётся отображённым: теперь им
     // владеет ActiveXhci. При отказе инициализации старый путь
     // восстановления уже остановил DMA, можно убрать MMIO.
+    if matches!(
+        &result,
+        Err(XhciMmioError::Command(CommandError::UnsafeShutdown))
+    ) {
+        // Контроллер мог продолжить DMA. Запрещено снимать рабочее
+        // регистровое окно до подтверждённой остановки устройства.
+        return result;
+    }
     if result.is_err() {
         unmap_pages(table, mapped)?;
     }

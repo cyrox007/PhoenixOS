@@ -13,11 +13,7 @@ pub struct BlockRegion<'a, D: BlockDevice + ?Sized> {
 }
 
 impl<'a, D: BlockDevice + ?Sized> BlockRegion<'a, D> {
-    pub fn new(
-        inner: &'a mut D,
-        first_block: u64,
-        block_count: u64,
-    ) -> Result<Self, BlockError> {
+    pub fn new(inner: &'a mut D, first_block: u64, block_count: u64) -> Result<Self, BlockError> {
         let geometry = inner.geometry();
         if geometry.block_size == 0 || geometry.block_count == 0 || block_count == 0 {
             return Err(BlockError::InvalidGeometry);
@@ -94,13 +90,22 @@ mod tests {
             );
             assert_eq!(region.write_blocks(0, &[0x55; 512]), Ok(()));
             assert_eq!(region.write_blocks(15, &[0x66; 512]), Ok(()));
-            assert_eq!(region.write_blocks(16, &[0x88; 512]), Err(BlockError::OutOfRange));
-            assert_eq!(region.read_blocks(15, &mut [0; 1024]), Err(BlockError::OutOfRange));
+            assert_eq!(
+                region.write_blocks(16, &[0x88; 512]),
+                Err(BlockError::OutOfRange)
+            );
+            assert_eq!(
+                region.read_blocks(15, &mut [0; 1024]),
+                Err(BlockError::OutOfRange)
+            );
             assert_eq!(
                 region.write_blocks(0, &[0; 513]),
                 Err(BlockError::InvalidBufferLength)
             );
-            assert_eq!(region.read_blocks(u64::MAX, &mut [0; 512]), Err(BlockError::ArithmeticOverflow));
+            assert_eq!(
+                region.read_blocks(u64::MAX, &mut [0; 512]),
+                Err(BlockError::ArithmeticOverflow)
+            );
             region.flush().unwrap();
             assert!(!region.into_inner().is_dirty());
         }
@@ -131,9 +136,6 @@ mod tests {
             BlockRegion::new(&mut disk, u64::MAX, 2),
             Err(BlockError::ArithmeticOverflow)
         ));
-        assert!(matches!(
-            BlockRegion::new(&mut disk, 8, 16),
-            Ok(_)
-        ));
+        assert!(matches!(BlockRegion::new(&mut disk, 8, 16), Ok(_)));
     }
 }

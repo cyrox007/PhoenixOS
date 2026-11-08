@@ -12,7 +12,8 @@ use phoenix_memory::SystemFrameAllocator;
 use phoenix_pcie::usb_descriptors::{self, DescriptorError};
 use phoenix_pcie::xhci_capabilities::XhciCapabilities;
 use phoenix_pcie::xhci_control::{self, OperationalRegisters};
-use phoenix_pcie::xhci_session::{self, SessionDevice};
+use phoenix_pcie::xhci_session::{self, EventCursor, SessionDevice};
+use x86_64::structures::paging::{PhysFrame, Size4KiB};
 use x86_64::VirtAddr;
 
 const PAGE_BYTES: u64 = 4096;
@@ -50,6 +51,9 @@ pub enum CommandError {
     DuplicateSlot,
     RetainedConfigurationChanged,
     ControllerStopped,
+    UnexpectedRuntimeEvent(u8),
+    InvalidPortEvent,
+    AlreadyStopped,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -546,7 +550,7 @@ fn issue_enumeration<R: OperationalRegisters>(
 /// гостевые физические адреса и обеспечивает согласованность памяти x86.
 /// При невозможности остановить/сбросить контроллер страницы намеренно
 /// остаются закреплёнными: освобождать их небезопасно.
-pub unsafe fn enumerate_pair<const N: usize, R: OperationalRegisters>(
+pub unsafe fn start_pair<const N: usize, R: OperationalRegisters>(
     registers: &R,
     capabilities: XhciCapabilities,
     frames: &mut SystemFrameAllocator<N>,
@@ -555,7 +559,15 @@ pub unsafe fn enumerate_pair<const N: usize, R: OperationalRegisters>(
     first_speed: u8,
     second_port: u8,
     second_speed: u8,
-) -> Result<(CommandReport, CommandReport, RetainedSlotsReport), CommandError> {
+) -> Result<
+    (
+        CommandReport,
+        CommandReport,
+        RetainedSlotsReport,
+        ActiveDma,
+    ),
+    CommandError,
+> {
     let free_before = frames.free_frames();
     let first = frames
         .allocate_contiguous_below_4k(PAGE_COUNT, 1, 0xffff_ffff)
@@ -600,27 +612,151 @@ pub unsafe fn enumerate_pair<const N: usize, R: OperationalRegisters>(
         second_speed,
     );
 
-    // Одна остановка и сброс после всех передач и проверки обоих слотов.
-    // При отказе безопасного завершения DMA-страницы остаются закреплёнными.
-    if xhci_control::stop_and_reset(
-        registers,
-        capabilities.operational_offset,
-        xhci_control::MAX_POLLS,
-    )
-    .is_err()
-    {
-        return Err(CommandError::UnsafeShutdown);
+    // При ошибке инициализации обязательно останавливаем аппаратный DMA
+    // перед возвратом страниц. При ошибке остановки память остаётся занятой.
+    let (first_report, second_report, retained) = match result {
+        Ok(reports) => reports,
+        Err(error) => {
+            xhci_control::stop_and_reset(
+                registers,
+                capabilities.operational_offset,
+                xhci_control::MAX_POLLS,
+            )
+            .map_err(|_| CommandError::UnsafeShutdown)?;
+            device_mapping
+                .close(&mut backend)
+                .map_err(|_| CommandError::DeviceUnmapFailed)?;
+            frames
+                .release_contiguous_4k(first, PAGE_COUNT)
+                .map_err(|_| CommandError::FrameReleaseFailed)?;
+            return Err(error);
+        }
+    };
+
+    // В отличие от прежнего диагностического вызова здесь нет остановки:
+    // страницами, отображением и курсором событий владеет ActiveDma.
+    Ok((
+        first_report,
+        second_report,
+        retained,
+        ActiveDma {
+            first,
+            memory,
+            base,
+            backend,
+            device_mapping,
+            cursor: EventCursor::after_enumeration(),
+            stopped: false,
+            released: false,
+            free_before,
+        },
+    ))
+}
+
+/// Владелец закреплённых DMA-страниц живого контроллера xHCI.
+///
+/// Нельзя освободить страницы посредством Drop: прежде требуется
+/// аппаратно подтвердить остановку и снятие адресного отображения.
+pub struct ActiveDma {
+    first: PhysFrame<Size4KiB>,
+    memory: GuestMemory,
+    base: u64,
+    backend: QemuDirectDma<1>,
+    device_mapping: DeviceMapping,
+    cursor: EventCursor,
+    stopped: bool,
+    released: bool,
+    free_before: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimePortEvent {
+    pub port: u8,
+    pub completion_code: u8,
+}
+
+/// Считывает одно новое событие, если оно появилось.
+/// Сейчас принимаются только извещения об изменении состояния порта.
+/// Управление подключением и отключением слотов — отдельная задача.
+impl ActiveDma {
+    pub fn poll_port_event<R: OperationalRegisters>(
+        &mut self,
+        registers: &R,
+        capabilities: XhciCapabilities,
+    ) -> Result<Option<RuntimePortEvent>, CommandError> {
+        if self.stopped {
+            return Err(CommandError::AlreadyStopped);
+        }
+        if !wait_halted(registers, capabilities.operational_offset, false) {
+            return Err(CommandError::ControllerStopped);
+        }
+        let offset = self.cursor.index * 16;
+        let control = self.memory.read(EVENT_RING_PAGE, offset + 12);
+        if !self.cursor.available(control) {
+            return Ok(None);
+        }
+        compiler_fence(Ordering::SeqCst);
+        let kind = ((control >> 10) & 0x3f) as u8;
+        if kind != 34 {
+            return Err(CommandError::UnexpectedRuntimeEvent(kind));
+        }
+        let port = (self.memory.read(EVENT_RING_PAGE, offset) >> 24) as u8;
+        if port == 0 || port > capabilities.max_ports {
+            return Err(CommandError::InvalidPortEvent);
+        }
+        let completion_code = (self.memory.read(EVENT_RING_PAGE, offset + 8) >> 24) as u8;
+        self.cursor.advance();
+        let next = self.base + EVENT_RING_PAGE * PAGE_BYTES + (self.cursor.index * 16) as u64;
+        write_address(
+            registers,
+            capabilities.runtime_offset + 0x20 + 0x18,
+            next | (1 << 3),
+        );
+        Ok(Some(RuntimePortEvent {
+            port,
+            completion_code,
+        }))
     }
-    device_mapping
-        .close(&mut backend)
-        .map_err(|_| CommandError::DeviceUnmapFailed)?;
-    frames
-        .release_contiguous_4k(first, PAGE_COUNT)
-        .map_err(|_| CommandError::FrameReleaseFailed)?;
-    assert_eq!(
-        frames.free_frames(),
-        free_before,
-        "DMA-обмен xHCI не вернул все физические страницы"
-    );
-    result
+
+    pub fn is_mapped(&self) -> bool {
+        self.device_mapping.is_mapped() && !self.released
+    }
+
+    /// После подтверждения остановки возвращает DMA в системный распределитель.
+    /// Повторное освобождение запрещено, ошибка снятия оставляет владение
+    /// для следующей попытки без повторного доступа контроллера к памяти.
+    pub fn shutdown<const N: usize, R: OperationalRegisters>(
+        &mut self,
+        registers: &R,
+        capabilities: XhciCapabilities,
+        frames: &mut SystemFrameAllocator<N>,
+    ) -> Result<(), CommandError> {
+        if self.released {
+            return Err(CommandError::AlreadyStopped);
+        }
+        if !self.stopped {
+            xhci_control::stop_and_reset(
+                registers,
+                capabilities.operational_offset,
+                xhci_control::MAX_POLLS,
+            )
+            .map_err(|_| CommandError::UnsafeShutdown)?;
+            self.stopped = true;
+        }
+        if self.device_mapping.is_mapped() {
+            self.device_mapping
+                .close(&mut self.backend)
+                .map_err(|_| CommandError::DeviceUnmapFailed)?;
+        }
+        frames
+            .release_contiguous_4k(self.first, PAGE_COUNT)
+            .map_err(|_| CommandError::FrameReleaseFailed)?;
+        self.released = true;
+        assert_eq!(
+            frames.free_frames(),
+            self.free_before,
+            "DMA-обмен xHCI не вернул все физические страницы"
+        );
+        Ok(())
+    }
 }

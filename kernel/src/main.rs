@@ -37,6 +37,7 @@ use x86_64::structures::paging::{Page, PageTableFlags, Size4KiB};
 
 static USERSPACE_SMOKE_ELF: &[u8] = include_bytes!(env!("PHOENIX_USERSPACE_SMOKE"));
 static USERSPACE_INPUT_PROBE_ELF: &[u8] = include_bytes!(env!("PHOENIX_USERSPACE_INPUT_PROBE"));
+static USERSPACE_SHELL_ELF: &[u8] = include_bytes!(env!("PHOENIX_USERSPACE_SHELL"));
 
 const SYSTEM_MEMORY_RANGE_CAPACITY: usize = 256;
 const VM_TEST_ADDRESS: u64 = 0x0000_6000_0000_0000;
@@ -2511,13 +2512,40 @@ fn elf_user_execution_self_test(
     }
 }
 
-/// Проверяет действительный системный вызов чтения ввода в уровне CPL3.
-/// В очереди должны быть пять аппаратных событий, собранных с xHCI,
-/// и никакой синтетической подмены из процесса.
+#[derive(Clone, Copy)]
+enum InputTestProgram {
+    Probe,
+    Shell,
+}
+
+/// Действительный путь: USB xHCI → очередь ядра → CPL3 → два разных
+/// пользовательских процесса. Все пять событий пришли от модели QEMU.
 fn input_elf_execution_self_test(
     physical_memory_offset: VirtAddr,
     frames: &mut SystemFrameAllocator<SYSTEM_MEMORY_RANGE_CAPACITY>,
 ) {
+    let probe = run_input_test_program(InputTestProgram::Probe, physical_memory_offset, frames);
+    assert_eq!(
+        probe, 0x5553_4552_5f4f_4b21,
+        "пользовательская программа ввода вернула ошибку {probe:#x}"
+    );
+    assert_eq!(
+        input_service::with_events(|events| events.len()),
+        1,
+        "после проверки клавиатуры должен остаться один отчёт мыши"
+    );
+    let shell = run_input_test_program(InputTestProgram::Shell, physical_memory_offset, frames);
+    assert_eq!(shell, 0, "оболочка не прочитала реальное событие мыши: {shell:#x}");
+    serial::emergency(format_args!("[INFO] input shell event: OK\n"));
+}
+
+/// Предоставляет строго одно право Device/READ, переданное через блок запуска
+/// в аргументе теста либо в окружении штатной оболочки.
+fn run_input_test_program(
+    program: InputTestProgram,
+    physical_memory_offset: VirtAddr,
+    frames: &mut SystemFrameAllocator<SYSTEM_MEMORY_RANGE_CAPACITY>,
+) -> u64 {
     use phoenix_capability::{Capability, ObjectId, ObjectKind, Rights};
     use phoenix_process::{
         AddressSpaceId, MemoryPermissions, ProcessCapabilitySet, ProcessId, RegionKind,
@@ -2528,24 +2556,27 @@ fn input_elf_execution_self_test(
     const STACK_ADDRESS: u64 = 0x0000_0000_4800_0000;
     const INFO_ADDRESS: u64 = STACK_ADDRESS + 0x100;
     const VECTOR_ADDRESS: u64 = STACK_ADDRESS + 0x200;
-    const TOKEN_ADDRESS: u64 = STACK_ADDRESS + 0x280;
-    const SUCCESS: u64 = 0x5553_4552_5f4f_4b21;
+    const ENV_VECTOR_ADDRESS: u64 = STACK_ADDRESS + 0x300;
+    const DATA_ADDRESS: u64 = STACK_ADDRESS + 0x500;
 
-    assert!(!USERSPACE_INPUT_PROBE_ELF.is_empty(), "образ программы ввода пуст");
+    let (image, space_id, process_id) = match program {
+        InputTestProgram::Probe => (USERSPACE_INPUT_PROBE_ELF, 49, 900),
+        InputTestProgram::Shell => (USERSPACE_SHELL_ELF, 50, 901),
+    };
+    assert!(!image.is_empty(), "проверочный пользовательский ELF пуст");
     let free_before = frames.free_frames();
     let mut space = unsafe {
         process_space::ProcessAddressSpace::<{ process_space::PROCESS_REGION_CAPACITY }>::new(
-            AddressSpaceId(49),
+            AddressSpaceId(space_id),
             physical_memory_offset,
             frames,
         )
     }
     .expect("не удалось создать адресное пространство программы ввода");
 
-    let loaded = elf_user_loader::load_elf(USERSPACE_INPUT_PROBE_ELF, &mut space, frames)
-        .expect("не удалось загрузить пользовательскую программу ввода");
-    assert!(loaded.segment_count > 0, "в ELF-программе ввода нет загрузочных сегментов");
-
+    let loaded = elf_user_loader::load_elf(image, &mut space, frames)
+        .expect("не удалось загрузить пользовательский ELF");
+    assert!(loaded.segment_count > 0, "загруженный ELF не содержит сегментов");
     let stack_region = VirtualRegion::new(
         STACK_ADDRESS,
         phoenix_process::PAGE_SIZE,
@@ -2559,7 +2590,7 @@ fn input_elf_execution_self_test(
 
     let mut capabilities = ProcessCapabilitySet::<
         { arch::x86_64::syscall::PROCESS_CAPABILITY_CAPACITY },
-    >::new(ProcessId(900));
+    >::new(ProcessId(process_id));
     let handle = capabilities
         .insert(Capability {
             object: ObjectId(input_service::INPUT_CAPABILITY_OBJECT),
@@ -2573,8 +2604,29 @@ fn input_elf_execution_self_test(
     for (index, byte) in token_text.iter_mut().enumerate() {
         *byte = hex[((token >> ((15 - index) * 4)) & 0x0f) as usize];
     }
-    let info = ProcessStartInfo::new(1, VECTOR_ADDRESS, 0, 0)
-        .expect("некорректная схема запуска программы ввода");
+
+    let mut environment_text = [0_u8; 34];
+    environment_text[..18].copy_from_slice(b"PHOENIX_INPUT_CAP=");
+    environment_text[18..].copy_from_slice(&token_text);
+    let probe_arguments: [&[u8]; 1] = [&token_text];
+    let shell_arguments: [&[u8]; 3] = [b"phxsh", b"-c", b"input"];
+    let shell_environment: [&[u8]; 1] = [&environment_text];
+    let (arguments, environment): (&[&[u8]], &[&[u8]]) = match program {
+        InputTestProgram::Probe => (&probe_arguments, &[]),
+        InputTestProgram::Shell => (&shell_arguments, &shell_environment),
+    };
+    let env_vector = if environment.is_empty() {
+        0
+    } else {
+        ENV_VECTOR_ADDRESS
+    };
+    let info = ProcessStartInfo::new(
+        arguments.len() as u64,
+        VECTOR_ADDRESS,
+        environment.len() as u64,
+        env_vector,
+    )
+    .expect("некорректная схема запуска пользовательской программы ввода");
     for (index, word) in info.words().iter().enumerate() {
         space
             .write_user_bytes(
@@ -2583,20 +2635,26 @@ fn input_elf_execution_self_test(
             )
             .expect("не удалось записать ABI запуска программы ввода");
     }
-    let argument = ProcessStartString::new(TOKEN_ADDRESS, token_text.len() as u64);
-    space
-        .write_user_bytes(VirtAddr::new(VECTOR_ADDRESS), &argument.address.to_le_bytes())
-        .expect("не удалось записать адрес права ввода");
-    space
-        .write_user_bytes(VirtAddr::new(VECTOR_ADDRESS + 8), &argument.length.to_le_bytes())
-        .expect("не удалось записать длину права ввода");
-    space
-        .write_user_bytes(VirtAddr::new(TOKEN_ADDRESS), &token_text)
-        .expect("не удалось передать право ввода пользовательской программе");
+    let mut data_address = DATA_ADDRESS;
+    for (vector, entries) in [(VECTOR_ADDRESS, arguments), (ENV_VECTOR_ADDRESS, environment)] {
+        for (index, text) in entries.iter().enumerate() {
+            let entry = ProcessStartString::new(data_address, text.len() as u64);
+            let slot = vector + index as u64 * 16;
+            space
+                .write_user_bytes(VirtAddr::new(slot), &entry.address.to_le_bytes())
+                .expect("не удалось записать адрес строкового параметра");
+            space
+                .write_user_bytes(VirtAddr::new(slot + 8), &entry.length.to_le_bytes())
+                .expect("не удалось записать длину строкового параметра");
+            space
+                .write_user_bytes(VirtAddr::new(data_address), text)
+                .expect("не удалось записать параметр процесса");
+            data_address += text.len() as u64;
+        }
+    }
 
     let mut endpoint_registry = arch::x86_64::syscall::KernelEndpointRegistry::new();
-    let mut capability_registry =
-        arch::x86_64::syscall::KernelProcessCapabilityRegistry::new();
+    let mut capability_registry = arch::x86_64::syscall::KernelProcessCapabilityRegistry::new();
     let stack_pointer = STACK_ADDRESS + phoenix_process::PAGE_SIZE - 16;
     let result = x86_64::instructions::interrupts::without_interrupts(|| {
         let context_guard = unsafe {
@@ -2607,7 +2665,7 @@ fn input_elf_execution_self_test(
                 &mut capability_registry,
             )
         }
-        .expect("контекст программы ввода уже установлен");
+        .expect("контекст пользовательской программы ввода уже установлен");
         let guard = unsafe { space.activate() };
         let exit = arch::x86_64::syscall::run_user_process_with_start_info(
             loaded.entry_point,
@@ -2618,21 +2676,16 @@ fn input_elf_execution_self_test(
         drop(context_guard);
         exit
     });
-
-    let exit = result.expect("пользовательская программа ввода не завершилась");
-    assert_eq!(
-        exit, SUCCESS,
-        "пользовательская программа ввода вернула ошибку стадии {:#x}",
-        exit
-    );
+    let exit = result.expect("программа ввода не завершила пользовательский цикл");
     space
         .destroy(frames)
         .expect("не удалось освободить адресное пространство программы ввода");
     assert_eq!(
         frames.free_frames(),
         free_before,
-        "программа ввода не вернула все выделенные физические страницы"
+        "проверочная программа ввода не вернула физические страницы"
     );
+    exit
 }
 
 fn virtual_memory_self_test(

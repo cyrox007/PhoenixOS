@@ -42,7 +42,7 @@ class ModernProfileTests(unittest.TestCase):
         text = BUILD_SCRIPT.read_text(encoding="utf-8")
         self.assertIn("bootloader::UefiBoot::new(&kernel)", text)
         self.assertNotIn("bootloader::BiosBoot", text)
-        self.assertTrue(any("bootindex=1" in item for item in self.arguments))
+        self.assertTrue(any("drive=phoenix-boot" in item and "bootindex=1" in item for item in self.arguments))
 
     def test_implicit_legacy_devices_are_forbidden(self):
         self.check_rejected([part for part in self.arguments if part != "-nodefaults"])
@@ -60,7 +60,7 @@ class ModernProfileTests(unittest.TestCase):
             with self.subTest(controller=name):
                 self.check_rejected(self.arguments + ["-device", name + ",id=old-usb"])
 
-    def test_requires_modern_q35_nvme_xhci_and_virtio_boot(self):
+    def test_requires_modern_q35_nvme_xhci_and_nvme_boot(self):
         modern = list(self.arguments)
         machine = modern.index("-machine") + 1
         modern[machine] = "pc,accel=kvm"
@@ -72,7 +72,7 @@ class ModernProfileTests(unittest.TestCase):
         self.check_rejected(modern)
 
         modern = list(self.arguments)
-        modern.remove("virtio-blk-pci,id=phoenix-boot-disk,drive=phoenix-boot,bootindex=1")
+        modern.remove("nvme,id=phoenix-boot-nvme,serial=PhoenixBoot01,drive=phoenix-boot,bootindex=1")
         modern.remove("-device")
         self.check_rejected(modern)
 

@@ -76,7 +76,16 @@ fn verify_contents<D: BlockDevice>(
 #[inline(never)]
 fn create_test_files<'a, D: BlockDevice>(
     region: BlockRegion<'a, D>,
-) -> Result<(BlockRegion<'a, D>, u64, phoenix_vfs::NodeId, phoenix_vfs::NodeId, u16), NvmeFsError> {
+) -> Result<
+    (
+        BlockRegion<'a, D>,
+        u64,
+        phoenix_vfs::NodeId,
+        phoenix_vfs::NodeId,
+        u16,
+    ),
+    NvmeFsError,
+> {
     let mut format_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
     let mut filesystem = PhoenixVfs::format_new(region, VOLUME_ID, 1, &mut format_buffer)?;
     crate::serial::emergency(format_args!("[INFO] nvme trace: fs formatted\n"));
@@ -95,7 +104,13 @@ fn create_test_files<'a, D: BlockDevice>(
         return Err(NvmeFsError::DataMismatch);
     }
     crate::serial::emergency(format_args!("[INFO] nvme trace: fs file checked\n"));
-    Ok((filesystem.into_device(), generation, directory, file, verified))
+    Ok((
+        filesystem.into_device(),
+        generation,
+        directory,
+        file,
+        verified,
+    ))
 }
 
 /// Повторное монтирование живёт в отдельном стеке от форматирования.

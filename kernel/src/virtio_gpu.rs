@@ -621,6 +621,30 @@ pub struct GpuShutdownReport {
 
 /// Действующий дисплей: владение очередью, видеопамятью и BAR сохраняется
 /// до явного подтверждённого завершения. Драйвер не раздаёт DMA-ссылки.
+/// Небольшое обновление штатного изображения после передачи экрана.
+/// Два разных состояния проверяются снимком QEMU независимо от буфера GOP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeScene {
+    Ready,
+    Complete,
+}
+
+impl NativeScene {
+    pub const fn color(self) -> u32 {
+        match self {
+            Self::Ready => gpu::pixel_x8r8g8b8(58, 108, 242),
+            Self::Complete => gpu::pixel_x8r8g8b8(21, 196, 117),
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Complete => "complete",
+        }
+    }
+}
+
 pub struct ActiveGpu {
     registers: MmioWindow,
     arena: Option<DmaArena>,
@@ -629,11 +653,51 @@ pub struct ActiveGpu {
     function: PcieFunction,
     physical_memory_offset: VirtAddr,
     original_command: u16,
+    faulted: bool,
 }
 
 impl ActiveGpu {
     pub const fn is_running(&self) -> bool {
-        self.arena.is_some()
+        self.arena.is_some() && !self.faulted
+    }
+
+    /// Подтверждённый штатный вывод обновлённой области, полностью
+    /// независимый от раннего буфера GOP. Неисправная очередь изолируется.
+    pub fn present_scene(&mut self, scene: NativeScene) -> Result<u16, GpuRuntimeError> {
+        if self.faulted {
+            return Err(GpuRuntimeError::InvalidStatus);
+        }
+        let arena = self.arena.as_ref().ok_or(GpuRuntimeError::InvalidStatus)?;
+
+        for y in 8_usize..40 {
+            for x in 80_usize..112 {
+                let byte_offset = IMAGE_OFFSET + (y * IMAGE_WIDTH as usize + x) * 4;
+                arena.write_u32(byte_offset, scene.color());
+            }
+        }
+        fence(Ordering::SeqCst);
+
+        let result = self
+            .queue
+            .submit(
+                &self.registers,
+                arena,
+                GpuRequest::transfer(IMAGE_WIDTH, IMAGE_HEIGHT),
+                RESP_OK_NODATA,
+            )
+            .and_then(|_| {
+                self.queue.submit(
+                    &self.registers,
+                    arena,
+                    GpuRequest::flush(IMAGE_WIDTH, IMAGE_HEIGHT),
+                    RESP_OK_NODATA,
+                )
+            });
+        if result.is_err() {
+            self.faulted = true;
+        }
+        result?;
+        Ok(self.queue.submitted)
     }
 
     /// Отключает экран, отвязывает память, удаляет ресурс и сбрасывает
@@ -645,26 +709,31 @@ impl ActiveGpu {
         frames: &mut SystemFrameAllocator<N>,
     ) -> Result<GpuShutdownReport, GpuRuntimeError> {
         let arena = self.arena.as_ref().ok_or(GpuRuntimeError::InvalidStatus)?;
-        let operations = self
-            .queue
-            .submit(
-                &self.registers,
-                arena,
-                GpuRequest::scanout(IMAGE_WIDTH, IMAGE_HEIGHT, false),
-                RESP_OK_NODATA,
-            )
-            .and_then(|_| {
-                self.queue.submit(
+        let operations = if self.faulted {
+            // После сбоя не посылаем ни одной команды в повреждённую
+            // очередь, вместо этого сбрасываем устройство целиком.
+            Ok(0)
+        } else {
+            self.queue
+                .submit(
                     &self.registers,
                     arena,
-                    GpuRequest::detach_backing(),
+                    GpuRequest::scanout(IMAGE_WIDTH, IMAGE_HEIGHT, false),
                     RESP_OK_NODATA,
                 )
-            })
-            .and_then(|_| {
-                self.queue
-                    .submit(&self.registers, arena, GpuRequest::unref(), RESP_OK_NODATA)
-            });
+                .and_then(|_| {
+                    self.queue.submit(
+                        &self.registers,
+                        arena,
+                        GpuRequest::detach_backing(),
+                        RESP_OK_NODATA,
+                    )
+                })
+                .and_then(|_| {
+                    self.queue
+                        .submit(&self.registers, arena, GpuRequest::unref(), RESP_OK_NODATA)
+                })
+        };
 
         let common = u64::from(self.layout.common.offset);
         self.registers.write_u8(common + 0x14, 0);
@@ -742,6 +811,7 @@ fn run<const N: usize>(
                 function: controller.function,
                 physical_memory_offset,
                 original_command,
+                faulted: false,
             },
         )),
         Err(error) => {

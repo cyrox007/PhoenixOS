@@ -333,7 +333,12 @@ mod tests {
         let result = acknowledge_change(&ports, 0x40, 1, 0x4000, 4).unwrap();
         assert_eq!(
             result,
-            PortSnapshot { port: 1, connected: false, enabled: false, speed: 0 }
+            PortSnapshot {
+                port: 1,
+                connected: false,
+                enabled: false,
+                speed: 0
+            }
         );
         assert_eq!(ports.writes.get(), 1);
     }
@@ -344,7 +349,12 @@ mod tests {
         let result = acknowledge_change(&ports, 0x40, 1, 0x4000, 4).unwrap();
         assert_eq!(
             result,
-            PortSnapshot { port: 1, connected: true, enabled: true, speed: 3 }
+            PortSnapshot {
+                port: 1,
+                connected: true,
+                enabled: true,
+                speed: 3
+            }
         );
         assert_eq!(ports.writes.get(), 1);
     }
@@ -356,6 +366,4 @@ mod tests {
         assert!(result.connected);
         assert_eq!(ports.writes.get(), 0);
     }
-
-
 }

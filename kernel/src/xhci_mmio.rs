@@ -5,10 +5,13 @@
 //! контроллера и опрашивать кольцо событий без повторного сброса.
 
 use crate::xhci_command::{
-    self, ActiveDma, CommandError, CommandReport, RetainedSlotsReport, RuntimePortEvent,
+    self, ActiveDma, CommandError, CommandReport, RetainedSlotsReport, RuntimeEvent,
+    RuntimePortEvent,
 };
 use phoenix_memory::SystemFrameAllocator;
 use phoenix_pcie::xhci::XhciPciController;
+use phoenix_pcie::usb_descriptors::HidConfiguration;
+use phoenix_pcie::usb_hid::{HidError, InputEvent, KeyboardReport, KeyboardState, MouseReport};
 use phoenix_pcie::xhci_capabilities::{CapabilityError, RegisterAccess, XhciCapabilities};
 use phoenix_pcie::xhci_control::{self, OperationalRegisters, ResetError, ResetResult};
 use phoenix_pcie::xhci_ports::{self, PortError, PortSummary};
@@ -39,6 +42,7 @@ pub enum XhciMmioError {
     ControllerNotRunning,
     InvalidPortEventCompletion(u8),
     UsbService(UsbServiceError),
+    HidReport(HidError),
 }
 
 struct MappedRegisters {
@@ -52,6 +56,7 @@ pub struct ActiveXhci {
     capabilities: XhciCapabilities,
     dma: ActiveDma,
     service: UsbService,
+    keyboard: KeyboardState,
     closed: bool,
 }
 
@@ -62,6 +67,7 @@ pub enum ServiceResult {
     Unchanged(u8),
     Detached(UsbBinding),
     Attached(UsbBinding),
+    Hid(InputEvent),
 }
 
 impl ActiveXhci {
@@ -92,6 +98,54 @@ impl ActiveXhci {
         self.service.for_port(port)
     }
 
+    /// Подготавливает USB HID для ранее адресованного устройства.
+    /// Не меняет учёт слотов до подтверждения команд контроллера.
+    pub fn configure_hid_for_port(
+        &mut self,
+        port: u8,
+    ) -> Result<HidConfiguration, XhciMmioError> {
+        if !self.is_running() {
+            return Err(XhciMmioError::ControllerNotRunning);
+        }
+        let Some(binding) = self.service.for_port(port) else {
+            return Err(XhciMmioError::UsbService(UsbServiceError::InvalidBinding));
+        };
+        let Some(index) = (0..2).find(|&index| self.service.for_index(index) == Some(binding))
+        else {
+            return Err(XhciMmioError::UsbService(UsbServiceError::InvalidBinding));
+        };
+        self.dma
+            .configure_hid(&self.registers, self.capabilities, index, binding.slot)
+            .map_err(XhciMmioError::Command)
+    }
+
+    fn handle_hid(
+        &mut self,
+        report: xhci_command::HidRawReport,
+    ) -> Result<ServiceResult, XhciMmioError> {
+        if report.protocol == 1 {
+            let parsed = KeyboardReport::parse(&report.bytes[..usize::from(report.length)])
+                .map_err(XhciMmioError::HidReport)?;
+            return Ok(match self.keyboard.update(parsed) {
+                Some(change) => ServiceResult::Hid(InputEvent::Key(change)),
+                None => ServiceResult::Idle,
+            });
+        }
+        if report.protocol == 2 {
+            let parsed = MouseReport::parse(&report.bytes[..usize::from(report.length)])
+                .map_err(XhciMmioError::HidReport)?;
+            if parsed.buttons == 0
+                && parsed.delta_x == 0
+                && parsed.delta_y == 0
+                && parsed.wheel == 0
+            {
+                return Ok(ServiceResult::Idle);
+            }
+            return Ok(ServiceResult::Hid(InputEvent::Mouse(parsed)));
+        }
+        Ok(ServiceResult::Idle)
+    }
+
     /// Одна итерация постоянной службы: извещение из кольца xHCI,
     /// подтверждение изменения PORTSC и точечное обслуживание USB-слота.
     /// Не сбрасывает контроллер и не освобождает общую DMA-память.
@@ -99,8 +153,14 @@ impl ActiveXhci {
         if !self.is_running() {
             return Err(XhciMmioError::ControllerNotRunning);
         }
-        let Some(event) = self.poll_port_event()? else {
-            return Ok(ServiceResult::Idle);
+        let next = self
+            .dma
+            .poll_runtime_event(&self.registers, self.capabilities)
+            .map_err(XhciMmioError::Command)?;
+        let event = match next {
+            None => return Ok(ServiceResult::Idle),
+            Some(RuntimeEvent::Hid(report)) => return self.handle_hid(report),
+            Some(RuntimeEvent::Port(port)) => port,
         };
         if event.completion_code != 1 {
             return Err(XhciMmioError::InvalidPortEventCompletion(
@@ -124,6 +184,9 @@ impl ActiveXhci {
                 .disable_slot(&self.registers, self.capabilities, binding.slot)
                 .map_err(XhciMmioError::Command)?;
             self.service.detach(event.port);
+            if binding.protocol == 1 {
+                self.keyboard = KeyboardState::new();
+            }
             return Ok(ServiceResult::Detached(binding));
         }
 
@@ -332,6 +395,7 @@ pub unsafe fn probe<const N: usize>(
                 capabilities,
                 dma,
                 service,
+                keyboard: KeyboardState::new(),
                 closed: false,
             },
         ))

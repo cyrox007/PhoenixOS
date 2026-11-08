@@ -23,6 +23,7 @@ mod qemu;
 mod serial;
 mod thread;
 mod thread_manager;
+mod virtio_gpu;
 mod xhci_command;
 mod xhci_driver;
 mod xhci_mmio;
@@ -469,6 +470,44 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!(
             "nvme admin shutdown: OK pages={}",
             nvme_admin.returned_dma_pages
+        ),
+    );
+
+    // Действительное обновление виртуального экрана, выполненное собственным
+    // драйвером VirtIO-GPU. Только QEMU: физические AMD/NVIDIA не трогаем.
+    let gpu_controller = pcie
+        .graphics
+        .virtio_gpu
+        .expect("в проверочном профиле QEMU требуется VirtIO-GPU");
+    let (gpu_launch, gpu_report) = unsafe {
+        virtio_gpu::self_test(gpu_controller, &mut page_table, &mut frames, physical_memory_offset)
+    }
+    .expect("VirtIO-GPU не выполнил двухмерное обновление экрана");
+    assert_eq!(gpu_launch.name, "virtio-gpu-2d");
+    assert_eq!(gpu_report.width, 128);
+    assert_eq!(gpu_report.height, 128);
+    assert_eq!(gpu_report.completed_commands, 9);
+    assert_eq!(gpu_report.returned_dma_pages, 20);
+    assert!(gpu_report.pixel_checksum > 0);
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "virtio gpu 2d: OK width={} height={} display={}x{} commands={} checksum={}",
+            gpu_report.width,
+            gpu_report.height,
+            gpu_report.display_width,
+            gpu_report.display_height,
+            gpu_report.completed_commands,
+            gpu_report.pixel_checksum
+        ),
+    );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "virtio gpu shutdown: OK pages={}",
+            gpu_report.returned_dma_pages
         ),
     );
 

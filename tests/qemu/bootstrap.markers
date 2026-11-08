@@ -76,6 +76,7 @@ dma kernel mapping self-test: OK
 dma direct address self-test: OK
 virtual memory self-test: OK
 kernel heap self-test: OK
+modern interrupt mode: OK apic=x2APIC pic_mask=ffff
 apic timer self-test: OK
 thread context self-test: OK
 kernel thread object self-test: OK

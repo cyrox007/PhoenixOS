@@ -37,6 +37,13 @@ class ModernProfileTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             QEMU.validate_modern_qemu_profile(arguments)
 
+    def without_device(self, device):
+        arguments = list(self.arguments)
+        index = arguments.index(device)
+        self.assertEqual(arguments[index - 1], "-device")
+        del arguments[index - 1:index + 1]
+        return arguments
+
     def test_uefi_boot_and_modern_devices(self):
         QEMU.validate_modern_qemu_profile(self.arguments)
         text = BUILD_SCRIPT.read_text(encoding="utf-8")
@@ -66,15 +73,15 @@ class ModernProfileTests(unittest.TestCase):
         modern[machine] = "pc,accel=kvm"
         self.check_rejected(modern)
 
-        modern = list(self.arguments)
-        modern.remove("qemu-xhci,id=phoenix-xhci")
-        modern.remove("-device")
-        self.check_rejected(modern)
-
-        modern = list(self.arguments)
-        modern.remove("nvme,id=phoenix-boot-nvme,serial=PhoenixBoot01,drive=phoenix-boot,bootindex=1")
-        modern.remove("-device")
-        self.check_rejected(modern)
+        self.check_rejected(
+            self.without_device("qemu-xhci,id=phoenix-xhci")
+        )
+        self.check_rejected(
+            self.without_device("nvme,id=phoenix-boot-nvme,serial=PhoenixBoot01,drive=phoenix-boot,bootindex=1")
+        )
+        self.check_rejected(
+            self.without_device("nvme,id=phoenix-nvme,serial=PhoenixNVM01,drive=phoenix-nvm")
+        )
 
     def test_pflash_required_for_both_firmware_regions(self):
         missing = list(self.arguments)

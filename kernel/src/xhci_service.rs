@@ -8,11 +8,15 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use phoenix_pcie::usb_hid::InputEvent;
-use phoenix_pcie::xhci_runtime::{RuntimeLifecycle, RuntimePhase};
+use phoenix_pcie::xhci_runtime::{RuntimeError, RuntimeLifecycle, RuntimePhase};
 
 use crate::input_service;
 use crate::serial;
 use crate::xhci_mmio::{ActiveXhci, ServiceResult};
+
+/// Служба остаётся запланированной после приёма USB-событий ещё не менее
+/// 64 переключений потока контроля; проверяем не только моментальный ввод.
+const MIN_OBSERVER_TICKS: u64 = 64;
 
 pub struct UsbServiceControl {
     lifecycle: RuntimeLifecycle,
@@ -56,6 +60,12 @@ impl UsbServiceControl {
         self.lifecycle.phase()
     }
 
+    /// Запрос остановки доступен управляющему коду и не освобождает DMA.
+    /// Окончательно снять ресурсы можно после подтверждения `Stopped`.
+    pub fn request_stop(&self) -> Result<(), RuntimeError> {
+        self.lifecycle.request_stop()
+    }
+
     pub fn report(&self) -> RuntimeReport {
         RuntimeReport {
             worker_polls: self.worker_polls.load(Ordering::Acquire),
@@ -77,7 +87,7 @@ impl UsbServiceControl {
             && self.released.load(Ordering::Acquire) > 0
             && self.moved.load(Ordering::Acquire) > 0
             && self.worker_polls.load(Ordering::Acquire) > 4
-            && self.supervisor_ticks.load(Ordering::Acquire) > 1
+            && self.supervisor_ticks.load(Ordering::Acquire) >= MIN_OBSERVER_TICKS
     }
 
     fn fail(&self, code: u64) {
@@ -217,7 +227,7 @@ pub extern "C" fn supervisor_thread(argument: usize) {
             return;
         }
         if state.reached_test_goal() {
-            if state.lifecycle.request_stop().is_err() {
+            if state.request_stop().is_err() {
                 state.fail(7);
                 return;
             }

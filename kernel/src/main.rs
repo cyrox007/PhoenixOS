@@ -18,6 +18,7 @@ mod nvme_driver;
 mod nvme_fs;
 mod nvme_mmio;
 mod pcie;
+mod reference_edu;
 mod process_space;
 mod qemu;
 mod serial;

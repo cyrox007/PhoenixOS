@@ -24,5 +24,8 @@ fn main() {
         std::env::var_os("CARGO_BIN_FILE_USERSPACE_SHELL_phxsh")
             .expect("Cargo должен собрать пользовательскую оболочку"),
     );
-    println!("cargo:rustc-env=PHOENIX_USERSPACE_SHELL={}", shell.display());
+    println!(
+        "cargo:rustc-env=PHOENIX_USERSPACE_SHELL={}",
+        shell.display()
+    );
 }

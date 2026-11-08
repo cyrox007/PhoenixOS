@@ -267,6 +267,38 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         ),
     );
 
+    // Выбор графического профиля основан на действительных идентификаторах
+    // PCIe. Драйвер не запускается: экран остаётся за ранним UEFI GOP.
+    if let Some(graphics) = pcie.graphics.preferred_target() {
+        serial::line(
+            &mut out,
+            "INFO",
+            format_args!(
+                "graphics profile discovery: OK profile={} vendor={:04x} id={:04x} bus={} device={} displays={} asus_reference={} driver_ready={} gop_fallback={}",
+                graphics.profile.name(),
+                graphics.function.vendor_id,
+                graphics.function.device_id,
+                graphics.function.bus,
+                graphics.function.device,
+                pcie.graphics.display_controllers,
+                graphics.is_reference_asus(),
+                graphics.profile.driver_ready(),
+                pcie.graphics.firmware_output_required()
+            ),
+        );
+    } else {
+        serial::line(
+            &mut out,
+            "WARN",
+            format_args!(
+                "graphics profile discovery: unavailable displays={} unknown={} gop_fallback={}",
+                pcie.graphics.display_controllers,
+                pcie.graphics.unknown_controllers,
+                pcie.graphics.firmware_output_required()
+            ),
+        );
+    }
+
     let xhci = pcie
         .first_xhci
         .expect("QEMU-профиль обязан содержать контроллер xHCI");

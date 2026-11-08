@@ -103,7 +103,9 @@ impl ActiveXhci {
             return Ok(ServiceResult::Idle);
         };
         if event.completion_code != 1 {
-            return Err(XhciMmioError::InvalidPortEventCompletion(event.completion_code));
+            return Err(XhciMmioError::InvalidPortEventCompletion(
+                event.completion_code,
+            ));
         }
         let snapshot = xhci_ports::acknowledge_change(
             &self.registers,

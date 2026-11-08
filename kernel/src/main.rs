@@ -1101,13 +1101,42 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!("xhci scheduled dma shutdown: OK pages={}", retained.pages),
     );
 
+    display_route
+        .native_access()
+        .expect("штатный вывод отключён до завершения испытаний");
+    let complete_commands = match active_gpu.present_scene(virtio_gpu::NativeScene::Complete) {
+        Ok(commands) => commands,
+        Err(error) => {
+            let _ = active_gpu.shutdown(&mut page_table, &mut frames);
+            display_route.recover();
+            render_firmware_emergency(boot_info, &mut out, &display_route);
+            panic!("повторное обновление штатного экрана завершилось ошибкой: {error:?}");
+        }
+    };
+    assert_eq!(complete_commands, 10);
+    assert_eq!(
+        boot_info.framebuffer.as_ref().map(firmware_sample),
+        firmware_checkpoint,
+        "буфер GOP изменился во время штатного вывода"
+    );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("graphics native present: OK phase=complete commands={complete_commands}"),
+    );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("graphics gop preserved: OK phase=complete"),
+    );
+
     // После проверки реального экрана монитором QEMU завершаем сессию
     // GPU. В отличие от обычного объекта драйвер обязан подтвердить сброс
     // до возврата страниц памяти устройства в системный распределитель.
     let gpu_shutdown = active_gpu
         .shutdown(&mut page_table, &mut frames)
         .expect("VirtIO-GPU не смог безопасно остановить графический сеанс");
-    assert_eq!(gpu_shutdown.completed_commands, 9);
+    assert_eq!(gpu_shutdown.completed_commands, 13);
     assert_eq!(gpu_shutdown.returned_dma_pages, 20);
     serial::line(
         &mut out,
@@ -1115,6 +1144,19 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!(
             "virtio gpu shutdown: OK pages={} commands={}",
             gpu_shutdown.returned_dma_pages, gpu_shutdown.completed_commands
+        ),
+    );
+
+    // Аварийный путь проверяется только после полного отключения GPU:
+    // в штатной фазе GOP не получает никаких записей.
+    display_route.recover();
+    render_firmware_emergency(boot_info, &mut out, &display_route);
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "graphics gop recovery: OK owner={}",
+            display_route.owner().name()
         ),
     );
 
@@ -3237,7 +3279,14 @@ fn heap_self_test() {
     }
 }
 
-fn render_boot_banner(boot_info: &'static mut BootInfo, out: &mut serial::Com1) {
+fn render_boot_banner(
+    boot_info: &mut BootInfo,
+    out: &mut serial::Com1,
+    route: &DisplayRoute,
+) {
+    route
+        .firmware_access(FirmwarePurpose::Boot)
+        .expect("буфер GOP недоступен для штатного вывода");
     let Some(framebuffer) = boot_info.framebuffer.as_mut() else {
         serial::line(out, "WARN", format_args!("framebuffer: unavailable"));
         return;
@@ -3254,6 +3303,32 @@ fn render_boot_banner(boot_info: &'static mut BootInfo, out: &mut serial::Com1) 
         format_args!(
             "framebuffer: {}x{} {} B/px",
             info.width, info.height, info.bytes_per_pixel
+        ),
+    );
+}
+
+fn render_firmware_emergency(
+    boot_info: &mut BootInfo,
+    out: &mut serial::Com1,
+    route: &DisplayRoute,
+) {
+    route
+        .firmware_access(FirmwarePurpose::Emergency)
+        .expect("аварийный вывод GOP не разрешён");
+
+    let Some(framebuffer) = boot_info.framebuffer.as_mut() else {
+        serial::line(out, "WARN", format_args!("graphics gop emergency: unavailable"));
+        return;
+    };
+
+    let info = draw_emergency_banner(framebuffer)
+        .expect("сохранённый буфер GOP имеет неверный формат");
+    serial::line(
+        out,
+        "INFO",
+        format_args!(
+            "graphics emergency banner: OK width={} height={}",
+            info.width, info.height
         ),
     );
 }

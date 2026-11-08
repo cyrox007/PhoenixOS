@@ -54,7 +54,10 @@ pub struct ActiveXhci {
 impl ActiveXhci {
     pub fn is_running(&self) -> bool {
         !self.closed
-            && self.registers.read_u32(self.capabilities.operational_offset + 4) & 1 == 0
+            && OperationalRegisters::read_u32(
+                &self.registers,
+                self.capabilities.operational_offset + 4,
+            ) & 1 == 0
             && self.dma.is_mapped()
     }
 

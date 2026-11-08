@@ -94,9 +94,7 @@ pub fn exercise<D: BlockDevice>(disk: &mut D) -> Result<NvmeFsReport, NvmeFsErro
     if filesystem.write_node(file, 0, FILE_CONTENT)? != FILE_CONTENT.len() {
         return Err(NvmeFsError::DataMismatch);
     }
-    if filesystem.write_node(file, FILE_CONTENT.len() as u64, FILE_APPEND)?
-        != FILE_APPEND.len()
-    {
+    if filesystem.write_node(file, FILE_CONTENT.len() as u64, FILE_APPEND)? != FILE_APPEND.len() {
         return Err(NvmeFsError::DataMismatch);
     }
     let first_verified = verify_contents(&filesystem, file)?;

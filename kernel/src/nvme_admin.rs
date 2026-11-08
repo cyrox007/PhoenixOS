@@ -10,10 +10,10 @@ use phoenix_dma::DmaLayout;
 use phoenix_dma::mapping::{DeviceMapping, DirectDmaAperture, PhysicalAddress, QemuDirectDma};
 use phoenix_memory::SystemFrameAllocator;
 use phoenix_pcie::nvme::{self, NvmePciController, RegisterAccess};
-use phoenix_pcie::nvme_io::{self, IoCommand, IoError};
 use phoenix_pcie::nvme_admin::{
     self, AdminCompletion, AdminQueueCursor, AdminQueueError, IdentifyCommand,
 };
+use phoenix_pcie::nvme_io::{self, IoCommand, IoError};
 use phoenix_vm::dma_window::{ActiveDmaPageAccess, DmaCachePolicy};
 use phoenix_vm::kernel_reservations::{KernelVirtualRanges, ManagedDmaHandle, ManagedDmaWindows};
 use phoenix_vm::{ActivePageTable, PAGE_SIZE};
@@ -357,7 +357,10 @@ fn submit_admin(
     }
     fence(Ordering::SeqCst);
     cursor.submitted();
-    regs.write(nvme_admin::REG_DOORBELL, u32::from(cursor.submission_tail()));
+    regs.write(
+        nvme_admin::REG_DOORBELL,
+        u32::from(cursor.submission_tail()),
+    );
     let complete = CQ_PAGE + usize::from(cursor.completion_head()) * 16;
     let expected_phase = cursor.completion_phase();
     let completion = (0..POLL_LIMIT)
@@ -379,11 +382,16 @@ fn submit_admin(
     let result = AdminCompletion::decode(completion, command_id, expected_phase)
         .map_err(AdminRuntimeError::Protocol)?;
     if result.submission_head != cursor.submission_tail() {
-        return Err(AdminRuntimeError::Protocol(AdminQueueError::InvalidCompletion));
+        return Err(AdminRuntimeError::Protocol(
+            AdminQueueError::InvalidCompletion,
+        ));
     }
     cursor.completed();
     fence(Ordering::SeqCst);
-    regs.write(nvme_admin::REG_DOORBELL + 4, u32::from(cursor.completion_head()));
+    regs.write(
+        nvme_admin::REG_DOORBELL + 4,
+        u32::from(cursor.completion_head()),
+    );
     Ok(())
 }
 
@@ -485,8 +493,8 @@ fn exercise_blocks(
     let sq = IoCommand::create_submission(admin.command_id(), arena.device_start() + 3 * PAGE_SIZE)
         .map_err(AdminRuntimeError::Io)?;
     submit_admin(regs, arena, admin, sq.words)?;
-    let mut io = AdminQueueCursor::new(nvme_io::IO_QUEUE_DEPTH)
-        .map_err(AdminRuntimeError::Protocol)?;
+    let mut io =
+        AdminQueueCursor::new(nvme_io::IO_QUEUE_DEPTH).map_err(AdminRuntimeError::Protocol)?;
     let lba = blocks - 1;
     io_transfer(regs, arena, &mut io, blocks, lba, false, stride)?;
     let mut original = [0_u32; nvme_io::LOGICAL_BLOCK_BYTES / 4];
@@ -494,7 +502,10 @@ fn exercise_blocks(
         *word = arena.read(IO_DATA_PAGE + index * 4);
     }
     for index in 0..original.len() {
-        arena.write(IO_DATA_PAGE + index * 4, 0x5048_4f53 ^ (index as u32).wrapping_mul(0x0101_0101));
+        arena.write(
+            IO_DATA_PAGE + index * 4,
+            0x5048_4f53 ^ (index as u32).wrapping_mul(0x0101_0101),
+        );
     }
     io_transfer(regs, arena, &mut io, blocks, lba, true, stride)?;
     for index in 0..original.len() {

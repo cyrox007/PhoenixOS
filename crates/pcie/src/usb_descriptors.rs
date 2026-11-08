@@ -61,7 +61,6 @@ pub fn parse_configuration(data: &[u8]) -> Result<UsbInterface, DescriptorError>
     Err(DescriptorError::NoInterface)
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HidConfiguration {
     pub value: u8,
@@ -189,10 +188,8 @@ mod tests {
     #[test]
     fn parses_boot_keyboard_and_mouse_interrupt_endpoints() {
         let keyboard = [
-            9, 2, 34, 0, 1, 1, 0, 0xa0, 50,
-            9, 4, 0, 0, 1, 3, 1, 1, 0,
-            9, 0x21, 0x11, 1, 0, 1, 0x22, 63, 0,
-            7, 5, 0x81, 3, 8, 0, 10,
+            9, 2, 34, 0, 1, 1, 0, 0xa0, 50, 9, 4, 0, 0, 1, 3, 1, 1, 0, 9, 0x21, 0x11, 1, 0, 1,
+            0x22, 63, 0, 7, 5, 0x81, 3, 8, 0, 10,
         ];
         assert_eq!(
             parse_hid_configuration(&keyboard),
@@ -215,17 +212,23 @@ mod tests {
     #[test]
     fn rejects_invalid_or_outgoing_interrupt_endpoints() {
         let mut config = [
-            9, 2, 25, 0, 1, 1, 0, 0x80, 50,
-            9, 4, 0, 0, 1, 3, 1, 1, 0,
-            7, 5, 0x01, 3, 8, 0, 10,
+            9, 2, 25, 0, 1, 1, 0, 0x80, 50, 9, 4, 0, 0, 1, 3, 1, 1, 0, 7, 5, 0x01, 3, 8, 0, 10,
         ];
-        assert_eq!(parse_hid_configuration(&config), Err(DescriptorError::NoInterface));
+        assert_eq!(
+            parse_hid_configuration(&config),
+            Err(DescriptorError::NoInterface)
+        );
         config[20] = 0x81;
         config[24] = 0;
-        assert_eq!(parse_hid_configuration(&config), Err(DescriptorError::NoInterface));
+        assert_eq!(
+            parse_hid_configuration(&config),
+            Err(DescriptorError::NoInterface)
+        );
         config[24] = 10;
         config[2] = 26;
-        assert_eq!(parse_hid_configuration(&config), Err(DescriptorError::Truncated));
+        assert_eq!(
+            parse_hid_configuration(&config),
+            Err(DescriptorError::Truncated)
+        );
     }
-
 }

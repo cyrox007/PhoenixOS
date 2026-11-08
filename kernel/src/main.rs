@@ -270,6 +270,25 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         ),
     );
 
+    // PCI-функции старых IDE/PATA и USB-контроллеров можно перечислять,
+    // но они не проходят общий выбор рабочих драйверов NVMe/xHCI.
+    assert_eq!(pcie.legacy.xhci, pcie.xhci_controller_count);
+    assert_eq!(pcie.legacy.nvme, pcie.nvme_controller_count);
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "modern pci policy: OK nvme={} xhci={} ide_pata={} uhci={} ohci={} ehci={} legacy_excluded={}",
+            pcie.legacy.nvme,
+            pcie.legacy.xhci,
+            pcie.legacy.ide_pata,
+            pcie.legacy.uhci,
+            pcie.legacy.ohci,
+            pcie.legacy.ehci,
+            pcie.legacy.excluded_legacy_total()
+        ),
+    );
+
     // Выбор графического профиля основан на действительных идентификаторах
     // PCIe. Драйвер не запускается: экран остаётся за ранним UEFI GOP.
     if let Some(graphics) = pcie.graphics.preferred_target() {
@@ -325,9 +344,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let nvme = pcie
         .first_nvme
         .expect("QEMU-профиль обязан содержать контроллер NVMe");
-    assert_eq!(
-        pcie.nvme_controller_count, 1,
-        "ожидался один NVMe-контроллер"
+    assert!(
+        pcie.nvme_controller_count >= 1,
+        "не обнаружено ни одного NVMe-контроллера"
     );
     assert!(
         nvme.mmio_base != xhci.mmio_base,
@@ -1866,11 +1885,18 @@ fn hardware_scheduler_preemption_self_test() {
 }
 
 fn init_apic_timer(out: &mut serial::Com1) {
-    if let Err(error) = arch::x86_64::apic::init_periodic_timer() {
-        panic!("x2APIC обязателен для поддерживаемого аппаратного профиля: {error:?}");
-    }
+    let report = arch::x86_64::apic::init_periodic_timer()
+        .expect("x2APIC и проверенная маска наследуемого PIC обязательны");
 
     serial::line(out, "INFO", format_args!("local APIC: mode=x2APIC"));
+    serial::line(
+        out,
+        "INFO",
+        format_args!(
+            "modern interrupt mode: OK apic=x2APIC pic_mask={:02x}{:02x}",
+            report.pic_primary_mask, report.pic_secondary_mask
+        ),
+    );
 
     let mut preemption_stack = alloc::vec![0u8; PREEMPTION_TEST_STACK_SIZE].into_boxed_slice();
     let preemption_frame = arch::x86_64::exceptions::prepare_kernel_timer_frame(

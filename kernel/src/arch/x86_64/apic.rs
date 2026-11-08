@@ -86,20 +86,38 @@ pub enum TimerHookError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitError {
     X2ApicUnavailable,
+    LegacyPicNotMasked { primary: u8, secondary: u8 },
+    X2ApicNotActive,
 }
 
-pub fn init_periodic_timer() -> Result<(), InitError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InitReport {
+    pub pic_primary_mask: u8,
+    pub pic_secondary_mask: u8,
+}
+
+/// Устаревший PIC допустимо только маскировать во время передачи
+/// прерываний x2APIC. Ни таймер, ни MSI не используют PIC/xAPIC.
+pub fn init_periodic_timer() -> Result<InitReport, InitError> {
     let features = __cpuid(1);
     if features.edx & (1 << 9) == 0 || features.ecx & (1 << 21) == 0 {
         return Err(InitError::X2ApicUnavailable);
     }
 
     interrupts::without_interrupts(|| unsafe {
-        disable_legacy_pic();
+        let (primary, secondary) = disable_legacy_pic();
+        if primary != 0xff || secondary != 0xff {
+            return Err(InitError::LegacyPicNotMasked { primary, secondary });
+        }
         init_x2apic();
-    });
-
-    Ok(())
+        if !x2apic_registers_active() {
+            return Err(InitError::X2ApicNotActive);
+        }
+        Ok(InitReport {
+            pic_primary_mask: primary,
+            pic_secondary_mask: secondary,
+        })
+    })
 }
 
 pub fn ticks() -> u64 {
@@ -177,6 +195,24 @@ unsafe fn init_x2apic() {
     }
 }
 
+/// Проверяет реально считанные MSR после программирования. Одного
+/// флага CPUID недостаточно для объявления x2APIC рабочим.
+unsafe fn x2apic_registers_active() -> bool {
+    let base = unsafe { read_msr(IA32_APIC_BASE) };
+    if base & (APIC_GLOBAL_ENABLE | X2APIC_ENABLE) != APIC_GLOBAL_ENABLE | X2APIC_ENABLE {
+        return false;
+    }
+
+    let spurious = unsafe { read_msr(IA32_X2APIC_SPURIOUS_VECTOR) };
+    if spurious & (APIC_SOFTWARE_ENABLE | 0xff) != APIC_SOFTWARE_ENABLE | u64::from(SPURIOUS_VECTOR)
+    {
+        return false;
+    }
+
+    let timer = unsafe { read_msr(IA32_X2APIC_LVT_TIMER) };
+    timer & (TIMER_PERIODIC_MODE | 0xff) == TIMER_PERIODIC_MODE | u64::from(TIMER_VECTOR)
+}
+
 unsafe fn ensure_apic_global_enable() -> u64 {
     let current = unsafe { read_msr(IA32_APIC_BASE) };
     if current & APIC_GLOBAL_ENABLE != 0 {
@@ -190,13 +226,16 @@ unsafe fn ensure_apic_global_enable() -> u64 {
     enabled
 }
 
-unsafe fn disable_legacy_pic() {
+/// Единственный допустимый контакт с наследуемым PIC: маскировать
+/// все линии и проверить результат, не задавая режим PIC и не EOI.
+unsafe fn disable_legacy_pic() -> (u8, u8) {
     let mut primary_mask = Port::<u8>::new(0x21);
     let mut secondary_mask = Port::<u8>::new(0xa1);
 
     unsafe {
         primary_mask.write(0xff);
         secondary_mask.write(0xff);
+        (primary_mask.read(), secondary_mask.read())
     }
 }
 

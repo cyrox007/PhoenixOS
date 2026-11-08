@@ -1,6 +1,7 @@
 #![no_std]
 
 pub mod graphics;
+pub mod modern_profile;
 pub mod nvme;
 pub mod nvme_admin;
 pub mod nvme_io;

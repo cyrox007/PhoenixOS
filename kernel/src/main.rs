@@ -13,6 +13,8 @@ mod file_user_memory;
 mod heap;
 mod input_service;
 mod ipc_user_memory;
+mod nvme_driver;
+mod nvme_mmio;
 mod pcie;
 mod process_space;
 mod qemu;
@@ -278,7 +280,66 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         ),
     );
 
+    let nvme = pcie
+        .first_nvme
+        .expect("QEMU-профиль обязан содержать контроллер NVMe");
+    assert_eq!(
+        pcie.nvme_controller_count, 1,
+        "ожидался один NVMe-контроллер"
+    );
+    assert!(
+        nvme.mmio_base != xhci.mmio_base,
+        "NVMe и xHCI не могут совместно владеть одним BAR"
+    );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "nvme pcie discovery: OK controllers={} bus={} device={} function={} vendor={:04x} id={:04x} bar0={:#x} memory={} bus_master={}",
+            pcie.nvme_controller_count,
+            nvme.function.bus,
+            nvme.function.device,
+            nvme.function.function,
+            nvme.function.vendor_id,
+            nvme.function.device_id,
+            nvme.mmio_base,
+            nvme.memory_enabled,
+            nvme.bus_master_enabled
+        ),
+    );
+
     let mut page_table = unsafe { ActivePageTable::from_current(physical_memory_offset) };
+    let (nvme_launch, nvme_cap) = unsafe { nvme_driver::probe(nvme, &mut page_table, &mut frames) }
+        .expect("NVMe не прошёл выбор драйвера и проверку аппаратных регистров");
+    assert_eq!(nvme_launch.name, "nvme");
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "nvme driver registry probe: OK name={} version={}.{}.{}",
+            nvme_launch.name,
+            nvme_launch.version.major,
+            nvme_launch.version.minor,
+            nvme_launch.version.patch
+        ),
+    );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "nvme mmio capabilities: OK version={}.{}.{} queues={} stride={} min_page={} max_page={} enabled={} ready={}",
+            nvme_cap.version_major,
+            nvme_cap.version_minor,
+            nvme_cap.version_tertiary,
+            nvme_cap.maximum_queue_entries,
+            nvme_cap.doorbell_stride_bytes,
+            nvme_cap.minimum_page_size,
+            nvme_cap.maximum_page_size,
+            nvme_cap.controller_enabled,
+            nvme_cap.controller_ready
+        ),
+    );
+    serial::line(&mut out, "INFO", format_args!("nvme read-only probe: OK"));
 
     // Реальный запуск выбранного драйвера с ресурсами ядра.
     let (launch, (capabilities, reset, command, second, ports, retained), mut active_xhci) =

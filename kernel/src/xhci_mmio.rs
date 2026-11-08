@@ -12,6 +12,7 @@ use phoenix_pcie::xhci::XhciPciController;
 use phoenix_pcie::xhci_capabilities::{CapabilityError, RegisterAccess, XhciCapabilities};
 use phoenix_pcie::xhci_control::{self, OperationalRegisters, ResetError, ResetResult};
 use phoenix_pcie::xhci_ports::{self, PortError, PortSummary};
+use phoenix_pcie::xhci_usb_service::{UsbBinding, UsbService, UsbServiceError};
 use phoenix_vm::{ActivePageTable, PAGE_SIZE};
 use x86_64::{
     PhysAddr, VirtAddr,
@@ -36,6 +37,8 @@ pub enum XhciMmioError {
     Ports(PortError),
     MissingTestDevices,
     ControllerNotRunning,
+    InvalidPortEventCompletion(u8),
+    UsbService(UsbServiceError),
 }
 
 struct MappedRegisters {
@@ -48,7 +51,17 @@ pub struct ActiveXhci {
     registers: MappedRegisters,
     capabilities: XhciCapabilities,
     dma: ActiveDma,
+    service: UsbService,
     closed: bool,
+}
+
+/// Итог одной итерации обслуживания USB-портов.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceResult {
+    Idle,
+    Unchanged(u8),
+    Detached(UsbBinding),
+    Attached(UsbBinding),
 }
 
 impl ActiveXhci {
@@ -69,6 +82,76 @@ impl ActiveXhci {
         self.dma
             .poll_port_event(&self.registers, self.capabilities)
             .map_err(XhciMmioError::Command)
+    }
+
+    pub fn connected_count(&self) -> usize {
+        self.service.active_count()
+    }
+
+    pub fn binding_for_port(&self, port: u8) -> Option<UsbBinding> {
+        self.service.for_port(port)
+    }
+
+    /// Одна итерация постоянной службы: извещение из кольца xHCI,
+    /// подтверждение изменения PORTSC и точечное обслуживание USB-слота.
+    /// Не сбрасывает контроллер и не освобождает общую DMA-память.
+    pub fn service_once(&mut self) -> Result<ServiceResult, XhciMmioError> {
+        if !self.is_running() {
+            return Err(XhciMmioError::ControllerNotRunning);
+        }
+        let Some(event) = self.poll_port_event()? else {
+            return Ok(ServiceResult::Idle);
+        };
+        if event.completion_code != 1 {
+            return Err(XhciMmioError::InvalidPortEventCompletion(event.completion_code));
+        }
+        let snapshot = xhci_ports::acknowledge_change(
+            &self.registers,
+            self.capabilities.operational_offset,
+            event.port,
+            QEMU_XHCI_MMIO_BYTES,
+            xhci_control::MAX_POLLS,
+        )
+        .map_err(XhciMmioError::Ports)?;
+
+        if !snapshot.connected {
+            let Some(binding) = self.service.for_port(event.port) else {
+                return Ok(ServiceResult::Unchanged(event.port));
+            };
+            self.dma
+                .disable_slot(&self.registers, self.capabilities, binding.slot)
+                .map_err(XhciMmioError::Command)?;
+            self.service.detach(event.port);
+            return Ok(ServiceResult::Detached(binding));
+        }
+
+        if self.service.for_port(event.port).is_some() {
+            return Ok(ServiceResult::Unchanged(event.port));
+        }
+
+        let index = self
+            .service
+            .vacant_index()
+            .ok_or(XhciMmioError::UsbService(UsbServiceError::NoFreeContext))?;
+        let descriptor = self
+            .dma
+            .attach_device(
+                &self.registers,
+                self.capabilities,
+                index,
+                event.port,
+                snapshot.speed,
+            )
+            .map_err(XhciMmioError::Command)?;
+        let binding = UsbBinding {
+            port: event.port,
+            slot: descriptor.slot_id,
+            protocol: descriptor.interface_protocol,
+        };
+        self.service
+            .attach(binding)
+            .map_err(XhciMmioError::UsbService)?;
+        Ok(ServiceResult::Attached(binding))
     }
 
     /// Снятие DMA всегда выполняется после аппаратной остановки xHCI.
@@ -214,6 +297,21 @@ pub unsafe fn probe<const N: usize>(
             )
         }
         .map_err(XhciMmioError::Command)?;
+        let mut service = UsbService::new();
+        service
+            .attach(UsbBinding {
+                port: ports.first_connected_port,
+                slot: report.slot_id,
+                protocol: report.interface_protocol,
+            })
+            .map_err(XhciMmioError::UsbService)?;
+        service
+            .attach(UsbBinding {
+                port: ports.second_connected_port,
+                slot: second.slot_id,
+                protocol: second.interface_protocol,
+            })
+            .map_err(XhciMmioError::UsbService)?;
         Ok((
             capabilities,
             reset,
@@ -225,6 +323,7 @@ pub unsafe fn probe<const N: usize>(
                 registers,
                 capabilities,
                 dma,
+                service,
                 closed: false,
             },
         ))

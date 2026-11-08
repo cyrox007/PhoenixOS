@@ -647,7 +647,7 @@ pub unsafe fn start_pair<const N: usize, R: OperationalRegisters>(
             cursor: EventCursor::after_enumeration(),
             stopped: false,
             released: false,
-         },
+        },
     ))
 }
 
@@ -664,7 +664,7 @@ pub struct ActiveDma {
     cursor: EventCursor,
     stopped: bool,
     released: bool,
- }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimePortEvent {

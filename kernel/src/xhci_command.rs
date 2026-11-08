@@ -1106,6 +1106,150 @@ impl ActiveDma {
         result
     }
 
+    /// Активирует выбранную HID-конфигурацию USB и прерывание IN.
+    /// Требует ранее адресованный слот и не выполняет повторного выделения DMA.
+    pub fn configure_hid<R: OperationalRegisters>(
+        &mut self,
+        registers: &R,
+        capabilities: XhciCapabilities,
+        device_index: usize,
+        slot: u8,
+    ) -> Result<HidConfiguration, CommandError> {
+        if self.stopped || self.released {
+            return Err(CommandError::AlreadyStopped);
+        }
+        if self.faulted {
+            return Err(CommandError::ServiceFaulted);
+        }
+        let pages = match device_index {
+            0 => xhci_session::FIRST_DEVICE,
+            1 => xhci_session::SECOND_DEVICE,
+            _ => return Err(CommandError::NoFreeDevicePages),
+        };
+        if self.io.hid[device_index].is_some() {
+            return Err(CommandError::AlreadyConfigured);
+        }
+        let length = (self.memory.read(pages.descriptor, 128) >> 16) as usize;
+        if !(9..=128).contains(&length) {
+            return Err(CommandError::InvalidConfiguration);
+        }
+        let mut bytes = [0_u8; 128];
+        for (offset, byte) in bytes.iter_mut().take(length).enumerate() {
+            *byte = self.memory.read_byte(pages.descriptor, 128 + offset);
+        }
+        let config = usb_descriptors::parse_hid_configuration(&bytes[..length])
+            .map_err(CommandError::Configuration)?;
+        if (config.protocol == 1 && config.max_packet_size < 8)
+            || (config.protocol == 2 && config.max_packet_size < 3)
+            || config.max_packet_size > 8
+        {
+            return Err(CommandError::InvalidEndpoint);
+        }
+        let result = (|| {
+            configure_interrupt_endpoint(
+                registers,
+                capabilities,
+                self.base,
+                &self.memory,
+                &mut self.io,
+                pages,
+                slot,
+                config,
+            )?;
+            let trb = self.io.control_next[device_index];
+            set_configuration(
+                registers,
+                capabilities,
+                self.base,
+                &self.memory,
+                &mut self.io,
+                pages,
+                slot,
+                trb,
+                config.value,
+            )?;
+            self.io.control_next[device_index] = trb + 2;
+            let mut channel = HidChannel {
+                pages,
+                slot,
+                descriptor: config,
+                index: 0,
+                cycle: 1,
+                outstanding: 0,
+            };
+            arm_hid(registers, capabilities, self.base, &self.memory, &mut channel);
+            self.io.hid[device_index] = Some(channel);
+            Ok(config)
+        })();
+        if result.is_err() {
+            // Неопределённый результат Configure Endpoint и EP0 запрещает
+            // дальнейшее переиспользование памяти до общего сброса xHCI.
+            self.faulted = true;
+        }
+        result
+    }
+
+    /// События портов и завершающиеся отчёты HID используют одно
+    /// аппаратное кольцо и извлекаются без потери чужих извещений.
+    pub fn poll_runtime_event<R: OperationalRegisters>(
+        &mut self,
+        registers: &R,
+        capabilities: XhciCapabilities,
+    ) -> Result<Option<RuntimeEvent>, CommandError> {
+        if self.stopped || self.released {
+            return Err(CommandError::AlreadyStopped);
+        }
+        if self.faulted {
+            return Err(CommandError::ServiceFaulted);
+        }
+        if !wait_halted(registers, capabilities.operational_offset, false) {
+            return Err(CommandError::ControllerStopped);
+        }
+        if let Some(port) = self.io.take_port() {
+            return Ok(Some(RuntimeEvent::Port(port)));
+        }
+        for index in 0..self.io.pending_hid.len() {
+            if let Some(event) = self.io.pending_hid[index].take() {
+                let report = completed_hid(
+                    registers,
+                    capabilities,
+                    self.base,
+                    &self.memory,
+                    &mut self.io,
+                    event,
+                )?;
+                return Ok(Some(RuntimeEvent::Hid(report)));
+            }
+        }
+        let runtime = capabilities.runtime_offset + 0x20;
+        let Some(event) = poll_event(registers, runtime, self.base, &self.memory, &mut self.io)
+        else {
+            return Ok(None);
+        };
+        if event.kind == 34 {
+            let port = (event.pointer >> 24) as u8;
+            if port == 0 || port > capabilities.max_ports {
+                return Err(CommandError::InvalidPortEvent);
+            }
+            return Ok(Some(RuntimeEvent::Port(RuntimePortEvent {
+                port,
+                completion_code: event.code,
+            })));
+        }
+        if event.kind == 32 {
+            let report = completed_hid(
+                registers,
+                capabilities,
+                self.base,
+                &self.memory,
+                &mut self.io,
+                event,
+            )?;
+            return Ok(Some(RuntimeEvent::Hid(report)));
+        }
+        Err(CommandError::UnexpectedRuntimeEvent(event.kind))
+    }
+
     pub fn is_mapped(&self) -> bool {
         self.device_mapping.is_mapped() && !self.released
     }

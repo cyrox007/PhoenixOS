@@ -6,7 +6,7 @@
 
 use phoenix_dma::{
     CpuVirtualAddress, DeviceAddress, DmaError, DmaLayout,
-    buffer::{DmaBuffer, DmaBufferError, DmaBufferPlatform, SplitDmaPlatform},
+    buffer::{DmaBuffer, DmaBufferError, DmaBufferPlatform, DmaMemoryBackend, SplitDmaPlatform},
     mapping::{DmaMappingBackend, PhysicalAddress},
 };
 
@@ -20,20 +20,10 @@ struct Memory {
     reserved: bool,
     mapped: bool,
     returned: usize,
+    invalid_cpu: bool,
 }
 
-impl DmaMappingBackend for Memory {
-    fn map(&mut self, _: PhysicalAddress, _: DmaLayout) -> Result<DeviceAddress, DmaError> {
-        // При использовании SplitDmaPlatform этот метод никогда не вызывается.
-        Err(DmaError::Unaddressable)
-    }
-
-    fn unmap(&mut self, _: DeviceAddress, _: DmaLayout) -> Result<(), DmaError> {
-        Err(DmaError::Unaddressable)
-    }
-}
-
-impl DmaBufferPlatform for Memory {
+impl DmaMemoryBackend for Memory {
     fn reserve(&mut self, _: DmaLayout) -> Result<PhysicalAddress, DmaError> {
         if self.reserved {
             return Err(DmaError::InvalidRange);
@@ -51,11 +41,12 @@ impl DmaBufferPlatform for Memory {
             return Err(DmaError::InvalidRange);
         }
         self.mapped = true;
-        Ok(CpuVirtualAddress::new(CPU))
+        let address = if self.invalid_cpu { CPU + 1 } else { CPU };
+        Ok(CpuVirtualAddress::new(address))
     }
 
     fn unmap_cpu(&mut self, cpu: CpuVirtualAddress, _: DmaLayout) -> Result<(), DmaError> {
-        if !self.mapped || cpu.value() != CPU {
+        if !self.mapped || cpu.value() != if self.invalid_cpu { CPU + 1 } else { CPU } {
             return Err(DmaError::InvalidRange);
         }
         self.mapped = false;
@@ -196,9 +187,45 @@ fn translated_address_must_still_satisfy_device_alignment() {
     let layout = DmaLayout::new(PAGE, PAGE).unwrap();
     let mut buffer = DmaBuffer::reserve(&mut platform, layout).unwrap();
     buffer.map_cpu(&mut platform).unwrap();
-    buffer.map_device(&mut platform).unwrap();
+    assert_eq!(
+        buffer.map_device(&mut platform),
+        Err(DmaBufferError::InvalidAddress)
+    );
     assert_eq!(buffer.region(), Err(DmaBufferError::InvalidAddress));
+    assert_eq!(
+        buffer.begin_device_access(),
+        Err(DmaBufferError::InvalidAddress)
+    );
+    assert!(buffer.is_reserved());
     buffer.close(&mut platform).unwrap();
     drop(platform);
     assert_eq!(memory.returned, 1);
+    assert!(!mapper.active);
+    assert_eq!(mapper.unmap_calls, 1);
 }
+
+#[test]
+fn invalid_cpu_address_rejected_before_device_mapping_and_still_released() {
+    let mut memory = Memory {
+        invalid_cpu: true,
+        ..Memory::default()
+    };
+    let mut mapper = MockDeviceMapper::new(REMAPPED);
+    let mut platform = SplitDmaPlatform::new(&mut memory, &mut mapper);
+    let layout = DmaLayout::new(PAGE, PAGE).unwrap();
+    let mut buffer = DmaBuffer::reserve(&mut platform, layout).unwrap();
+
+    assert_eq!(
+        buffer.map_cpu(&mut platform),
+        Err(DmaBufferError::InvalidAddress)
+    );
+    assert_eq!(buffer.region(), Err(DmaBufferError::NotReady));
+    buffer.close(&mut platform).unwrap();
+    drop(platform);
+
+    assert_eq!(memory.returned, 1);
+    assert!(!memory.reserved);
+    assert!(!mapper.active);
+    assert_eq!(mapper.map_calls, 0);
+}
+

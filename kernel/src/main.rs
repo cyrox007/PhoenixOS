@@ -22,6 +22,7 @@ mod thread_manager;
 mod xhci_command;
 mod xhci_driver;
 mod xhci_mmio;
+mod xhci_service;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -741,10 +742,52 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!("input queue from xhci: OK count=5"),
     );
 
+    // Проверка чтения USB-событий в двух пользовательских процессах
+    // проходит до передачи права владения контроллером другому потоку.
+    input_elf_execution_self_test(physical_memory_offset, &mut frames);
+    if input_service::with_events(|events| !events.is_empty()) {
+        panic!("пользовательская программа оставила события во входной очереди");
+    }
+    serial::line(&mut out, "INFO", format_args!("input userspace app: OK"));
+
+    let keyboard_slot = active_xhci
+        .binding_for_port(keyboard_port)
+        .expect("перед запуском службы клавиатура должна быть подключена")
+        .slot;
+    let scheduled = xhci_scheduled_service_self_test(
+        &mut active_xhci,
+        keyboard_slot,
+        retained.second_slot,
+    );
+    assert_eq!(scheduled.detached, 1);
+    assert_eq!(scheduled.attached, 1);
+    assert_eq!(scheduled.pressed, 1);
+    assert_eq!(scheduled.released, 1);
+    assert_eq!(scheduled.moved, 1);
+    assert_eq!(scheduled.fault, 0);
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "xhci scheduled concurrent: OK worker_polls={} supervisor_ticks={} idle={}",
+            scheduled.worker_polls, scheduled.supervisor_ticks, scheduled.idle_polls
+        ),
+    );
+    assert_eq!(
+        input_service::with_events(|events| events.len()),
+        5,
+        "планируемая USB-служба не доставила вторую серию событий"
+    );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("xhci scheduled input queue: OK count=5"),
+    );
+
     let free_before_shutdown = frames.free_frames();
     active_xhci
         .shutdown(&mut page_table, &mut frames)
-        .expect("не удалось безопасно остановить работающий xHCI");
+        .expect("не удалось безопасно остановить xHCI после работы потоков");
     assert_eq!(
         frames.free_frames(),
         free_before_shutdown + retained.pages,
@@ -755,15 +798,103 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         "INFO",
         format_args!("xhci resident shutdown: OK pages={}", retained.pages),
     );
-
-    input_elf_execution_self_test(physical_memory_offset, &mut frames);
-    if input_service::with_events(|events| !events.is_empty()) {
-        panic!("пользовательская программа оставила события во входной очереди");
-    }
-    serial::line(&mut out, "INFO", format_args!("input userspace app: OK"));
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("xhci scheduled dma shutdown: OK pages={}", retained.pages),
+    );
 
     serial::line(&mut out, "INFO", format_args!("bootstrap: OK"));
     qemu::exit(ExitCode::Success);
+}
+
+/// В течение работы аппаратно планируемых потоков только поток USB
+/// обращается к ActiveXhci. Второй поток читает атомарные результаты и
+/// запрашивает остановку после аппаратных событий монитора QEMU.
+fn xhci_scheduled_service_self_test(
+    controller: &mut xhci_mmio::ActiveXhci,
+    keyboard_slot: u8,
+    mouse_slot: u8,
+) -> xhci_service::RuntimeReport {
+    use phoenix_pcie::xhci_runtime::RuntimePhase;
+
+    let control = Box::new(xhci_service::UsbServiceControl::new(
+        controller,
+        keyboard_slot,
+        mouse_slot,
+    ));
+    let argument = &*control as *const xhci_service::UsbServiceControl as usize;
+    let mut manager = thread_manager::ThreadManager::<
+        { thread_manager::KERNEL_THREAD_CAPACITY },
+    >::new();
+    let worker = manager
+        .spawn_preemptive_returning(xhci_service::service_thread, argument, 1)
+        .expect("не удалось создать поток USB-службы");
+    let observer = manager
+        .spawn_preemptive_returning(xhci_service::supervisor_thread, argument, 1)
+        .expect("не удалось создать поток управления USB-службой");
+    assert_ne!(worker, observer);
+    assert_eq!(manager.live_count(), 2);
+
+    let installed = x86_64::instructions::interrupts::without_interrupts(|| {
+        let manager_installed = unsafe { thread_manager::install_preemptive_manager(&mut manager) };
+        if !manager_installed {
+            return false;
+        }
+        if arch::x86_64::apic::install_timer_hook(thread_manager::timer_tick_hook).is_err() {
+            thread_manager::remove_preemptive_manager();
+            return false;
+        }
+        true
+    });
+    assert!(installed, "не удалось включить аппаратное планирование USB");
+
+    // В отличие от загрузочной проверки служба не ограничена числом
+    // опросов. Возврат возможен после сообщения об отказе либо после
+    // запроса остановки от отдельного потока управления.
+    while !matches!(
+        control.phase(),
+        RuntimePhase::Stopped | RuntimePhase::Faulted
+    ) {
+        x86_64::instructions::interrupts::enable_and_hlt();
+    }
+
+    let report = x86_64::instructions::interrupts::without_interrupts(|| {
+        thread_manager::remove_preemptive_manager();
+        arch::x86_64::apic::remove_timer_hook();
+        assert!(
+            manager.current_thread().is_none(),
+            "аппаратный поток ещё активен при завершении службы"
+        );
+        manager.collect_finished_preemptive();
+        assert_eq!(
+            manager.live_count(),
+            0,
+            "потоки USB не завершились перед освобождением памяти"
+        );
+        control.report()
+    });
+
+    assert_eq!(
+        control.phase(),
+        RuntimePhase::Stopped,
+        "служба USB не подтвердила остановку: {:?}",
+        control.phase()
+    );
+    assert!(
+        !thread_manager::preemptive_scheduler_failed(),
+        "ошибка аппаратного планировщика USB"
+    );
+    assert!(report.worker_polls > 4);
+    assert!(report.idle_polls > 0, "служба не выполняла экономного ожидания");
+    assert!(
+        report.supervisor_ticks > 1,
+        "второй поток не выполнялся одновременно со службой USB"
+    );
+    serial::emergency(format_args!(
+        "[INFO] xhci scheduled lifecycle: OK stopped=1\n"
+    ));
+    report
 }
 
 fn process_capability_self_test() {

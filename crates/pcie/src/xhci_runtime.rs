@@ -65,17 +65,13 @@ impl RuntimeLifecycle {
     /// Невосстановимый отказ завершает обработку без освобождения DMA.
     /// Оборудование должен отдельно и безопасно остановить распорядитель.
     pub fn fail(&self) {
-        self.phase.store(RuntimePhase::Faulted as u8, Ordering::Release);
+        self.phase
+            .store(RuntimePhase::Faulted as u8, Ordering::Release);
     }
 
     fn transition(&self, from: RuntimePhase, to: RuntimePhase) -> Result<(), RuntimeError> {
         self.phase
-            .compare_exchange(
-                from as u8,
-                to as u8,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
+            .compare_exchange(from as u8, to as u8, Ordering::AcqRel, Ordering::Acquire)
             .map(|_| ())
             .map_err(|_| RuntimeError::InvalidTransition)
     }
@@ -100,10 +96,7 @@ mod tests {
             Err(RuntimeError::InvalidTransition)
         );
         lifecycle.start().unwrap();
-        assert_eq!(
-            lifecycle.start(),
-            Err(RuntimeError::InvalidTransition)
-        );
+        assert_eq!(lifecycle.start(), Err(RuntimeError::InvalidTransition));
         lifecycle.request_stop().unwrap();
         assert_eq!(lifecycle.phase(), RuntimePhase::StopRequested);
         assert_eq!(
@@ -112,10 +105,7 @@ mod tests {
         );
         lifecycle.acknowledge_stop().unwrap();
         assert_eq!(lifecycle.phase(), RuntimePhase::Stopped);
-        assert_eq!(
-            lifecycle.start(),
-            Err(RuntimeError::InvalidTransition)
-        );
+        assert_eq!(lifecycle.start(), Err(RuntimeError::InvalidTransition));
     }
 
     #[test]

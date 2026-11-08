@@ -80,11 +80,24 @@ pub fn draw_emergency_banner(framebuffer: &mut FrameBuffer) -> Result<BannerInfo
     canvas.clear(BACKGROUND)?;
     let panel_height = core::cmp::min(info.height, 112);
     canvas.fill_rect(0, 0, info.width, panel_height, EMERGENCY_PANEL)?;
-    canvas.fill_rect(0, 0, core::cmp::min(info.width, 8), panel_height, EMERGENCY_ACCENT)?;
+    canvas.fill_rect(
+        0,
+        0,
+        core::cmp::min(info.width, 8),
+        panel_height,
+        EMERGENCY_ACCENT,
+    )?;
 
     if info.width >= 250 && info.height >= 64 {
         canvas.draw_text(24, 18, "PhoenixOS", PRIMARY_TEXT, EMERGENCY_PANEL, 2)?;
-        canvas.draw_text(24, 62, "DISPLAY RECOVERY / GOP", PRIMARY_TEXT, EMERGENCY_PANEL, 1)?;
+        canvas.draw_text(
+            24,
+            62,
+            "DISPLAY RECOVERY / GOP",
+            PRIMARY_TEXT,
+            EMERGENCY_PANEL,
+            1,
+        )?;
     }
 
     Ok(BannerInfo {

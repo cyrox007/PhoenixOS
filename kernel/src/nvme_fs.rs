@@ -70,25 +70,13 @@ fn verify_contents<D: BlockDevice>(
     Ok(length as u16)
 }
 
-/// Опасное форматирование возможно только после строгой проверки геометрии
-/// временного NVMe. Соседние секторы читаются до и после форматирования
-/// для подтверждения изоляции тестовой области.
+/// Начальная запись использует только один экземпляр PhoenixVfs.
+/// Вызов не встраивается в проверки соседних секторов: большие рабочие
+/// буферы не должны оставаться в одном стеке с повторным монтированием.
 #[inline(never)]
-pub fn exercise<D: BlockDevice>(disk: &mut D) -> Result<NvmeFsReport, NvmeFsError> {
-    crate::serial::emergency(format_args!("[INFO] nvme trace: fs exercise entered\n"));
-    if disk.geometry() != EXPECTED_GEOMETRY {
-        return Err(NvmeFsError::UnsafeDevice);
-    }
-
-    let before_lba = TEST_REGION_START_LBA - 1;
-    let after_lba = TEST_REGION_START_LBA + TEST_REGION_BLOCKS;
-    let mut before_guard = [0_u8; 512];
-    let mut after_guard = [0_u8; 512];
-    disk.read_blocks(before_lba, &mut before_guard)?;
-    disk.read_blocks(after_lba, &mut after_guard)?;
-
-    crate::serial::emergency(format_args!("[INFO] nvme trace: fs guard read OK\n"));
-    let region = BlockRegion::new(disk, TEST_REGION_START_LBA, TEST_REGION_BLOCKS)?;
+fn create_test_files<'a, D: BlockDevice>(
+    region: BlockRegion<'a, D>,
+) -> Result<(BlockRegion<'a, D>, u64, phoenix_vfs::NodeId, phoenix_vfs::NodeId, u16), NvmeFsError> {
     let mut format_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
     let mut filesystem = PhoenixVfs::format_new(region, VOLUME_ID, 1, &mut format_buffer)?;
     crate::serial::emergency(format_args!("[INFO] nvme trace: fs formatted\n"));
@@ -101,14 +89,25 @@ pub fn exercise<D: BlockDevice>(disk: &mut D) -> Result<NvmeFsReport, NvmeFsErro
     if filesystem.write_node(file, FILE_CONTENT.len() as u64, FILE_APPEND)? != FILE_APPEND.len() {
         return Err(NvmeFsError::DataMismatch);
     }
-    let first_verified = verify_contents(&filesystem, file)?;
+    let verified = verify_contents(&filesystem, file)?;
     let generation = filesystem.active_superblock().superblock.generation;
     if generation <= 1 {
         return Err(NvmeFsError::DataMismatch);
     }
-
     crate::serial::emergency(format_args!("[INFO] nvme trace: fs file checked\n"));
-    let mut region = filesystem.into_device();
+    Ok((filesystem.into_device(), generation, directory, file, verified))
+}
+
+/// Повторное монтирование живёт в отдельном стеке от форматирования.
+/// Состояние файловой системы восстанавливается из двух суперблоков
+/// того же физического NVMe, без сохранения старого экземпляра в памяти.
+#[inline(never)]
+fn remount_and_check<'a, D: BlockDevice>(
+    mut region: BlockRegion<'a, D>,
+    generation: u64,
+    directory: phoenix_vfs::NodeId,
+    file: phoenix_vfs::NodeId,
+) -> Result<(BlockRegion<'a, D>, u16), NvmeFsError> {
     region.flush()?;
     let mut superblock_a = [0_u8; FILESYSTEM_BLOCK_SIZE];
     let mut superblock_b = [0_u8; FILESYSTEM_BLOCK_SIZE];
@@ -123,9 +122,30 @@ pub fn exercise<D: BlockDevice>(disk: &mut D) -> Result<NvmeFsReport, NvmeFsErro
     if mounted_directory != directory || mounted_file != file {
         return Err(NvmeFsError::DataMismatch);
     }
-    let second_verified = verify_contents(&remounted, mounted_file)?;
+    let verified = verify_contents(&remounted, mounted_file)?;
+    Ok((remounted.into_device(), verified))
+}
 
-    let mut region = remounted.into_device();
+/// Опасное форматирование возможно только после строгой проверки геометрии
+/// временного NVMe. Соседние секторы читаются до и после форматирования.
+#[inline(never)]
+pub fn exercise<D: BlockDevice>(disk: &mut D) -> Result<NvmeFsReport, NvmeFsError> {
+    crate::serial::emergency(format_args!("[INFO] nvme trace: fs exercise entered\n"));
+    if disk.geometry() != EXPECTED_GEOMETRY {
+        return Err(NvmeFsError::UnsafeDevice);
+    }
+
+    let before_lba = TEST_REGION_START_LBA - 1;
+    let after_lba = TEST_REGION_START_LBA + TEST_REGION_BLOCKS;
+    let mut before_guard = [0_u8; 512];
+    let mut after_guard = [0_u8; 512];
+    disk.read_blocks(before_lba, &mut before_guard)?;
+    disk.read_blocks(after_lba, &mut after_guard)?;
+    crate::serial::emergency(format_args!("[INFO] nvme trace: fs guard read OK\n"));
+
+    let region = BlockRegion::new(disk, TEST_REGION_START_LBA, TEST_REGION_BLOCKS)?;
+    let (region, generation, directory, file, first_verified) = create_test_files(region)?;
+    let (mut region, second_verified) = remount_and_check(region, generation, directory, file)?;
     region.flush()?;
     let disk = region.into_inner();
     let mut current = [0_u8; 512];

@@ -3,8 +3,8 @@
 //! Используется существующее чтение ECAM. Любая цепочка с циклом,
 //! выходом за пределы конфигурации или неправильной областью BAR отвергается.
 
-use crate::{ConfigAccess, PcieFunction};
 use crate::graphics::{VIRTIO_GPU_DEVICE_ID, VIRTIO_VENDOR_ID};
+use crate::{ConfigAccess, PcieFunction};
 
 pub const COMMON_CFG: u8 = 1;
 pub const NOTIFY_CFG: u8 = 2;
@@ -49,7 +49,10 @@ impl VirtioPciLayout {
         let relative = u64::from(queue_notify_off)
             .checked_mul(u64::from(self.notify_multiplier))
             .ok_or(VirtioPciError::AddressOverflow)?;
-        if relative.checked_add(2).is_none_or(|end| end > u64::from(self.notify.length)) {
+        if relative
+            .checked_add(2)
+            .is_none_or(|end| end > u64::from(self.notify.length))
+        {
             return Err(VirtioPciError::InvalidCapability);
         }
         u64::from(self.notify.offset)
@@ -266,10 +269,16 @@ mod tests {
     fn rejects_capability_cycle_and_mismatched_bars() {
         let mut config = setup();
         config.data[0xc0 / 4] |= 0x80 << 8;
-        assert_eq!(discover(&config, gpu()), Err(VirtioPciError::CapabilityLoop));
+        assert_eq!(
+            discover(&config, gpu()),
+            Err(VirtioPciError::CapabilityLoop)
+        );
         config = setup();
         config.data[0xc4 / 4] = 0;
-        assert_eq!(discover(&config, gpu()), Err(VirtioPciError::IncompatibleRegions));
+        assert_eq!(
+            discover(&config, gpu()),
+            Err(VirtioPciError::IncompatibleRegions)
+        );
     }
 
     #[test]
@@ -277,9 +286,15 @@ mod tests {
         let config = setup();
         let mut unknown = gpu();
         unknown.vendor_id = 0x1002;
-        assert_eq!(discover(&config, unknown), Err(VirtioPciError::UnsupportedDevice));
+        assert_eq!(
+            discover(&config, unknown),
+            Err(VirtioPciError::UnsupportedDevice)
+        );
         let mut broken = setup();
         broken.data[0x34 / 4] = 0;
-        assert_eq!(discover(&broken, gpu()), Err(VirtioPciError::MissingCapabilities));
+        assert_eq!(
+            discover(&broken, gpu()),
+            Err(VirtioPciError::MissingCapabilities)
+        );
     }
 }

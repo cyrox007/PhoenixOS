@@ -228,4 +228,3 @@ fn invalid_cpu_address_rejected_before_device_mapping_and_still_released() {
     assert!(!mapper.active);
     assert_eq!(mapper.map_calls, 0);
 }
-

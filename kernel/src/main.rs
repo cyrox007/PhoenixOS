@@ -565,8 +565,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             .poll_port_event()
             .expect("не удалось обслужить кольцо событий xHCI");
         assert_eq!(
-            event,
-            None,
+            event, None,
             "проверочный профиль не должен отключать USB-устройства"
         );
     }

@@ -174,7 +174,10 @@ mod tests {
     #[test]
     fn pixel_format_has_expected_byte_order_for_qemu() {
         assert_eq!(pixel_x8r8g8b8(24, 31, 46).to_le_bytes(), [0, 24, 31, 46]);
-        assert_eq!(pixel_x8r8g8b8(255, 255, 255).to_le_bytes(), [0, 255, 255, 255]);
+        assert_eq!(
+            pixel_x8r8g8b8(255, 255, 255).to_le_bytes(),
+            [0, 255, 255, 255]
+        );
         assert_eq!(pixel_x8r8g8b8(229, 94, 54).to_le_bytes(), [0, 229, 94, 54]);
     }
 

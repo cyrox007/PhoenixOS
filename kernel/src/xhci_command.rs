@@ -204,9 +204,7 @@ fn hid_transfer_index(io: &IoState, event: Completion) -> Option<usize> {
         return None;
     }
     io.hid.iter().position(|channel| {
-        channel.is_some_and(|hid| {
-            hid.slot == event.slot && hid.outstanding == event.pointer
-        })
+        channel.is_some_and(|hid| hid.slot == event.slot && hid.outstanding == event.pointer)
     })
 }
 
@@ -837,7 +835,11 @@ fn configure_interrupt_endpoint<R: OperationalRegisters>(
         memory.write(pages.input, input_slot + word * 4, value);
     }
     let slot_flags = memory.read(pages.input, input_slot);
-    memory.write(pages.input, input_slot, (slot_flags & !(0x1f << 27)) | (dci << 27));
+    memory.write(
+        pages.input,
+        input_slot,
+        (slot_flags & !(0x1f << 27)) | (dci << 27),
+    );
     memory.write(pages.input, 0, 0);
     memory.write(pages.input, 4, 1 | (1 << dci));
 
@@ -896,19 +898,34 @@ fn arm_hid<R: OperationalRegisters>(
     }
     memory.write(channel.pages.descriptor, trb, address as u32);
     memory.write(channel.pages.descriptor, trb + 4, (address >> 32) as u32);
-    memory.write(channel.pages.descriptor, trb + 8, u32::from(channel.descriptor.max_packet_size));
-    memory.write(channel.pages.descriptor, trb + 12, (1 << 10) | (1 << 5) | channel.cycle);
+    memory.write(
+        channel.pages.descriptor,
+        trb + 8,
+        u32::from(channel.descriptor.max_packet_size),
+    );
+    memory.write(
+        channel.pages.descriptor,
+        trb + 12,
+        (1 << 10) | (1 << 5) | channel.cycle,
+    );
     channel.outstanding = base + channel.pages.descriptor * PAGE_BYTES + trb as u64;
     channel.index += 1;
     if channel.index == HID_RING_ITEMS - 1 {
         let link = HID_RING_START + (HID_RING_ITEMS - 1) * 16 + 12;
-        memory.write(channel.pages.descriptor, link, (6 << 10) | 2 | channel.cycle);
+        memory.write(
+            channel.pages.descriptor,
+            link,
+            (6 << 10) | 2 | channel.cycle,
+        );
         channel.index = 0;
         channel.cycle ^= 1;
     }
     compiler_fence(Ordering::SeqCst);
     let dci = u32::from(channel.descriptor.endpoint_address & 0x0f) * 2 + 1;
-    registers.write_u32(capabilities.doorbell_offset + u64::from(channel.slot) * 4, dci);
+    registers.write_u32(
+        capabilities.doorbell_offset + u64::from(channel.slot) * 4,
+        dci,
+    );
 }
 
 fn completed_hid<R: OperationalRegisters>(
@@ -1177,7 +1194,13 @@ impl ActiveDma {
                 cycle: 1,
                 outstanding: 0,
             };
-            arm_hid(registers, capabilities, self.base, &self.memory, &mut channel);
+            arm_hid(
+                registers,
+                capabilities,
+                self.base,
+                &self.memory,
+                &mut channel,
+            );
             self.io.hid[device_index] = Some(channel);
             Ok(config)
         })();

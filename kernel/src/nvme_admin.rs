@@ -13,6 +13,7 @@ use phoenix_pcie::nvme::{self, NvmePciController, RegisterAccess};
 use phoenix_pcie::nvme_admin::{
     self, AdminCompletion, AdminQueueCursor, AdminQueueError, IdentifyCommand,
 };
+use phoenix_pcie::nvme_io::{self, IoCommand, IoError};
 use phoenix_vm::dma_window::{ActiveDmaPageAccess, DmaCachePolicy};
 use phoenix_vm::kernel_reservations::{KernelVirtualRanges, ManagedDmaHandle, ManagedDmaWindows};
 use phoenix_vm::{ActivePageTable, PAGE_SIZE};
@@ -24,7 +25,7 @@ use x86_64::{
 const REGISTERS_VIRTUAL_BASE: u64 = 0xffff_a500_0000_0000;
 const DMA_VIRTUAL_BASE: u64 = 0xffff_a600_0000_0000;
 const REGISTERS_PAGES: u64 = 2;
-const DMA_PAGES: u64 = 3;
+const DMA_PAGES: u64 = 6;
 const POLL_LIMIT: usize = 5_000_000;
 const MAX_DEVICE_ADDRESS_EXCLUSIVE: u64 = 0x1_0000_0000;
 const QUEUE_DEPTH: u16 = nvme_admin::ADMIN_QUEUE_DEPTH;
@@ -50,6 +51,9 @@ pub enum AdminRuntimeError {
     Protocol(AdminQueueError),
     InvalidControllerIdentity(u16),
     InvalidNamespace,
+    InvalidBlockFormat,
+    DataMismatch,
+    Io(IoError),
     /// Контроллер не подтвердил остановку. DMA-страницы запрещено возвращать.
     UnsafeShutdown,
 }
@@ -61,6 +65,8 @@ pub struct AdminTestReport {
     pub controller_vendor: u16,
     pub namespace_blocks: u64,
     pub returned_dma_pages: u64,
+    pub io_commands: u16,
+    pub verified_blocks: u16,
 }
 
 struct RegisterWindow {
@@ -337,29 +343,16 @@ fn enable(
     wait_ready(regs, true)
 }
 
-fn execute_identify(
+fn submit_admin(
     regs: &RegisterWindow,
     arena: &DmaArena,
     cursor: &mut AdminQueueCursor,
-    controller: bool,
+    words: [u32; 16],
 ) -> Result<(), AdminRuntimeError> {
-    const SQ_PAGE: usize = 0;
     const CQ_PAGE: usize = PAGE_SIZE as usize;
-    const DATA_PAGE: usize = 2 * PAGE_SIZE as usize;
-
-    for word in 0..(PAGE_SIZE as usize / 4) {
-        arena.write(DATA_PAGE + word * 4, 0);
-    }
     let command_id = cursor.command_id();
-    let command = IdentifyCommand::build(
-        command_id,
-        if controller { 0 } else { 1 },
-        controller,
-        arena.device_start() + DATA_PAGE as u64,
-    )
-    .map_err(AdminRuntimeError::Protocol)?;
-    let base = SQ_PAGE + usize::from(cursor.submission_tail()) * 64;
-    for (index, word) in command.words.iter().enumerate() {
+    let base = usize::from(cursor.submission_tail()) * 64;
+    for (index, word) in words.iter().enumerate() {
         arena.write(base + index * 4, *word);
     }
     fence(Ordering::SeqCst);
@@ -368,7 +361,6 @@ fn execute_identify(
         nvme_admin::REG_DOORBELL,
         u32::from(cursor.submission_tail()),
     );
-
     let complete = CQ_PAGE + usize::from(cursor.completion_head()) * 16;
     let expected_phase = cursor.completion_phase();
     let completion = (0..POLL_LIMIT)
@@ -394,7 +386,6 @@ fn execute_identify(
             AdminQueueError::InvalidCompletion,
         ));
     }
-    // Оповещаем устройство об обработанном завершении до новой команды.
     cursor.completed();
     fence(Ordering::SeqCst);
     regs.write(
@@ -404,11 +395,152 @@ fn execute_identify(
     Ok(())
 }
 
+fn execute_identify(
+    regs: &RegisterWindow,
+    arena: &DmaArena,
+    cursor: &mut AdminQueueCursor,
+    controller: bool,
+) -> Result<(), AdminRuntimeError> {
+    const DATA_PAGE: usize = 2 * PAGE_SIZE as usize;
+    for word in 0..(PAGE_SIZE as usize / 4) {
+        arena.write(DATA_PAGE + word * 4, 0);
+    }
+    let command = IdentifyCommand::build(
+        cursor.command_id(),
+        if controller { 0 } else { 1 },
+        controller,
+        arena.device_start() + DATA_PAGE as u64,
+    )
+    .map_err(AdminRuntimeError::Protocol)?;
+    submit_admin(regs, arena, cursor, command.words)
+}
+
+fn io_transfer(
+    regs: &RegisterWindow,
+    arena: &DmaArena,
+    cursor: &mut AdminQueueCursor,
+    blocks: u64,
+    lba: u64,
+    write: bool,
+    stride: u32,
+) -> Result<(), AdminRuntimeError> {
+    const IO_SQ_PAGE: usize = 3 * PAGE_SIZE as usize;
+    const IO_CQ_PAGE: usize = 4 * PAGE_SIZE as usize;
+    const IO_DATA_PAGE: usize = 5 * PAGE_SIZE as usize;
+    let command = IoCommand::transfer(
+        cursor.command_id(),
+        write,
+        1,
+        lba,
+        1,
+        blocks,
+        arena.device_start() + IO_DATA_PAGE as u64,
+    )
+    .map_err(AdminRuntimeError::Io)?;
+    let base = IO_SQ_PAGE + usize::from(cursor.submission_tail()) * 64;
+    for (index, word) in command.words.iter().enumerate() {
+        arena.write(base + index * 4, *word);
+    }
+    fence(Ordering::SeqCst);
+    cursor.submitted();
+    regs.write(
+        nvme_admin::REG_DOORBELL + u64::from(stride) * 2,
+        u32::from(cursor.submission_tail()),
+    );
+    let complete = IO_CQ_PAGE + usize::from(cursor.completion_head()) * 16;
+    let expected_phase = cursor.completion_phase();
+    let completion = (0..POLL_LIMIT)
+        .find_map(|_| {
+            let status = arena.read(complete + 12);
+            if (status >> 16) & 1 != u32::from(expected_phase) {
+                core::hint::spin_loop();
+                return None;
+            }
+            fence(Ordering::Acquire);
+            Some([
+                arena.read(complete),
+                arena.read(complete + 4),
+                arena.read(complete + 8),
+                status,
+            ])
+        })
+        .ok_or(AdminRuntimeError::CompletionTimeout)?;
+    let head = nvme_io::check_completion(completion, cursor.command_id(), expected_phase)
+        .map_err(AdminRuntimeError::Io)?;
+    if head != cursor.submission_tail() {
+        return Err(AdminRuntimeError::Io(IoError::InvalidCompletion));
+    }
+    cursor.completed();
+    fence(Ordering::SeqCst);
+    regs.write(
+        nvme_admin::REG_DOORBELL + u64::from(stride) * 3,
+        u32::from(cursor.completion_head()),
+    );
+    Ok(())
+}
+
+fn exercise_blocks(
+    regs: &RegisterWindow,
+    arena: &DmaArena,
+    admin: &mut AdminQueueCursor,
+    blocks: u64,
+    stride: u32,
+) -> Result<(u16, u16), AdminRuntimeError> {
+    const IO_DATA_PAGE: usize = 5 * PAGE_SIZE as usize;
+    let cq = IoCommand::create_completion(admin.command_id(), arena.device_start() + 4 * PAGE_SIZE)
+        .map_err(AdminRuntimeError::Io)?;
+    submit_admin(regs, arena, admin, cq.words)?;
+    let sq = IoCommand::create_submission(admin.command_id(), arena.device_start() + 3 * PAGE_SIZE)
+        .map_err(AdminRuntimeError::Io)?;
+    submit_admin(regs, arena, admin, sq.words)?;
+    let mut io =
+        AdminQueueCursor::new(nvme_io::IO_QUEUE_DEPTH).map_err(AdminRuntimeError::Protocol)?;
+    let lba = blocks - 1;
+    io_transfer(regs, arena, &mut io, blocks, lba, false, stride)?;
+    let mut original = [0_u32; nvme_io::LOGICAL_BLOCK_BYTES / 4];
+    for (index, word) in original.iter_mut().enumerate() {
+        *word = arena.read(IO_DATA_PAGE + index * 4);
+    }
+    for index in 0..original.len() {
+        arena.write(
+            IO_DATA_PAGE + index * 4,
+            0x5048_4f53 ^ (index as u32).wrapping_mul(0x0101_0101),
+        );
+    }
+    io_transfer(regs, arena, &mut io, blocks, lba, true, stride)?;
+    for index in 0..original.len() {
+        arena.write(IO_DATA_PAGE + index * 4, 0);
+    }
+    io_transfer(regs, arena, &mut io, blocks, lba, false, stride)?;
+    let mut valid = true;
+    for index in 0..original.len() {
+        let expected = 0x5048_4f53 ^ (index as u32).wrapping_mul(0x0101_0101);
+        valid &= arena.read(IO_DATA_PAGE + index * 4) == expected;
+    }
+    // Независимо от проверки возвращаем исходное содержимое тестового блока.
+    for (index, word) in original.iter().enumerate() {
+        arena.write(IO_DATA_PAGE + index * 4, *word);
+    }
+    io_transfer(regs, arena, &mut io, blocks, lba, true, stride)?;
+    for index in 0..original.len() {
+        arena.write(IO_DATA_PAGE + index * 4, 0);
+    }
+    io_transfer(regs, arena, &mut io, blocks, lba, false, stride)?;
+    for (index, word) in original.iter().enumerate() {
+        valid &= arena.read(IO_DATA_PAGE + index * 4) == *word;
+    }
+    if !valid {
+        return Err(AdminRuntimeError::DataMismatch);
+    }
+    Ok((5, 2))
+}
+
 fn exercise(
     regs: &RegisterWindow,
     arena: &DmaArena,
     expected_vendor: u16,
     max_entries: u32,
+    stride: u32,
 ) -> Result<AdminTestReport, AdminRuntimeError> {
     enable(regs, arena, max_entries)?;
     let mut cursor = AdminQueueCursor::new(QUEUE_DEPTH).map_err(AdminRuntimeError::Protocol)?;
@@ -424,12 +556,20 @@ fn exercise(
     if blocks == 0 {
         return Err(AdminRuntimeError::InvalidNamespace);
     }
+    let format_index = (arena.read((2 * PAGE_SIZE + 24) as usize) >> 16) & 0xf;
+    let format = arena.read((2 * PAGE_SIZE + 128 + 4 * u64::from(format_index)) as usize);
+    if format & 0xffff != 0 || (format >> 16) & 0xff != 9 {
+        return Err(AdminRuntimeError::InvalidBlockFormat);
+    }
+    let (io_commands, verified_blocks) = exercise_blocks(regs, arena, &mut cursor, blocks, stride)?;
     Ok(AdminTestReport {
         queue_depth: QUEUE_DEPTH,
         completed_commands: 2,
         controller_vendor: vendor,
         namespace_blocks: blocks,
         returned_dma_pages: DMA_PAGES,
+        io_commands,
+        verified_blocks,
     })
 }
 
@@ -470,7 +610,8 @@ pub unsafe fn self_test<const N: usize>(
         nvme::read_capabilities(&registers).map_err(|_| AdminRuntimeError::InvalidQueueParameters);
     let outcome = capabilities.and_then(|cap| {
         if cap.minimum_page_size != PAGE_SIZE
-            || cap.doorbell_stride_bytes > (PAGE_SIZE - 4) as u32
+            || cap.doorbell_stride_bytes
+                > ((REGISTERS_PAGES * PAGE_SIZE - nvme_admin::REG_DOORBELL - 4) / 3) as u32
             || cap.maximum_queue_entries < u32::from(QUEUE_DEPTH)
         {
             return Err(AdminRuntimeError::InvalidQueueParameters);
@@ -480,6 +621,7 @@ pub unsafe fn self_test<const N: usize>(
             &arena,
             controller.function.vendor_id,
             cap.maximum_queue_entries,
+            cap.doorbell_stride_bytes,
         )
     });
 

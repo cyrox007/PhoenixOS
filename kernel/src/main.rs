@@ -1885,11 +1885,18 @@ fn hardware_scheduler_preemption_self_test() {
 }
 
 fn init_apic_timer(out: &mut serial::Com1) {
-    if let Err(error) = arch::x86_64::apic::init_periodic_timer() {
-        panic!("x2APIC обязателен для поддерживаемого аппаратного профиля: {error:?}");
-    }
+    let report = arch::x86_64::apic::init_periodic_timer()
+        .expect("x2APIC и проверенная маска наследуемого PIC обязательны");
 
     serial::line(out, "INFO", format_args!("local APIC: mode=x2APIC"));
+    serial::line(
+        out,
+        "INFO",
+        format_args!(
+            "modern interrupt mode: OK apic=x2APIC pic_mask={:02x}{:02x}",
+            report.pic_primary_mask, report.pic_secondary_mask
+        ),
+    );
 
     let mut preemption_stack = alloc::vec![0u8; PREEMPTION_TEST_STACK_SIZE].into_boxed_slice();
     let preemption_frame = arch::x86_64::exceptions::prepare_kernel_timer_frame(

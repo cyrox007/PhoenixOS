@@ -216,5 +216,4 @@ mod tests {
         assert!(!release.entries[2].unwrap().pressed);
         assert_eq!(release.entries[2].unwrap().usage, 5);
     }
-
 }

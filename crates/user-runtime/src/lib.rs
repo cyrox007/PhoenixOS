@@ -6,8 +6,10 @@ use phoenix_syscall_abi::{
     ConsoleWriteArguments, FILE_OPEN_CREATE, FILE_OPEN_READ, FILE_OPEN_TRUNCATE, FILE_OPEN_WRITE,
     FILE_READY_ERROR, FILE_READY_HANGUP, FILE_READY_READ, FILE_READY_WRITE, FILE_SEEK_CURRENT,
     FILE_SEEK_END, FILE_SEEK_START, FileIoArguments, FileOpenArguments, FilePollArguments,
-    FileSeekArguments, IpcReceiveArguments, IpcReceiveMetadata, IpcSendArguments,
-    PackedCapabilityHandle, PackedFileDescriptor, ProcessStartInfo, SYSCALL_STATUS_BAD_ARGUMENTS,
+    FileSeekArguments, InputEventRecord, InputReadArguments, IpcReceiveArguments,
+    IpcReceiveMetadata, IpcSendArguments,
+    PackedCapabilityHandle, PackedFileDescriptor, ProcessStartInfo,
+    SYSCALL_STATUS_ACCESS_DENIED, SYSCALL_STATUS_BAD_ARGUMENTS,
     SYSCALL_STATUS_OPERATION_NOT_READY, SYSCALL_STATUS_UNKNOWN_CALL, SyscallRequest,
 };
 
@@ -31,6 +33,7 @@ impl RuntimeCallResult {
 
 pub const ERRNO_EIO: i32 = 5;
 pub const ERRNO_EAGAIN: i32 = 11;
+pub const ERRNO_EACCES: i32 = 13;
 pub const ERRNO_EINVAL: i32 = 22;
 pub const ERRNO_ENOSYS: i32 = 38;
 
@@ -40,6 +43,7 @@ pub const fn errno_from_status(status: u64) -> i32 {
         value if value == SYSCALL_STATUS_UNKNOWN_CALL as u64 => ERRNO_ENOSYS,
         value if value == SYSCALL_STATUS_BAD_ARGUMENTS as u64 => ERRNO_EINVAL,
         value if value == SYSCALL_STATUS_OPERATION_NOT_READY as u64 => ERRNO_EAGAIN,
+        value if value == SYSCALL_STATUS_ACCESS_DENIED as u64 => ERRNO_EACCES,
         _ => ERRNO_EIO,
     }
 }
@@ -186,6 +190,27 @@ pub fn file_poll(
     Ok(FileReadyEvents::from_bits(ready))
 }
 
+/// Получает одну запись от ядра при наличии права чтения устройства ввода.
+/// Если очередь пуста, возвращает ошибку EAGAIN без изменения `event`.
+pub fn input_read(
+    capability: PackedCapabilityHandle,
+    event: &mut InputEventRecord,
+) -> Result<(), SyscallError> {
+    let request = build_input_read_request(capability, event);
+    invoke(request).map(|_| ())
+}
+
+fn build_input_read_request(
+    capability: PackedCapabilityHandle,
+    event: &mut InputEventRecord,
+) -> SyscallRequest {
+    SyscallRequest::input_read(InputReadArguments {
+        capability,
+        event_address: event as *mut InputEventRecord as u64,
+        event_capacity: core::mem::size_of::<InputEventRecord>() as u64,
+    })
+}
+
 pub fn console_write(buffer: &[u8]) -> Result<usize, SyscallError> {
     let value = invoke(SyscallRequest::console_write(ConsoleWriteArguments {
         buffer_address: buffer.as_ptr() as u64,
@@ -259,6 +284,18 @@ pub extern "C" fn phoenix_file_poll(
     invoke_raw(SyscallRequest::file_poll(FilePollArguments {
         descriptor,
         events,
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn phoenix_input_read(
+    capability: PackedCapabilityHandle,
+    event: *mut InputEventRecord,
+) -> RuntimeCallResult {
+    invoke_raw(SyscallRequest::input_read(InputReadArguments {
+        capability,
+        event_address: event as u64,
+        event_capacity: core::mem::size_of::<InputEventRecord>() as u64,
     }))
 }
 
@@ -427,6 +464,7 @@ mod tests {
             errno_from_status(SYSCALL_STATUS_OPERATION_NOT_READY as u64),
             ERRNO_EAGAIN
         );
+        assert_eq!(errno_from_status(SYSCALL_STATUS_ACCESS_DENIED as u64), ERRNO_EACCES);
         assert_eq!(errno_from_status(u64::MAX), ERRNO_EIO);
     }
 
@@ -565,4 +603,14 @@ mod tests {
 
         assert_eq!(run_main_with_info(argument_main, &info), 3);
     }
+    #[test]
+    fn input_wrapper_preserves_capability_and_destination() {
+        let capability = PackedCapabilityHandle::new(3, 9);
+        let mut event = InputEventRecord::EMPTY;
+        let ptr = &mut event as *mut InputEventRecord as u64;
+        let request = build_input_read_request(capability, &mut event);
+        assert_eq!(request.number, phoenix_syscall_abi::SYSCALL_INPUT_READ);
+        assert_eq!(request.arguments, [capability.raw(), ptr, 48, 0, 0, 0]);
+    }
+
 }

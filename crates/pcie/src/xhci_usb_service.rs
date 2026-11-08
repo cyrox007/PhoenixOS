@@ -31,7 +31,11 @@ impl UsbService {
     }
 
     pub fn for_port(&self, port: u8) -> Option<UsbBinding> {
-        self.bindings.iter().flatten().copied().find(|entry| entry.port == port)
+        self.bindings
+            .iter()
+            .flatten()
+            .copied()
+            .find(|entry| entry.port == port)
     }
 
     pub fn for_index(&self, index: usize) -> Option<UsbBinding> {
@@ -53,7 +57,12 @@ impl UsbService {
         if self.for_port(binding.port).is_some() {
             return Err(UsbServiceError::DuplicatePort);
         }
-        if self.bindings.iter().flatten().any(|entry| entry.slot == binding.slot) {
+        if self
+            .bindings
+            .iter()
+            .flatten()
+            .any(|entry| entry.slot == binding.slot)
+        {
             return Err(UsbServiceError::DuplicateSlot);
         }
         let index = self.vacant_index().ok_or(UsbServiceError::NoFreeContext)?;
@@ -63,7 +72,10 @@ impl UsbService {
 
     /// Вызвать только ПОСЛЕ подтверждённой команды Disable Slot.
     pub fn detach(&mut self, port: u8) -> Option<UsbBinding> {
-        let index = self.bindings.iter().position(|entry| entry.is_some_and(|b| b.port == port))?;
+        let index = self
+            .bindings
+            .iter()
+            .position(|entry| entry.is_some_and(|b| b.port == port))?;
         self.bindings[index].take()
     }
 }
@@ -73,11 +85,19 @@ mod tests {
     use super::*;
 
     fn keyboard() -> UsbBinding {
-        UsbBinding { port: 5, slot: 1, protocol: 1 }
+        UsbBinding {
+            port: 5,
+            slot: 1,
+            protocol: 1,
+        }
     }
 
     fn mouse() -> UsbBinding {
-        UsbBinding { port: 6, slot: 2, protocol: 2 }
+        UsbBinding {
+            port: 6,
+            slot: 2,
+            protocol: 2,
+        }
     }
 
     #[test]
@@ -90,19 +110,50 @@ mod tests {
         assert_eq!(service.detach(5), Some(keyboard()));
         assert_eq!(service.active_count(), 1);
         assert_eq!(service.for_port(6), Some(mouse()));
-        assert_eq!(service.attach(UsbBinding { port: 5, slot: 3, protocol: 1 }), Ok(0));
+        assert_eq!(
+            service.attach(UsbBinding {
+                port: 5,
+                slot: 3,
+                protocol: 1
+            }),
+            Ok(0)
+        );
         assert_eq!(service.for_index(1), Some(mouse()));
     }
 
     #[test]
     fn refuses_conflicting_and_out_of_range_bindings() {
         let mut service = UsbService::new();
-        assert_eq!(service.attach(UsbBinding { port: 0, slot: 1, protocol: 1 }), Err(UsbServiceError::InvalidBinding));
+        assert_eq!(
+            service.attach(UsbBinding {
+                port: 0,
+                slot: 1,
+                protocol: 1
+            }),
+            Err(UsbServiceError::InvalidBinding)
+        );
         assert_eq!(service.attach(keyboard()), Ok(0));
-        assert_eq!(service.attach(keyboard()), Err(UsbServiceError::DuplicatePort));
-        assert_eq!(service.attach(UsbBinding { port: 6, slot: 1, protocol: 2 }), Err(UsbServiceError::DuplicateSlot));
+        assert_eq!(
+            service.attach(keyboard()),
+            Err(UsbServiceError::DuplicatePort)
+        );
+        assert_eq!(
+            service.attach(UsbBinding {
+                port: 6,
+                slot: 1,
+                protocol: 2
+            }),
+            Err(UsbServiceError::DuplicateSlot)
+        );
         assert_eq!(service.attach(mouse()), Ok(1));
-        assert_eq!(service.attach(UsbBinding { port: 7, slot: 3, protocol: 1 }), Err(UsbServiceError::NoFreeContext));
+        assert_eq!(
+            service.attach(UsbBinding {
+                port: 7,
+                slot: 3,
+                protocol: 1
+            }),
+            Err(UsbServiceError::NoFreeContext)
+        );
         assert_eq!(service.detach(7), None);
         assert_eq!(service.active_count(), 2);
     }

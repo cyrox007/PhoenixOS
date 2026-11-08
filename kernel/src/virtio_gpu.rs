@@ -93,7 +93,7 @@ pub struct GpuReport {
     pub display_width: u32,
     pub display_height: u32,
     pub completed_commands: u16,
-    pub returned_dma_pages: u64,
+    pub reserved_dma_pages: u64,
     pub pixel_checksum: u64,
 }
 
@@ -519,7 +519,7 @@ fn exercise(
     registers: &MmioWindow,
     layout: VirtioPciLayout,
     arena: &DmaArena,
-) -> Result<GpuReport, GpuRuntimeError> {
+) -> Result<(GpuReport, ControlQueue), GpuRuntimeError> {
     let mut queue = ControlQueue::start(registers, layout, arena)?;
 
     let used_length = queue.submit(
@@ -573,31 +573,20 @@ fn exercise(
         RESP_OK_NODATA,
     )?;
 
-    // Временно удерживаем отрисованный ресурс в устройстве во время
-    // подтверждения вывода; перед возвратом DMA удаляем его явно.
-    queue.submit(
-        registers,
-        arena,
-        GpuRequest::scanout(IMAGE_WIDTH, IMAGE_HEIGHT, false),
-        RESP_OK_NODATA,
-    )?;
-    queue.submit(
-        registers,
-        arena,
-        GpuRequest::detach_backing(),
-        RESP_OK_NODATA,
-    )?;
-    queue.submit(registers, arena, GpuRequest::unref(), RESP_OK_NODATA)?;
-
-    Ok(GpuReport {
-        width: IMAGE_WIDTH,
-        height: IMAGE_HEIGHT,
-        display_width: display.width,
-        display_height: display.height,
-        completed_commands: queue.submitted,
-        returned_dma_pages: DMA_PAGES,
-        pixel_checksum: checksum,
-    })
+    // Оставляем отрисованный ресурс привязанным к экрану, пока ядро
+    // выполняет остальные проверки; реальная остановка произойдёт отдельно.
+    Ok((
+        GpuReport {
+            width: IMAGE_WIDTH,
+            height: IMAGE_HEIGHT,
+            display_width: display.width,
+            display_height: display.height,
+            completed_commands: queue.submitted,
+            reserved_dma_pages: DMA_PAGES,
+            pixel_checksum: checksum,
+        },
+        queue,
+    ))
 }
 
 fn paint_image(arena: &DmaArena) -> u64 {
@@ -624,13 +613,90 @@ fn paint_image(arena: &DmaArena) -> u64 {
     checksum
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuShutdownReport {
+    pub completed_commands: u16,
+    pub returned_dma_pages: u64,
+}
+
+/// Действующий дисплей: владение очередью, видеопамятью и BAR сохраняется
+/// до явного подтверждённого завершения. Драйвер не раздаёт DMA-ссылки.
+pub struct ActiveGpu {
+    registers: MmioWindow,
+    arena: Option<DmaArena>,
+    queue: ControlQueue,
+    layout: VirtioPciLayout,
+    function: PcieFunction,
+    physical_memory_offset: VirtAddr,
+    original_command: u16,
+}
+
+impl ActiveGpu {
+    pub const fn is_running(&self) -> bool {
+        self.arena.is_some()
+    }
+
+    /// Отключает экран, отвязывает память, удаляет ресурс и сбрасывает
+    /// устройство. Даже при отказе отдельной команды DMA освобождается
+    /// только после подтверждённого аппаратного сброса.
+    pub fn shutdown<const N: usize>(
+        &mut self,
+        table: &mut ActivePageTable,
+        frames: &mut SystemFrameAllocator<N>,
+    ) -> Result<GpuShutdownReport, GpuRuntimeError> {
+        let arena = self.arena.as_ref().ok_or(GpuRuntimeError::InvalidStatus)?;
+        let operations = self.queue.submit(
+            &self.registers,
+            arena,
+            GpuRequest::scanout(IMAGE_WIDTH, IMAGE_HEIGHT, false),
+            RESP_OK_NODATA,
+        )
+        .and_then(|_| {
+            self.queue.submit(
+                &self.registers,
+                arena,
+                GpuRequest::detach_backing(),
+                RESP_OK_NODATA,
+            )
+        })
+        .and_then(|_| {
+            self.queue
+                .submit(&self.registers, arena, GpuRequest::unref(), RESP_OK_NODATA)
+        });
+
+        let common = u64::from(self.layout.common.offset);
+        self.registers.write_u8(common + 0x14, 0);
+        wait_reset(&self.registers, common)?;
+
+        let before = frames.free_frames();
+        self.arena
+            .as_mut()
+            .ok_or(GpuRuntimeError::InvalidStatus)?
+            .release(table, frames)?;
+        if frames.free_frames() != before + DMA_PAGES {
+            return Err(GpuRuntimeError::DmaRelease);
+        }
+        self.arena = None;
+        self.registers.unmap(table)?;
+        PciRegisters {
+            physical_memory_offset: self.physical_memory_offset,
+        }
+        .write_command(self.function, self.original_command);
+        operations?;
+        Ok(GpuShutdownReport {
+            completed_commands: self.queue.submitted,
+            returned_dma_pages: DMA_PAGES,
+        })
+    }
+}
+
 #[inline(never)]
 fn run<const N: usize>(
     controller: GraphicsController,
     table: &mut ActivePageTable,
     frames: &mut SystemFrameAllocator<N>,
     physical_memory_offset: VirtAddr,
-) -> Result<GpuReport, GpuRuntimeError> {
+) -> Result<(GpuReport, ActiveGpu), GpuRuntimeError> {
     if controller.profile != GraphicsProfile::VirtioGpu
         || controller.function.vendor_id != VIRTIO_VENDOR_ID
         || controller.function.device_id != VIRTIO_GPU_DEVICE_ID
@@ -663,22 +729,31 @@ fn run<const N: usize>(
         }
     };
 
-    let result = exercise(&registers, layout, &arena);
-    // Сброс обязан завершиться до снятия любого отображения и освобождения
-    // физических страниц, даже если устройство вернуло ошибку команды.
-    let common = u64::from(layout.common.offset);
-    registers.write_u8(common + 0x14, 0);
-    if wait_reset(&registers, common).is_err() {
-        return Err(GpuRuntimeError::UnsafeShutdown);
+    match exercise(&registers, layout, &arena) {
+        Ok((report, queue)) => Ok((
+            report,
+            ActiveGpu {
+                registers,
+                arena: Some(arena),
+                queue,
+                layout,
+                function: controller.function,
+                physical_memory_offset,
+                original_command,
+            },
+        )),
+        Err(error) => {
+            // При ошибке очереди никакая команда к ней не возвращается.
+            // Сброс и подтверждение освобождают DMA от действий устройства.
+            let common = u64::from(layout.common.offset);
+            registers.write_u8(common + 0x14, 0);
+            wait_reset(&registers, common)?;
+            arena.release(table, frames)?;
+            registers.unmap(table)?;
+            pci.write_command(controller.function, original_command);
+            Err(error)
+        }
     }
-    let before = frames.free_frames();
-    arena.release(table, frames)?;
-    if frames.free_frames() != before + DMA_PAGES {
-        return Err(GpuRuntimeError::DmaRelease);
-    }
-    registers.unmap(table)?;
-    pci.write_command(controller.function, original_command);
-    result
 }
 
 struct StartContext<'a, const N: usize> {
@@ -687,6 +762,7 @@ struct StartContext<'a, const N: usize> {
     frames: &'a mut SystemFrameAllocator<N>,
     physical_memory_offset: VirtAddr,
     report: Option<GpuReport>,
+    active: Option<ActiveGpu>,
     failure: Option<GpuRuntimeError>,
 }
 
@@ -703,8 +779,9 @@ fn start_driver<const N: usize>(
         context.frames,
         context.physical_memory_offset,
     ) {
-        Ok(report) => {
+        Ok((report, active)) => {
             context.report = Some(report);
+            context.active = Some(active);
             Ok(())
         }
         Err(error) => {
@@ -715,19 +792,19 @@ fn start_driver<const N: usize>(
 }
 
 /// Запускает действительный графический драйвер через единый реестр.
-/// После полной проверки возвращает управление UEFI (переход к постоянному
-/// владению экраном и компоновщику — отдельные пункты плана).
+/// Временно удерживает виртуальный экран после инициализации. Передача
+/// владения физической панели AMD и компоновщику — отдельные пункты плана.
 ///
 /// # Безопасность
 ///
 /// Только профиль QEMU/KVM с непосредственной адресацией DMA без IOMMU.
 /// Доступ к виртуальному MMIO эксклюзивен; реальное оборудование запрещено.
-pub unsafe fn self_test<const N: usize>(
+pub unsafe fn start<const N: usize>(
     controller: GraphicsController,
     table: &mut ActivePageTable,
     frames: &mut SystemFrameAllocator<N>,
     physical_memory_offset: VirtAddr,
-) -> Result<(DriverLaunch, GpuReport), GpuRuntimeError> {
+) -> Result<(DriverLaunch, GpuReport, ActiveGpu), GpuRuntimeError> {
     let mut registry = DriverRegistry::<1, ContextRegisteredDriver<StartContext<'_, N>>>::new();
     registry
         .register(ContextRegisteredDriver {
@@ -751,6 +828,7 @@ pub unsafe fn self_test<const N: usize>(
         frames,
         physical_memory_offset,
         report: None,
+        active: None,
         failure: None,
     };
     let launch = registry.start_best_with_context(controller.function, &mut context);
@@ -759,5 +837,6 @@ pub unsafe fn self_test<const N: usize>(
     }
     let launch = launch.map_err(GpuRuntimeError::Registry)?;
     let report = context.report.ok_or(GpuRuntimeError::MissingReport)?;
-    Ok((launch, report))
+    let active = context.active.ok_or(GpuRuntimeError::MissingReport)?;
+    Ok((launch, report, active))
 }

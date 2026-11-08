@@ -13,8 +13,8 @@ use phoenix_pcie::usb_descriptors::{self, DescriptorError};
 use phoenix_pcie::xhci_capabilities::XhciCapabilities;
 use phoenix_pcie::xhci_control::{self, OperationalRegisters};
 use phoenix_pcie::xhci_session::{self, EventCursor, SessionDevice};
-use x86_64::structures::paging::{PhysFrame, Size4KiB};
 use x86_64::VirtAddr;
+use x86_64::structures::paging::{PhysFrame, Size4KiB};
 
 const PAGE_BYTES: u64 = 4096;
 const PAGE_COUNT: u64 = xhci_session::DMA_PAGE_COUNT;
@@ -559,15 +559,7 @@ pub unsafe fn start_pair<const N: usize, R: OperationalRegisters>(
     first_speed: u8,
     second_port: u8,
     second_speed: u8,
-) -> Result<
-    (
-        CommandReport,
-        CommandReport,
-        RetainedSlotsReport,
-        ActiveDma,
-    ),
-    CommandError,
-> {
+) -> Result<(CommandReport, CommandReport, RetainedSlotsReport, ActiveDma), CommandError> {
     let first = frames
         .allocate_contiguous_below_4k(PAGE_COUNT, 1, 0xffff_ffff)
         .ok_or(CommandError::NoFrames)?;

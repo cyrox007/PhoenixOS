@@ -12,6 +12,7 @@ mod elf_user_loader;
 mod file_user_memory;
 mod heap;
 mod ipc_user_memory;
+mod input_service;
 mod pcie;
 mod process_space;
 mod qemu;
@@ -144,6 +145,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     if !arch::x86_64::syscall::file_dispatch_self_test() {
         panic!("файловые системные вызовы не прошли проверку диспетчера");
     }
+    if !arch::x86_64::syscall::input_dispatch_self_test() {
+        panic!("системный вызов ввода не прошёл проверку аргументов и контекста");
+    }
+    serial::line(&mut out, "INFO", format_args!("input syscall dispatch self-test: OK"));
     serial::line(
         &mut out,
         "INFO",
@@ -577,6 +582,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             .expect("ошибка обслуживания USB-порта");
         match step {
             xhci_mmio::ServiceResult::Detached(binding) => {
+                input_service::publish_device(binding.slot, false);
                 assert_eq!(binding.protocol, 1, "должна отключиться клавиатура");
                 assert_eq!(active_xhci.connected_count(), 1);
                 assert_eq!(
@@ -598,6 +604,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
                 );
             }
             xhci_mmio::ServiceResult::Attached(binding) => {
+                input_service::publish_device(binding.slot, true);
                 assert!(detached, "USB-устройство появилось до проверки отключения");
                 assert_eq!(binding.protocol, 1, "должна подключиться клавиатура");
                 assert_eq!(active_xhci.connected_count(), 2);
@@ -668,6 +675,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             .expect("ошибка чтения HID-отчёта в QEMU");
         match step {
             xhci_mmio::ServiceResult::Hid(InputEvent::Key(key)) => {
+                let source = active_xhci
+                    .binding_for_port(keyboard_port)
+                    .expect("событие клавиатуры без действительного устройства")
+                    .slot;
+                input_service::publish_hid(source, InputEvent::Key(key));
                 if key.usage != 4 {
                     continue;
                 }
@@ -689,6 +701,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
                 }
             }
             xhci_mmio::ServiceResult::Hid(InputEvent::Mouse(report)) => {
+                input_service::publish_hid(retained.second_slot, InputEvent::Mouse(report));
                 if report.delta_x != 0 || report.delta_y != 0 {
                     mouse_move = true;
                     serial::line(
@@ -713,6 +726,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         "не получены отчёты клавиатуры и мыши"
     );
     serial::line(&mut out, "INFO", format_args!("xhci hid reports: OK"));
+    if input_service::with_events(|queue| queue.len()) != 5 {
+        panic!("общая очередь не сохранила пять реальных событий ввода");
+    }
+    serial::line(&mut out, "INFO", format_args!("input queue from xhci: OK count=5"));
 
     let free_before_shutdown = frames.free_frames();
     active_xhci

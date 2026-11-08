@@ -13,6 +13,7 @@ mod file_user_memory;
 mod heap;
 mod input_service;
 mod ipc_user_memory;
+mod nvme_admin;
 mod nvme_driver;
 mod nvme_mmio;
 mod pcie;
@@ -340,6 +341,48 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         ),
     );
     serial::line(&mut out, "INFO", format_args!("nvme read-only probe: OK"));
+
+    // Запускаем собственные административные очереди после штатного
+    // отключения контроллера, оставшегося в состоянии UEFI. Все три
+    // закреплённые страницы DMA возвращаются до запуска xHCI.
+    let nvme_admin = unsafe { nvme_admin::self_test(nvme, &mut page_table, &mut frames) }
+        .expect("административные очереди NVMe не завершили аппаратные команды");
+    assert_eq!(nvme_admin.queue_depth, 16);
+    assert_eq!(nvme_admin.completed_commands, 2);
+    assert_eq!(nvme_admin.controller_vendor, nvme.function.vendor_id);
+    assert!(nvme_admin.namespace_blocks > 0);
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "nvme admin queues: OK depth={} completed={} dma_pages={}",
+            nvme_admin.queue_depth, nvme_admin.completed_commands, nvme_admin.returned_dma_pages
+        ),
+    );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "nvme identify controller: OK vendor={:04x}",
+            nvme_admin.controller_vendor
+        ),
+    );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "nvme identify namespace: OK blocks={}",
+            nvme_admin.namespace_blocks
+        ),
+    );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "nvme admin shutdown: OK pages={}",
+            nvme_admin.returned_dma_pages
+        ),
+    );
 
     // Реальный запуск выбранного драйвера с ресурсами ядра.
     let (launch, (capabilities, reset, command, second, ports, retained), mut active_xhci) =

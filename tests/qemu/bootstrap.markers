@@ -4,6 +4,8 @@ exception: breakpoint
 acpi platform discovery: OK
 pcie ecam enumeration: OK
 graphics profile discovery: OK profile=virtio-gpu vendor=1af4 id=1050
+virtio gpu 2d: OK width=128 height=128
+virtio gpu shutdown: OK pages=20
 xhci pcie discovery: OK
 nvme pcie discovery: OK
 nvme driver registry probe: OK

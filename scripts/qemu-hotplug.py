@@ -135,8 +135,8 @@ def build_qemu_command(image, code, vars_path, nvme_image, path):
     return [
         "qemu-system-x86_64",
         "-machine", "q35,accel=kvm",
-        # Не создавать старые устройства по умолчанию: дисковый путь
-        # задаётся явно через виртуальную PCI-шину VirtIO.
+        # Не создавать старые устройства по умолчанию: загрузочный диск
+        # привязан к отдельному контроллеру NVMe, не к IDE/PATA.
         "-nodefaults",
         "-cpu", "host",
         "-m", "512M",
@@ -159,7 +159,7 @@ def build_qemu_command(image, code, vars_path, nvme_image, path):
         "-drive", f"if=pflash,format=raw,unit=0,file={code},readonly=on",
         "-drive", f"if=pflash,format=raw,unit=1,file={vars_path}",
         "-drive", f"if=none,id=phoenix-boot,format=raw,file={image},readonly=on",
-        "-device", "virtio-blk-pci,id=phoenix-boot-disk,drive=phoenix-boot,bootindex=1",
+        "-device", "nvme,id=phoenix-boot-nvme,serial=PhoenixBoot01,drive=phoenix-boot,bootindex=1",
     ]
 
 
@@ -205,14 +205,14 @@ def validate_modern_qemu_profile(arguments):
     if any(name in device for device in devices for name in legacy_names):
         raise ValueError("Обнаружен устаревший контроллер в явной конфигурации")
 
-    required_devices = ("virtio-blk-pci", "nvme", "qemu-xhci")
+    required_devices = ("nvme", "qemu-xhci")
     if any(not any(device.startswith(name) for device in devices) for name in required_devices):
-        raise ValueError("Требуются VirtIO-блок, NVMe и xHCI")
+        raise ValueError("Требуются NVMe и xHCI")
 
     if not any("id=phoenix-boot" in drive and "if=none" in drive for drive in drives):
-        raise ValueError("Загрузочный образ должен идти через VirtIO, не через IDE")
-    if not any(device.startswith("virtio-blk-pci") and "bootindex=1" in device for device in devices):
-        raise ValueError("Не указан явный загрузочный VirtIO-контроллер")
+        raise ValueError("Загрузочный образ должен идти через NVMe, не через IDE")
+    if not any(device.startswith("nvme") and "drive=phoenix-boot" in device and "bootindex=1" in device for device in devices):
+        raise ValueError("Не указан явный загрузочный NVMe-контроллер")
 
 
 def main():

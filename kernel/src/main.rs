@@ -1050,6 +1050,37 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     }
     serial::line(&mut out, "INFO", format_args!("input userspace app: OK"));
 
+    // Поздний штатный кадр выводится до длительных USB-испытаний:
+    // монитор QEMU успевает снять его, пока GPU остаётся активным.
+    display_route
+        .native_access()
+        .expect("штатный вывод отключён до завершения испытаний");
+    let complete_commands = match active_gpu.present_scene(virtio_gpu::NativeScene::Complete) {
+        Ok(commands) => commands,
+        Err(error) => {
+            let _ = active_gpu.shutdown(&mut page_table, &mut frames);
+            display_route.recover();
+            render_firmware_emergency(boot_info, &mut out, &display_route);
+            panic!("повторное обновление штатного экрана завершилось ошибкой: {error:?}");
+        }
+    };
+    assert_eq!(complete_commands, 10);
+    assert_eq!(
+        boot_info.framebuffer.as_ref().map(firmware_sample),
+        firmware_checkpoint,
+        "буфер GOP изменился во время штатного вывода"
+    );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("graphics native present: OK phase=complete commands={complete_commands}"),
+    );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("graphics gop preserved: OK phase=complete"),
+    );
+
     let keyboard_slot = active_xhci
         .binding_for_port(keyboard_port)
         .expect("перед запуском службы клавиатура должна быть подключена")
@@ -1101,35 +1132,6 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!("xhci scheduled dma shutdown: OK pages={}", retained.pages),
     );
 
-    display_route
-        .native_access()
-        .expect("штатный вывод отключён до завершения испытаний");
-    let complete_commands = match active_gpu.present_scene(virtio_gpu::NativeScene::Complete) {
-        Ok(commands) => commands,
-        Err(error) => {
-            let _ = active_gpu.shutdown(&mut page_table, &mut frames);
-            display_route.recover();
-            render_firmware_emergency(boot_info, &mut out, &display_route);
-            panic!("повторное обновление штатного экрана завершилось ошибкой: {error:?}");
-        }
-    };
-    assert_eq!(complete_commands, 10);
-    assert_eq!(
-        boot_info.framebuffer.as_ref().map(firmware_sample),
-        firmware_checkpoint,
-        "буфер GOP изменился во время штатного вывода"
-    );
-    serial::line(
-        &mut out,
-        "INFO",
-        format_args!("graphics native present: OK phase=complete commands={complete_commands}"),
-    );
-    serial::line(
-        &mut out,
-        "INFO",
-        format_args!("graphics gop preserved: OK phase=complete"),
-    );
-
     // После проверки реального экрана монитором QEMU завершаем сессию
     // GPU. В отличие от обычного объекта драйвер обязан подтвердить сброс
     // до возврата страниц памяти устройства в системный распределитель.
@@ -1151,6 +1153,17 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // в штатной фазе GOP не получает никаких записей.
     display_route.recover();
     render_firmware_emergency(boot_info, &mut out, &display_route);
+    if let Some(previous) = firmware_checkpoint {
+        let recovered = boot_info
+            .framebuffer
+            .as_ref()
+            .map(firmware_sample)
+            .expect("ранее доступный GOP исчез после остановки GPU");
+        assert_ne!(
+            recovered, previous,
+            "запасной буфер GOP не получил аварийное изображение"
+        );
+    }
     serial::line(
         &mut out,
         "INFO",

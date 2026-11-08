@@ -754,11 +754,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         .binding_for_port(keyboard_port)
         .expect("перед запуском службы клавиатура должна быть подключена")
         .slot;
-    let scheduled = xhci_scheduled_service_self_test(
-        &mut active_xhci,
-        keyboard_slot,
-        retained.second_slot,
-    );
+    let scheduled =
+        xhci_scheduled_service_self_test(&mut active_xhci, keyboard_slot, retained.second_slot);
     assert_eq!(scheduled.detached, 1);
     assert_eq!(scheduled.attached, 1);
     assert_eq!(scheduled.pressed, 1);
@@ -824,9 +821,8 @@ fn xhci_scheduled_service_self_test(
         mouse_slot,
     ));
     let argument = &*control as *const xhci_service::UsbServiceControl as usize;
-    let mut manager = thread_manager::ThreadManager::<
-        { thread_manager::KERNEL_THREAD_CAPACITY },
-    >::new();
+    let mut manager =
+        thread_manager::ThreadManager::<{ thread_manager::KERNEL_THREAD_CAPACITY }>::new();
     let worker = manager
         .spawn_preemptive_returning(xhci_service::service_thread, argument, 1)
         .expect("не удалось создать поток USB-службы");
@@ -886,7 +882,10 @@ fn xhci_scheduled_service_self_test(
         "ошибка аппаратного планировщика USB"
     );
     assert!(report.worker_polls > 4);
-    assert!(report.idle_polls > 0, "служба не выполняла экономного ожидания");
+    assert!(
+        report.idle_polls > 0,
+        "служба не выполняла экономного ожидания"
+    );
     assert!(
         report.supervisor_ticks > 1,
         "второй поток не выполнялся одновременно со службой USB"

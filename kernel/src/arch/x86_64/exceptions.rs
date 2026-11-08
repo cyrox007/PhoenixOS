@@ -239,6 +239,7 @@ fn build_idt() -> InterruptDescriptorTable {
     idt.general_protection_fault
         .set_handler_fn(general_protection_fault_handler);
     idt[apic::SPURIOUS_VECTOR].set_handler_fn(apic_spurious_handler);
+    idt[apic::REFERENCE_EDU_VECTOR].set_handler_fn(crate::reference_edu::interrupt_handler);
 
     unsafe {
         idt[apic::TIMER_VECTOR]

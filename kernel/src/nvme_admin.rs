@@ -583,7 +583,8 @@ impl BlockDevice for NvmeBlockDevice<'_> {
                 .checked_add((offset * MAX_IO_BYTES / BLOCK_BYTES) as u64)
                 .ok_or(BlockError::ArithmeticOverflow)?;
             for (index, bytes) in chunk.chunks_exact(4).enumerate() {
-                let word = u32::from_le_bytes(bytes.try_into().map_err(|_| BlockError::BackendFailure)?);
+                let word =
+                    u32::from_le_bytes(bytes.try_into().map_err(|_| BlockError::BackendFailure)?);
                 self.dma.write(IO_DATA_PAGE + index * 4, word);
             }
             self.transfer(block, (chunk.len() / BLOCK_BYTES) as u16, true)?;

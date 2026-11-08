@@ -390,7 +390,9 @@ fn execute_identify(
     let result = AdminCompletion::decode(completion, command_id, expected_phase)
         .map_err(AdminRuntimeError::Protocol)?;
     if result.submission_head != cursor.submission_tail() {
-        return Err(AdminRuntimeError::Protocol(AdminQueueError::InvalidCompletion));
+        return Err(AdminRuntimeError::Protocol(
+            AdminQueueError::InvalidCompletion,
+        ));
     }
     // Оповещаем устройство об обработанном завершении до новой команды.
     cursor.completed();
@@ -409,8 +411,7 @@ fn exercise(
     max_entries: u32,
 ) -> Result<AdminTestReport, AdminRuntimeError> {
     enable(regs, arena, max_entries)?;
-    let mut cursor = AdminQueueCursor::new(QUEUE_DEPTH)
-        .map_err(AdminRuntimeError::Protocol)?;
+    let mut cursor = AdminQueueCursor::new(QUEUE_DEPTH).map_err(AdminRuntimeError::Protocol)?;
     execute_identify(regs, arena, &mut cursor, true)?;
     let vendor = arena.read((2 * PAGE_SIZE) as usize) as u16;
     if vendor != expected_vendor {
@@ -465,8 +466,8 @@ pub unsafe fn self_test<const N: usize>(
             return Err(error);
         }
     };
-    let capabilities = nvme::read_capabilities(&registers)
-        .map_err(|_| AdminRuntimeError::InvalidQueueParameters);
+    let capabilities =
+        nvme::read_capabilities(&registers).map_err(|_| AdminRuntimeError::InvalidQueueParameters);
     let outcome = capabilities.and_then(|cap| {
         if cap.minimum_page_size != PAGE_SIZE
             || cap.doorbell_stride_bytes > (PAGE_SIZE - 4) as u32

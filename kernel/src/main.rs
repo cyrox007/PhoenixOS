@@ -479,8 +479,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         .graphics
         .virtio_gpu
         .expect("в проверочном профиле QEMU требуется VirtIO-GPU");
-    let (gpu_launch, gpu_report) = unsafe {
-        virtio_gpu::self_test(
+    let (gpu_launch, gpu_report, mut active_gpu) = unsafe {
+        virtio_gpu::start(
             gpu_controller,
             &mut page_table,
             &mut frames,
@@ -491,8 +491,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     assert_eq!(gpu_launch.name, "virtio-gpu-2d");
     assert_eq!(gpu_report.width, 128);
     assert_eq!(gpu_report.height, 128);
-    assert_eq!(gpu_report.completed_commands, 9);
-    assert_eq!(gpu_report.returned_dma_pages, 20);
+    assert_eq!(gpu_report.completed_commands, 6);
+    assert_eq!(gpu_report.reserved_dma_pages, 20);
+    assert!(active_gpu.is_running());
     assert!(gpu_report.pixel_checksum > 0);
     serial::line(
         &mut out,
@@ -510,10 +511,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial::line(
         &mut out,
         "INFO",
-        format_args!(
-            "virtio gpu shutdown: OK pages={}",
-            gpu_report.returned_dma_pages
-        ),
+        format_args!("virtio gpu active: OK dma_pages={}", gpu_report.reserved_dma_pages),
     );
 
     // Реальный запуск выбранного драйвера с ресурсами ядра.
@@ -1035,6 +1033,24 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         &mut out,
         "INFO",
         format_args!("xhci scheduled dma shutdown: OK pages={}", retained.pages),
+    );
+
+    // После проверки реального экрана монитором QEMU завершаем сессию
+    // GPU. В отличие от обычного объекта драйвер обязан подтвердить сброс
+    // до возврата страниц памяти устройства в системный распределитель.
+    let gpu_shutdown = active_gpu
+        .shutdown(&mut page_table, &mut frames)
+        .expect("VirtIO-GPU не смог безопасно остановить графический сеанс");
+    assert_eq!(gpu_shutdown.completed_commands, 9);
+    assert_eq!(gpu_shutdown.returned_dma_pages, 20);
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "virtio gpu shutdown: OK pages={} commands={}",
+            gpu_shutdown.returned_dma_pages,
+            gpu_shutdown.completed_commands
+        ),
     );
 
     serial::line(&mut out, "INFO", format_args!("bootstrap: OK"));

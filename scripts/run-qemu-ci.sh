@@ -47,7 +47,15 @@ fi
 # Управляемая проверка: QEMU отключает и повторно подключает клавиатуру
 # после сигнала готовности из ядра. Монитор работает отдельным UNIX-сокетом.
 set +e
-timeout -k 5s 30s sudo python3 scripts/qemu-hotplug.py "$IMAGE" "$OVMF_CODE" "$vars_copy" "$serial_log"
+# Виртуальная машина загружает несколько устройств и проверяет два цикла
+# USB-переподключения, DMA, NVMe и снимки графики. 30 секунд недостаточно
+# на нагруженных исполнителях CI; таймаут остаётся конечным и настраиваемым.
+QEMU_TIMEOUT_SECONDS="${PHOENIXOS_QEMU_TIMEOUT_SECONDS:-90}"
+if [[ ! "$QEMU_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Некорректное время ожидания QEMU: $QEMU_TIMEOUT_SECONDS" >&2
+  exit 2
+fi
+timeout -k 5s "${QEMU_TIMEOUT_SECONDS}s" sudo python3 scripts/qemu-hotplug.py "$IMAGE" "$OVMF_CODE" "$vars_copy" "$serial_log"
 status=$?
 set -e
 

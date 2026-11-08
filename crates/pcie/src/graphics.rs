@@ -35,9 +35,9 @@ impl GraphicsProfile {
         }
     }
 
-    /// На этом этапе ни один профиль не имеет собственного драйвера вывода.
+    /// Пока собственный драйвер есть только у виртуального профиля QEMU.
     pub const fn driver_ready(self) -> bool {
-        false
+        matches!(self, Self::VirtioGpu)
     }
 }
 
@@ -68,6 +68,107 @@ impl GraphicsController {
             GraphicsProfile::NvidiaGtx1650 => subsystem.device_id == ASUS_NVIDIA_SUBSYSTEM_ID,
             GraphicsProfile::VirtioGpu => false,
         }
+    }
+}
+
+/// Политика владения графическим выводом. Не выдаёт права на физический
+/// видеоконтроллер: передача относится только к выбранному виртуальному
+/// устройству и прекращает обычную запись в ранний буфер GOP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphicsOutputPhase {
+    FirmwareEarly,
+    DriverStarting,
+    DriverActive,
+    EmergencyFirmware,
+    DriverStopped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphicsOutputError {
+    UnsupportedProfile,
+    InvalidTransition,
+    DriverNotReady,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GraphicsOutputHandoff {
+    phase: GraphicsOutputPhase,
+    target: Option<GraphicsProfile>,
+}
+
+impl GraphicsOutputHandoff {
+    pub const fn new() -> Self {
+        Self {
+            phase: GraphicsOutputPhase::FirmwareEarly,
+            target: None,
+        }
+    }
+
+    pub const fn phase(self) -> GraphicsOutputPhase {
+        self.phase
+    }
+
+    /// Обычный вывод через GOP допустим только до запуска штатного драйвера.
+    /// В аварийной фазе разрешена только отдельная диагностическая запись.
+    pub const fn firmware_boot_allowed(self) -> bool {
+        matches!(self.phase, GraphicsOutputPhase::FirmwareEarly)
+    }
+
+    pub const fn firmware_emergency_allowed(self) -> bool {
+        matches!(self.phase, GraphicsOutputPhase::EmergencyFirmware)
+    }
+
+    pub const fn native_output_allowed(self) -> bool {
+        matches!(self.phase, GraphicsOutputPhase::DriverActive)
+    }
+
+    pub fn begin(&mut self, profile: GraphicsProfile) -> Result<(), GraphicsOutputError> {
+        if self.phase != GraphicsOutputPhase::FirmwareEarly {
+            return Err(GraphicsOutputError::InvalidTransition);
+        }
+        if !profile.driver_ready() {
+            return Err(GraphicsOutputError::UnsupportedProfile);
+        }
+        self.target = Some(profile);
+        self.phase = GraphicsOutputPhase::DriverStarting;
+        Ok(())
+    }
+
+    /// Вызывать исключительно после подтверждения работающего устройства.
+    pub fn activate(&mut self, ready: bool) -> Result<(), GraphicsOutputError> {
+        if self.phase != GraphicsOutputPhase::DriverStarting {
+            return Err(GraphicsOutputError::InvalidTransition);
+        }
+        if !ready {
+            return Err(GraphicsOutputError::DriverNotReady);
+        }
+        self.phase = GraphicsOutputPhase::DriverActive;
+        Ok(())
+    }
+
+    /// После отказа GOP разрешён лишь как аварийный экран, а не как
+    /// параллельный рабочий вывод. Не переинициализирует физический GPU.
+    pub fn emergency(&mut self) -> Result<(), GraphicsOutputError> {
+        if !matches!(
+            self.phase,
+            GraphicsOutputPhase::DriverStarting | GraphicsOutputPhase::DriverActive
+        ) {
+            return Err(GraphicsOutputError::InvalidTransition);
+        }
+        self.phase = GraphicsOutputPhase::EmergencyFirmware;
+        Ok(())
+    }
+
+    /// Подтверждение остановки и возврата ресурсов устройства.
+    pub fn stop(&mut self, stopped: bool) -> Result<(), GraphicsOutputError> {
+        if self.phase != GraphicsOutputPhase::DriverActive {
+            return Err(GraphicsOutputError::InvalidTransition);
+        }
+        if !stopped {
+            return Err(GraphicsOutputError::DriverNotReady);
+        }
+        self.phase = GraphicsOutputPhase::DriverStopped;
+        Ok(())
     }
 }
 
@@ -152,9 +253,12 @@ impl GraphicsInventory {
         }
     }
 
-    /// Пока нет штатного драйвера, изображение остаётся за прошивкой.
+    /// Физический профиль без штатного драйвера оставляет ранний GOP.
     pub const fn firmware_output_required(self) -> bool {
-        true
+        match self.preferred_target() {
+            Some(controller) => !controller.profile.driver_ready(),
+            None => true,
+        }
     }
 }
 
@@ -219,6 +323,50 @@ mod tests {
     }
 
     #[test]
+    fn firmware_to_virtual_driver_to_shutdown_is_one_way() {
+        let mut handoff = GraphicsOutputHandoff::new();
+        assert!(handoff.firmware_boot_allowed());
+        assert!(!handoff.native_output_allowed());
+        assert_eq!(handoff.activate(true), Err(GraphicsOutputError::InvalidTransition));
+        assert_eq!(handoff.begin(GraphicsProfile::AmdCezanne), Err(GraphicsOutputError::UnsupportedProfile));
+        handoff.begin(GraphicsProfile::VirtioGpu).unwrap();
+        assert!(!handoff.firmware_boot_allowed());
+        assert_eq!(handoff.activate(false), Err(GraphicsOutputError::DriverNotReady));
+        handoff.activate(true).unwrap();
+        assert!(handoff.native_output_allowed());
+        assert!(!handoff.firmware_boot_allowed());
+        assert!(!handoff.firmware_emergency_allowed());
+        assert_eq!(handoff.stop(false), Err(GraphicsOutputError::DriverNotReady));
+        handoff.stop(true).unwrap();
+        assert_eq!(handoff.phase(), GraphicsOutputPhase::DriverStopped);
+        assert!(!handoff.firmware_boot_allowed());
+        assert!(!handoff.native_output_allowed());
+        assert_eq!(handoff.begin(GraphicsProfile::VirtioGpu), Err(GraphicsOutputError::InvalidTransition));
+    }
+
+    #[test]
+    fn failure_enters_emergency_without_reopening_normal_gop() {
+        let mut handoff = GraphicsOutputHandoff::new();
+        handoff.begin(GraphicsProfile::VirtioGpu).unwrap();
+        handoff.emergency().unwrap();
+        assert!(handoff.firmware_emergency_allowed());
+        assert!(!handoff.firmware_boot_allowed());
+        assert!(!handoff.native_output_allowed());
+        assert_eq!(handoff.activate(true), Err(GraphicsOutputError::InvalidTransition));
+        assert_eq!(handoff.stop(true), Err(GraphicsOutputError::InvalidTransition));
+    }
+
+    #[test]
+    fn running_driver_failure_can_enable_emergency_only() {
+        let mut handoff = GraphicsOutputHandoff::new();
+        handoff.begin(GraphicsProfile::VirtioGpu).unwrap();
+        handoff.activate(true).unwrap();
+        handoff.emergency().unwrap();
+        assert_eq!(handoff.phase(), GraphicsOutputPhase::EmergencyFirmware);
+        assert!(handoff.firmware_emergency_allowed());
+    }
+
+    #[test]
     fn recognizes_both_asus_laptop_devices_and_keeps_integrated_first() {
         let mut inventory = GraphicsInventory::empty();
         let amd = pci(AMD_VENDOR_ID, AMD_CEZANNE_DEVICE_ID, DISPLAY_CLASS);
@@ -246,7 +394,8 @@ mod tests {
             Some(GraphicsProfile::VirtioGpu)
         );
         assert!(!inventory.virtio_gpu.unwrap().is_reference_asus());
-        assert!(!GraphicsProfile::VirtioGpu.driver_ready());
+        assert!(GraphicsProfile::VirtioGpu.driver_ready());
+        assert!(!inventory.firmware_output_required());
     }
 
     #[test]

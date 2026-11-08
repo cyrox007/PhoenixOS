@@ -342,6 +342,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     );
     serial::line(&mut out, "INFO", format_args!("nvme read-only probe: OK"));
 
+    // Отказы проверяются на синтетическом источнике регистров: никакие
+    // ошибочные команды не отправляются на реальный накопитель.
+    assert!(phoenix_pcie::nvme_wait::failure_model_checks());
+    serial::line(&mut out, "INFO", format_args!("nvme fault model: OK"));
+
     // Запускаем собственные административные очереди после штатного
     // отключения контроллера, оставшегося в состоянии UEFI. Все шесть
     // закреплённых страниц DMA возвращаются до запуска xHCI.

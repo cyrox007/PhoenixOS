@@ -27,6 +27,7 @@ members = [
     "crates/user-runtime",
     "crates/vfs",
     "userspace/smoke",
+    "userspace/input-probe",
     "userspace/shell",
 ]
 

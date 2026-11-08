@@ -570,6 +570,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     let mut detached = false;
     let mut reattached = false;
+    let mut keyboard_port = 0_u8;
     for _ in 0..120_000_000_u32 {
         let step = active_xhci
             .service_once()
@@ -609,6 +610,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
                     "мышь потеряла слот при повторном подключении"
                 );
                 reattached = true;
+                keyboard_port = binding.port;
                 serial::line(
                     &mut out,
                     "INFO",
@@ -618,7 +620,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
                     ),
                 );
             }
-            xhci_mmio::ServiceResult::Idle | xhci_mmio::ServiceResult::Unchanged(_) => {}
+            xhci_mmio::ServiceResult::Idle
+            | xhci_mmio::ServiceResult::Unchanged(_)
+            | xhci_mmio::ServiceResult::Hid(_) => {}
         }
         if detached && reattached {
             break;
@@ -634,6 +638,78 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         "xHCI остановился во время переподключения"
     );
     serial::line(&mut out, "INFO", format_args!("xhci hotplug service: OK"));
+
+    // Конфигурируем обе точки прерываний после повторного подключения
+    // клавиатуры. Монитор QEMU затем отправит реальные события HID.
+    let keyboard_hid = active_xhci
+        .configure_hid_for_port(keyboard_port)
+        .expect("не удалось активировать HID-клавиатуру");
+    let mouse_hid = active_xhci
+        .configure_hid_for_port(ports.second_connected_port)
+        .expect("не удалось активировать HID-мышь");
+    assert_eq!((keyboard_hid.protocol, mouse_hid.protocol), (1, 2));
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "xhci hid configured: OK keyboard_ep={:#x} mouse_ep={:#x}",
+            keyboard_hid.endpoint_address, mouse_hid.endpoint_address
+        ),
+    );
+    serial::line(&mut out, "INFO", format_args!("xhci hid ready: OK"));
+
+    use phoenix_pcie::usb_hid::InputEvent;
+    let mut pressed = false;
+    let mut released = false;
+    let mut mouse_move = false;
+    for _ in 0..120_000_000_u32 {
+        let step = active_xhci
+            .service_once()
+            .expect("ошибка чтения HID-отчёта в QEMU");
+        match step {
+            xhci_mmio::ServiceResult::Hid(InputEvent::Key(key)) => {
+                if key.usage != 4 {
+                    continue;
+                }
+                if key.pressed && !pressed {
+                    pressed = true;
+                    serial::line(
+                        &mut out,
+                        "INFO",
+                        format_args!("xhci hid key pressed: OK usage={}", key.usage),
+                    );
+                }
+                if !key.pressed && pressed {
+                    released = true;
+                    serial::line(
+                        &mut out,
+                        "INFO",
+                        format_args!("xhci hid key released: OK usage={}", key.usage),
+                    );
+                }
+            }
+            xhci_mmio::ServiceResult::Hid(InputEvent::Mouse(report)) => {
+                if report.delta_x != 0 || report.delta_y != 0 {
+                    mouse_move = true;
+                    serial::line(
+                        &mut out,
+                        "INFO",
+                        format_args!(
+                            "xhci hid mouse moved: OK dx={} dy={}",
+                            report.delta_x, report.delta_y
+                        ),
+                    );
+                }
+            }
+            _ => {}
+        }
+        if pressed && released && mouse_move {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    assert!(pressed && released && mouse_move, "не получены отчёты клавиатуры и мыши");
+    serial::line(&mut out, "INFO", format_args!("xhci hid reports: OK"));
 
     let free_before_shutdown = frames.free_frames();
     active_xhci

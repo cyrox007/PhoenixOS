@@ -130,6 +130,91 @@ class Qmp:
             self.connection.close()
 
 
+def build_qemu_command(image, code, vars_path, nvme_image, path):
+    """Явный набор UEFI и современных виртуальных устройств."""
+    return [
+        "qemu-system-x86_64",
+        "-machine", "q35,accel=kvm",
+        # Не создавать старые устройства по умолчанию: дисковый путь
+        # задаётся явно через виртуальную PCI-шину VirtIO.
+        "-nodefaults",
+        "-cpu", "host",
+        "-m", "512M",
+        "-display", "none",
+        "-serial", "stdio",
+        "-no-reboot",
+        "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        # Второй видеоконтроллер для настоящего перечисления PCIe.
+        # Стандартный UEFI-адаптер остаётся основным до запуска
+        # собственного графического драйвера.
+        "-vga", "std",
+        "-device", "virtio-gpu-pci,id=phoenix-gpu",
+        "-device", "edu,id=phoenix-edu",
+        "-device", "qemu-xhci,id=phoenix-xhci",
+        "-device", "usb-kbd,id=phoenix-keyboard,bus=phoenix-xhci.0",
+        "-device", "usb-mouse,id=phoenix-mouse,bus=phoenix-xhci.0",
+        "-drive", f"file={nvme_image},if=none,id=phoenix-nvm,format=raw",
+        "-device", "nvme,id=phoenix-nvme,serial=PhoenixNVM01,drive=phoenix-nvm",
+        "-qmp", f"unix:{path},server=on,wait=off",
+        "-drive", f"if=pflash,format=raw,unit=0,file={code},readonly=on",
+        "-drive", f"if=pflash,format=raw,unit=1,file={vars_path}",
+        "-drive", f"if=none,id=phoenix-boot,format=raw,file={image},readonly=on",
+        "-device", "virtio-blk-pci,id=phoenix-boot-disk,drive=phoenix-boot,bootindex=1",
+    ]
+
+
+def validate_modern_qemu_profile(arguments):
+    """Отвергнуть неявный IDE, BIOS/CSM и старые USB-контроллеры.
+
+    Проверяет фактический список параметров, подаваемый QEMU, а не
+    комментарии в исходниках. Наследуемый PIC самого чипсета остаётся
+    только маскированным и не служит для обработки прерываний.
+    """
+    if "-nodefaults" not in arguments:
+        raise ValueError("Нужен режим QEMU без неявных старых устройств")
+
+    forbidden_options = ("-bios", "-hda", "-hdb", "-hdc", "-hdd", "-fda", "-fdb", "-cdrom")
+    if any(option in arguments for option in forbidden_options):
+        raise ValueError("Запрещён старый способ загрузки BIOS/IDE")
+
+    values = []
+    for index, option in enumerate(arguments[:-1]):
+        if option in ("-drive", "-device", "-machine"):
+            values.append((option, str(arguments[index + 1]).lower()))
+
+    if not any(key == "-machine" and value.startswith("q35,") for key, value in values):
+        raise ValueError("Требуется современная виртуальная плата q35")
+
+    drives = [value for key, value in values if key == "-drive"]
+    devices = [value for key, value in values if key == "-device"]
+    if not drives or not devices:
+        raise ValueError("Не заданы устройства QEMU")
+
+    if any("if=ide" in drive or "if=scsi" in drive or "if=floppy" in drive for drive in drives):
+        raise ValueError("Загрузка с IDE/PATA и устаревших шин запрещена")
+    if any(not ("if=none" in drive or "if=pflash" in drive) for drive in drives):
+        raise ValueError("Каждый накопитель должен иметь явную современную шину")
+    if len([drive for drive in drives if "if=pflash" in drive]) != 2:
+        raise ValueError("UEFI должен использовать две явные области pflash")
+
+    legacy_names = (
+        "ide-hd", "ide-cd", "piix3-ide", "piix4-ide",
+        "usb-uhci", "usb-ohci", "usb-ehci",
+        "ich9-uhci", "ich9-ehci", "i82801b11-bridge", "i8259",
+    )
+    if any(name in device for device in devices for name in legacy_names):
+        raise ValueError("Обнаружен устаревший контроллер в явной конфигурации")
+
+    required_devices = ("virtio-blk-pci", "nvme", "qemu-xhci")
+    if any(not any(device.startswith(name) for device in devices) for name in required_devices):
+        raise ValueError("Требуются VirtIO-блок, NVMe и xHCI")
+
+    if not any("id=phoenix-boot" in drive and "if=none" in drive for drive in drives):
+        raise ValueError("Загрузочный образ должен идти через VirtIO, не через IDE")
+    if not any(device.startswith("virtio-blk-pci") and "bootindex=1" in device for device in devices):
+        raise ValueError("Не указан явный загрузочный VirtIO-контроллер")
+
+
 def main():
     if len(sys.argv) != 5:
         raise SystemExit("Применение: qemu-hotplug.py <образ> <OVMF_CODE> <OVMF_VARS> <журнал>")
@@ -141,35 +226,8 @@ def main():
         nvme_image = Path(directory) / "nvme-test.img"
         with nvme_image.open("wb") as disk:
             disk.truncate(16 * 1024 * 1024)
-        command = [
-            "qemu-system-x86_64",
-            "-machine", "q35,accel=kvm",
-            # Не создавать старые устройства по умолчанию: дисковый путь
-            # задаётся явно через виртуальную PCI-шину VirtIO.
-            "-nodefaults",
-            "-cpu", "host",
-            "-m", "512M",
-            "-display", "none",
-            "-serial", "stdio",
-            "-no-reboot",
-            "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
-            # Второй видеоконтроллер для настоящего перечисления PCIe.
-            # Стандартный UEFI-адаптер остаётся основным до запуска
-            # собственного графического драйвера.
-            "-vga", "std",
-            "-device", "virtio-gpu-pci,id=phoenix-gpu",
-            "-device", "edu,id=phoenix-edu",
-            "-device", "qemu-xhci,id=phoenix-xhci",
-            "-device", "usb-kbd,id=phoenix-keyboard,bus=phoenix-xhci.0",
-            "-device", "usb-mouse,id=phoenix-mouse,bus=phoenix-xhci.0",
-            "-drive", f"file={nvme_image},if=none,id=phoenix-nvm,format=raw",
-            "-device", "nvme,id=phoenix-nvme,serial=PhoenixNVM01,drive=phoenix-nvm",
-            "-qmp", f"unix:{path},server=on,wait=off",
-            "-drive", f"if=pflash,format=raw,unit=0,file={code},readonly=on",
-            "-drive", f"if=pflash,format=raw,unit=1,file={vars_path}",
-            "-drive", f"if=none,id=phoenix-boot,format=raw,file={image},readonly=on",
-            "-device", "virtio-blk-pci,id=phoenix-boot-disk,drive=phoenix-boot,bootindex=1",
-        ]
+        command = build_qemu_command(image, code, vars_path, nvme_image, path)
+        validate_modern_qemu_profile(command)
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,

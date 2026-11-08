@@ -31,6 +31,45 @@ pub trait DmaBufferPlatform: DmaMappingBackend {
     fn free(&mut self, physical: PhysicalAddress, layout: DmaLayout) -> Result<(), DmaError>;
 }
 
+/// Источник закреплённых физических страниц и их процессорского отображения.
+///
+/// Управление адресами устройства этому интерфейсу не принадлежит:
+/// системному распределителю не требуется фиктивная реализация IOMMU.
+/// Для существующих платформ `DmaBufferPlatform` ниже предусмотрен
+/// совместимый переход без изменения их кода.
+pub trait DmaMemoryBackend {
+    fn reserve(&mut self, layout: DmaLayout) -> Result<PhysicalAddress, DmaError>;
+    fn map_cpu(
+        &mut self,
+        physical: PhysicalAddress,
+        layout: DmaLayout,
+    ) -> Result<CpuVirtualAddress, DmaError>;
+    fn unmap_cpu(&mut self, cpu: CpuVirtualAddress, layout: DmaLayout) -> Result<(), DmaError>;
+    fn free(&mut self, physical: PhysicalAddress, layout: DmaLayout) -> Result<(), DmaError>;
+}
+
+impl<P: DmaBufferPlatform> DmaMemoryBackend for P {
+    fn reserve(&mut self, layout: DmaLayout) -> Result<PhysicalAddress, DmaError> {
+        DmaBufferPlatform::reserve(self, layout)
+    }
+
+    fn map_cpu(
+        &mut self,
+        physical: PhysicalAddress,
+        layout: DmaLayout,
+    ) -> Result<CpuVirtualAddress, DmaError> {
+        DmaBufferPlatform::map_cpu(self, physical, layout)
+    }
+
+    fn unmap_cpu(&mut self, cpu: CpuVirtualAddress, layout: DmaLayout) -> Result<(), DmaError> {
+        DmaBufferPlatform::unmap_cpu(self, cpu, layout)
+    }
+
+    fn free(&mut self, physical: PhysicalAddress, layout: DmaLayout) -> Result<(), DmaError> {
+        DmaBufferPlatform::free(self, physical, layout)
+    }
+}
+
 /// Отделяет владение физическими страницами и процессорским отображением
 /// от выбранного механизма выдачи адресов устройству.
 ///
@@ -38,12 +77,12 @@ pub trait DmaBufferPlatform: DmaMappingBackend {
 /// `DmaBuffer`, `DmaRegion` и драйверов, использующих их. Аппаратные
 /// таблицы, очистка кэша и запрет доступа должны обеспечиваться реализацией
 /// `DmaMappingBackend`. При ошибке unmap её состояние остаётся активным.
-pub struct SplitDmaPlatform<'a, M: DmaBufferPlatform, B: DmaMappingBackend> {
+pub struct SplitDmaPlatform<'a, M: DmaMemoryBackend, B: DmaMappingBackend> {
     memory: &'a mut M,
     device_mapper: &'a mut B,
 }
 
-impl<'a, M: DmaBufferPlatform, B: DmaMappingBackend> SplitDmaPlatform<'a, M, B> {
+impl<'a, M: DmaMemoryBackend, B: DmaMappingBackend> SplitDmaPlatform<'a, M, B> {
     pub fn new(memory: &'a mut M, device_mapper: &'a mut B) -> Self {
         Self {
             memory,
@@ -52,7 +91,7 @@ impl<'a, M: DmaBufferPlatform, B: DmaMappingBackend> SplitDmaPlatform<'a, M, B> 
     }
 }
 
-impl<M: DmaBufferPlatform, B: DmaMappingBackend> DmaMappingBackend for SplitDmaPlatform<'_, M, B> {
+impl<M: DmaMemoryBackend, B: DmaMappingBackend> DmaMappingBackend for SplitDmaPlatform<'_, M, B> {
     fn map(
         &mut self,
         physical: PhysicalAddress,
@@ -66,7 +105,7 @@ impl<M: DmaBufferPlatform, B: DmaMappingBackend> DmaMappingBackend for SplitDmaP
     }
 }
 
-impl<M: DmaBufferPlatform, B: DmaMappingBackend> DmaBufferPlatform for SplitDmaPlatform<'_, M, B> {
+impl<M: DmaMemoryBackend, B: DmaMappingBackend> DmaBufferPlatform for SplitDmaPlatform<'_, M, B> {
     fn reserve(&mut self, layout: DmaLayout) -> Result<PhysicalAddress, DmaError> {
         self.memory.reserve(layout)
     }
@@ -125,9 +164,14 @@ impl DmaBuffer {
         let cpu = platform
             .map_cpu(self.physical, self.layout)
             .map_err(DmaBufferError::Backend)?;
-        // Договор платформы требует валидный адрес и отсутствие частично
-        // созданных отображений при Err.
+        // При ошибке адреса сохраняем сведения об отображении, чтобы
+        // вызывающий код смог снять его и вернуть физические страницы.
         self.cpu = Some(cpu);
+        if cpu.value() % self.layout.alignment() != 0
+            || cpu.value().checked_add(self.layout.length() - 1).is_none()
+        {
+            return Err(DmaBufferError::InvalidAddress);
+        }
         Ok(())
     }
 
@@ -140,7 +184,15 @@ impl DmaBuffer {
         }
         let mapping = DeviceMapping::establish(platform, self.physical, self.layout)
             .map_err(DmaBufferError::Mapping)?;
+        // Преобразователь может ошибочно вернуть невыровненный адрес.
+        // Нельзя объявлять буфер готовым к DMA, но нельзя и потерять
+        // владение уже созданным отображением устройства.
+        let cpu = self.cpu.ok_or(DmaBufferError::NotReady)?;
+        let valid = DmaRegion::new(cpu, mapping.device_address(), self.layout).is_ok();
         self.device = Some(mapping);
+        if !valid {
+            return Err(DmaBufferError::InvalidAddress);
+        }
         Ok(())
     }
 

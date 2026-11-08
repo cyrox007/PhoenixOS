@@ -6,6 +6,7 @@
 
 use core::sync::atomic::{Ordering, fence};
 
+use phoenix_block::{BlockDevice, BlockError, BlockGeometry, validate_transfer};
 use phoenix_dma::DmaLayout;
 use phoenix_dma::mapping::{DeviceMapping, DirectDmaAperture, PhysicalAddress, QemuDirectDma};
 use phoenix_memory::SystemFrameAllocator;
@@ -52,8 +53,10 @@ pub enum AdminRuntimeError {
     InvalidControllerIdentity(u16),
     InvalidNamespace,
     InvalidBlockFormat,
+    UnsafeTestDevice,
     DataMismatch,
     Io(IoError),
+    Block(BlockError),
     /// Контроллер не подтвердил остановку. DMA-страницы запрещено возвращать.
     UnsafeShutdown,
 }
@@ -415,28 +418,21 @@ fn execute_identify(
     submit_admin(regs, arena, cursor, command.words)
 }
 
-fn io_transfer(
+const IO_DATA_PAGE: usize = 5 * PAGE_SIZE as usize;
+const BLOCK_BYTES: usize = nvme_io::LOGICAL_BLOCK_BYTES;
+const MAX_IO_BYTES: usize = PAGE_SIZE as usize;
+
+/// Отправка команды в уже созданную рабочую очередь NVMe.
+/// Вызов допустим только при живых MMIO и DMA-отображениях.
+fn submit_io(
     regs: &RegisterWindow,
     arena: &DmaArena,
     cursor: &mut AdminQueueCursor,
-    blocks: u64,
-    lba: u64,
-    write: bool,
     stride: u32,
+    command: IoCommand,
 ) -> Result<(), AdminRuntimeError> {
     const IO_SQ_PAGE: usize = 3 * PAGE_SIZE as usize;
     const IO_CQ_PAGE: usize = 4 * PAGE_SIZE as usize;
-    const IO_DATA_PAGE: usize = 5 * PAGE_SIZE as usize;
-    let command = IoCommand::transfer(
-        cursor.command_id(),
-        write,
-        1,
-        lba,
-        1,
-        blocks,
-        arena.device_start() + IO_DATA_PAGE as u64,
-    )
-    .map_err(AdminRuntimeError::Io)?;
     let base = IO_SQ_PAGE + usize::from(cursor.submission_tail()) * 64;
     for (index, word) in command.words.iter().enumerate() {
         arena.write(base + index * 4, *word);
@@ -479,6 +475,210 @@ fn io_transfer(
     Ok(())
 }
 
+/// NVMe-адаптер к общему блочному контракту. Не владеет DMA/MMIO:
+/// его жизнь ограничена работающим контроллером и очередями.
+struct NvmeBlockDevice<'a> {
+    registers: &'a RegisterWindow,
+    dma: &'a DmaArena,
+    cursor: AdminQueueCursor,
+    geometry: BlockGeometry,
+    doorbell_stride: u32,
+    faulted: bool,
+    completed_commands: u16,
+}
+
+impl<'a> NvmeBlockDevice<'a> {
+    fn new(
+        registers: &'a RegisterWindow,
+        dma: &'a DmaArena,
+        block_count: u64,
+        doorbell_stride: u32,
+    ) -> Result<Self, AdminRuntimeError> {
+        if block_count == 0 {
+            return Err(AdminRuntimeError::InvalidNamespace);
+        }
+        Ok(Self {
+            registers,
+            dma,
+            cursor: AdminQueueCursor::new(nvme_io::IO_QUEUE_DEPTH)
+                .map_err(AdminRuntimeError::Protocol)?,
+            geometry: BlockGeometry {
+                block_size: BLOCK_BYTES,
+                block_count,
+            },
+            doorbell_stride,
+            faulted: false,
+            completed_commands: 0,
+        })
+    }
+
+    fn issue(&mut self, command: IoCommand) -> Result<(), BlockError> {
+        if self.faulted {
+            return Err(BlockError::BackendFailure);
+        }
+        if submit_io(
+            self.registers,
+            self.dma,
+            &mut self.cursor,
+            self.doorbell_stride,
+            command,
+        )
+        .is_err()
+        {
+            // Не продолжаем обращаться к очереди с неподтверждённой командой.
+            self.faulted = true;
+            return Err(BlockError::BackendFailure);
+        }
+        self.completed_commands = self.completed_commands.wrapping_add(1);
+        Ok(())
+    }
+
+    fn transfer(&mut self, lba: u64, count: u16, write: bool) -> Result<(), BlockError> {
+        let command = IoCommand::transfer(
+            self.cursor.command_id(),
+            write,
+            1,
+            lba,
+            count,
+            self.geometry.block_count,
+            self.dma.device_start() + IO_DATA_PAGE as u64,
+        )
+        .map_err(|_| BlockError::BackendFailure)?;
+        self.issue(command)
+    }
+
+    fn completed_commands(&self) -> u16 {
+        self.completed_commands
+    }
+}
+
+impl BlockDevice for NvmeBlockDevice<'_> {
+    fn geometry(&self) -> BlockGeometry {
+        self.geometry
+    }
+
+    fn read_blocks(&mut self, first_block: u64, destination: &mut [u8]) -> Result<(), BlockError> {
+        validate_transfer(self.geometry, first_block, destination.len())?;
+        if self.faulted {
+            return Err(BlockError::BackendFailure);
+        }
+        for (offset, chunk) in destination.chunks_mut(MAX_IO_BYTES).enumerate() {
+            let block = first_block
+                .checked_add((offset * MAX_IO_BYTES / BLOCK_BYTES) as u64)
+                .ok_or(BlockError::ArithmeticOverflow)?;
+            self.transfer(block, (chunk.len() / BLOCK_BYTES) as u16, false)?;
+            for (index, bytes) in chunk.chunks_exact_mut(4).enumerate() {
+                bytes.copy_from_slice(&self.dma.read(IO_DATA_PAGE + index * 4).to_le_bytes());
+            }
+        }
+        Ok(())
+    }
+
+    fn write_blocks(&mut self, first_block: u64, source: &[u8]) -> Result<(), BlockError> {
+        validate_transfer(self.geometry, first_block, source.len())?;
+        if self.faulted {
+            return Err(BlockError::BackendFailure);
+        }
+        for (offset, chunk) in source.chunks(MAX_IO_BYTES).enumerate() {
+            let block = first_block
+                .checked_add((offset * MAX_IO_BYTES / BLOCK_BYTES) as u64)
+                .ok_or(BlockError::ArithmeticOverflow)?;
+            for (index, bytes) in chunk.chunks_exact(4).enumerate() {
+                let word =
+                    u32::from_le_bytes(bytes.try_into().map_err(|_| BlockError::BackendFailure)?);
+                self.dma.write(IO_DATA_PAGE + index * 4, word);
+            }
+            self.transfer(block, (chunk.len() / BLOCK_BYTES) as u16, true)?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), BlockError> {
+        let command = IoCommand::flush(self.cursor.command_id(), 1)
+            .map_err(|_| BlockError::BackendFailure)?;
+        self.issue(command)
+    }
+}
+
+/// Проверяем именно общую границу BlockDevice, а не особый путь к DMA.
+fn verify_block_device<D: BlockDevice>(
+    device: &mut D,
+    first_block: u64,
+) -> Result<u16, AdminRuntimeError> {
+    const TEST_BLOCKS: usize = 10;
+    const TEST_BYTES: usize = TEST_BLOCKS * BLOCK_BYTES;
+
+    if device.geometry().block_size != BLOCK_BYTES {
+        return Err(AdminRuntimeError::InvalidBlockFormat);
+    }
+    let mut original = [0_u8; TEST_BYTES];
+    let mut observed = [0_u8; TEST_BYTES];
+
+    // Ошибочные запросы должны отклоняться до обращения к контроллеру.
+    if device.read_blocks(first_block, &mut [0_u8; BLOCK_BYTES + 1])
+        != Err(BlockError::InvalidBufferLength)
+        || device.write_blocks(device.geometry().block_count - 1, &[0_u8; BLOCK_BYTES * 2])
+            != Err(BlockError::OutOfRange)
+        || device.read_blocks(u64::MAX, &mut [0_u8; BLOCK_BYTES])
+            != Err(BlockError::ArithmeticOverflow)
+    {
+        return Err(AdminRuntimeError::DataMismatch);
+    }
+
+    device
+        .read_blocks(first_block, &mut original)
+        .map_err(AdminRuntimeError::Block)?;
+    for (index, byte) in observed.iter_mut().enumerate() {
+        let block = (index / BLOCK_BYTES) as u8;
+        *byte = (index as u8)
+            .wrapping_mul(37)
+            .wrapping_add(block.wrapping_mul(23))
+            .wrapping_add(11);
+    }
+    device
+        .write_blocks(first_block, &observed)
+        .map_err(AdminRuntimeError::Block)?;
+    device.flush().map_err(AdminRuntimeError::Block)?;
+    observed.fill(0);
+    device
+        .read_blocks(first_block, &mut observed)
+        .map_err(AdminRuntimeError::Block)?;
+    let mut correct = observed.iter().enumerate().all(|(index, byte)| {
+        let block = (index / BLOCK_BYTES) as u8;
+        *byte
+            == (index as u8)
+                .wrapping_mul(37)
+                .wrapping_add(block.wrapping_mul(23))
+                .wrapping_add(11)
+    });
+
+    // Восстановление выполняется даже при ошибке сверки образца.
+    device
+        .write_blocks(first_block, &original)
+        .map_err(AdminRuntimeError::Block)?;
+    device.flush().map_err(AdminRuntimeError::Block)?;
+    observed.fill(0);
+    device
+        .read_blocks(first_block, &mut observed)
+        .map_err(AdminRuntimeError::Block)?;
+    correct &= observed == original;
+
+    // Два дополнительных чтения проверяют повторный оборот колец
+    // с изменением фазового бита на 16-м завершении.
+    for _ in 0..2 {
+        observed.fill(0);
+        device
+            .read_blocks(first_block, &mut observed)
+            .map_err(AdminRuntimeError::Block)?;
+        correct &= observed == original;
+    }
+    device.flush().map_err(AdminRuntimeError::Block)?;
+    if !correct {
+        return Err(AdminRuntimeError::DataMismatch);
+    }
+    Ok((4 * TEST_BLOCKS) as u16)
+}
+
 fn exercise_blocks(
     regs: &RegisterWindow,
     arena: &DmaArena,
@@ -486,53 +686,20 @@ fn exercise_blocks(
     blocks: u64,
     stride: u32,
 ) -> Result<(u16, u16), AdminRuntimeError> {
-    const IO_DATA_PAGE: usize = 5 * PAGE_SIZE as usize;
+    const TEST_BLOCKS: u64 = 10;
+    if blocks < TEST_BLOCKS {
+        return Err(AdminRuntimeError::InvalidNamespace);
+    }
     let cq = IoCommand::create_completion(admin.command_id(), arena.device_start() + 4 * PAGE_SIZE)
         .map_err(AdminRuntimeError::Io)?;
     submit_admin(regs, arena, admin, cq.words)?;
     let sq = IoCommand::create_submission(admin.command_id(), arena.device_start() + 3 * PAGE_SIZE)
         .map_err(AdminRuntimeError::Io)?;
     submit_admin(regs, arena, admin, sq.words)?;
-    let mut io =
-        AdminQueueCursor::new(nvme_io::IO_QUEUE_DEPTH).map_err(AdminRuntimeError::Protocol)?;
-    let lba = blocks - 1;
-    io_transfer(regs, arena, &mut io, blocks, lba, false, stride)?;
-    let mut original = [0_u32; nvme_io::LOGICAL_BLOCK_BYTES / 4];
-    for (index, word) in original.iter_mut().enumerate() {
-        *word = arena.read(IO_DATA_PAGE + index * 4);
-    }
-    for index in 0..original.len() {
-        arena.write(
-            IO_DATA_PAGE + index * 4,
-            0x5048_4f53 ^ (index as u32).wrapping_mul(0x0101_0101),
-        );
-    }
-    io_transfer(regs, arena, &mut io, blocks, lba, true, stride)?;
-    for index in 0..original.len() {
-        arena.write(IO_DATA_PAGE + index * 4, 0);
-    }
-    io_transfer(regs, arena, &mut io, blocks, lba, false, stride)?;
-    let mut valid = true;
-    for index in 0..original.len() {
-        let expected = 0x5048_4f53 ^ (index as u32).wrapping_mul(0x0101_0101);
-        valid &= arena.read(IO_DATA_PAGE + index * 4) == expected;
-    }
-    // Независимо от проверки возвращаем исходное содержимое тестового блока.
-    for (index, word) in original.iter().enumerate() {
-        arena.write(IO_DATA_PAGE + index * 4, *word);
-    }
-    io_transfer(regs, arena, &mut io, blocks, lba, true, stride)?;
-    for index in 0..original.len() {
-        arena.write(IO_DATA_PAGE + index * 4, 0);
-    }
-    io_transfer(regs, arena, &mut io, blocks, lba, false, stride)?;
-    for (index, word) in original.iter().enumerate() {
-        valid &= arena.read(IO_DATA_PAGE + index * 4) == *word;
-    }
-    if !valid {
-        return Err(AdminRuntimeError::DataMismatch);
-    }
-    Ok((5, 2))
+
+    let mut device = NvmeBlockDevice::new(regs, arena, blocks, stride)?;
+    let verified = verify_block_device(&mut device, blocks - TEST_BLOCKS)?;
+    Ok((device.completed_commands(), verified))
 }
 
 fn exercise(
@@ -561,6 +728,10 @@ fn exercise(
     if format & 0xffff != 0 || (format >> 16) & 0xff != 9 {
         return Err(AdminRuntimeError::InvalidBlockFormat);
     }
+    // Самопроверка с записью допускается только для временного тома QEMU 16 МиБ.
+    if blocks != 32_768 {
+        return Err(AdminRuntimeError::UnsafeTestDevice);
+    }
     let (io_commands, verified_blocks) = exercise_blocks(regs, arena, &mut cursor, blocks, stride)?;
     Ok(AdminTestReport {
         queue_depth: QUEUE_DEPTH,
@@ -587,6 +758,10 @@ pub unsafe fn self_test<const N: usize>(
     table: &mut ActivePageTable,
     frames: &mut SystemFrameAllocator<N>,
 ) -> Result<AdminTestReport, AdminRuntimeError> {
+    // Запрещаем изменять данные физического SSD и любого другого контроллера.
+    if controller.function.vendor_id != 0x1b36 || controller.function.device_id != 0x0010 {
+        return Err(AdminRuntimeError::UnsafeTestDevice);
+    }
     let mut registers = RegisterWindow::map(controller, table, frames)?;
     // Предыдущее состояние UEFI не означает, что можно переназначить
     // очереди: контроллер должен подтвердить RDY=0 до выдачи нового DMA.

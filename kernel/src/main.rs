@@ -34,7 +34,8 @@ use alloc::vec::Vec;
 use bootloader_api::config::{BootloaderConfig, Mapping};
 use bootloader_api::{BootInfo, entry_point};
 use core::alloc::Layout;
-use phoenix_framebuffer::draw_boot_banner;
+use phoenix_framebuffer::route::{DisplayRoute, FirmwarePurpose};
+use phoenix_framebuffer::{draw_boot_banner, draw_emergency_banner, firmware_sample};
 use phoenix_memory::{MemorySummary, SystemFrameAllocator};
 use phoenix_vm::{ActivePageTable, InactivePageTable};
 use qemu::ExitCode;
@@ -473,21 +474,42 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         ),
     );
 
+    // Сохраняем буфер GOP для раннего/аварийного экрана до перехода на
+    // собственный видеодрайвер. В обычном режиме записи в GOP запрещены.
+    let mut display_route = DisplayRoute::new();
+    render_boot_banner(boot_info, &mut out, &display_route);
+    let firmware_checkpoint = boot_info.framebuffer.as_ref().map(firmware_sample);
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "graphics firmware boot: OK owner={}",
+            display_route.owner().name()
+        ),
+    );
+
     // Действительное обновление виртуального экрана, выполненное собственным
     // драйвером VirtIO-GPU. Только QEMU: физические AMD/NVIDIA не трогаем.
     let gpu_controller = pcie
         .graphics
         .virtio_gpu
         .expect("в проверочном профиле QEMU требуется VirtIO-GPU");
-    let (gpu_launch, gpu_report, mut active_gpu) = unsafe {
+    let started_gpu = unsafe {
         virtio_gpu::start(
             gpu_controller,
             &mut page_table,
             &mut frames,
             physical_memory_offset,
         )
-    }
-    .expect("VirtIO-GPU не выполнил двухмерное обновление экрана");
+    };
+    let (gpu_launch, gpu_report, mut active_gpu) = match started_gpu {
+        Ok(started) => started,
+        Err(error) => {
+            display_route.recover();
+            render_firmware_emergency(boot_info, &mut out, &display_route);
+            panic!("VirtIO-GPU не смог передать графику: {error:?}");
+        }
+    };
     assert_eq!(gpu_launch.name, "virtio-gpu-2d");
     assert_eq!(gpu_report.width, 128);
     assert_eq!(gpu_report.height, 128);
@@ -515,6 +537,52 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             "virtio gpu active: OK dma_pages={}",
             gpu_report.reserved_dma_pages
         ),
+    );
+
+    if let Err(error) =
+        display_route.claim_native(active_gpu.is_running() && gpu_report.completed_commands == 6)
+    {
+        let _ = active_gpu.shutdown(&mut page_table, &mut frames);
+        display_route.recover();
+        render_firmware_emergency(boot_info, &mut out, &display_route);
+        panic!("штатный экран не подтвердил готовность: {error:?}");
+    }
+    display_route
+        .native_access()
+        .expect("ошибка владения основным экраном");
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "graphics handoff: OK owner={} gop=reserved",
+            display_route.owner().name()
+        ),
+    );
+
+    let ready_commands = match active_gpu.present_scene(virtio_gpu::NativeScene::Ready) {
+        Ok(commands) => commands,
+        Err(error) => {
+            let _ = active_gpu.shutdown(&mut page_table, &mut frames);
+            display_route.recover();
+            render_firmware_emergency(boot_info, &mut out, &display_route);
+            panic!("первое обновление штатного экрана завершилось ошибкой: {error:?}");
+        }
+    };
+    assert_eq!(ready_commands, 8);
+    assert_eq!(
+        boot_info.framebuffer.as_ref().map(firmware_sample),
+        firmware_checkpoint,
+        "загрузочный буфер GOP изменился при работе VirtIO-GPU"
+    );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("graphics native present: OK phase=ready commands={ready_commands}"),
+    );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("graphics gop preserved: OK phase=ready"),
     );
 
     // Реальный запуск выбранного драйвера с ресурсами ядра.
@@ -801,7 +869,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     init_apic_timer(&mut out);
 
-    render_boot_banner(boot_info, &mut out);
+    // GOP больше не используется для штатных графических обновлений.
+    display_route
+        .native_access()
+        .expect("во время работы USB потерян штатный экран");
 
     // Контроллер пережил остальные самопроверки ядра. Эмулируемый USB
     // отключается и подключается во время работы службы через монитор QEMU.
@@ -987,6 +1058,37 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     }
     serial::line(&mut out, "INFO", format_args!("input userspace app: OK"));
 
+    // Поздний штатный кадр выводится до длительных USB-испытаний:
+    // монитор QEMU успевает снять его, пока GPU остаётся активным.
+    display_route
+        .native_access()
+        .expect("штатный вывод отключён до завершения испытаний");
+    let complete_commands = match active_gpu.present_scene(virtio_gpu::NativeScene::Complete) {
+        Ok(commands) => commands,
+        Err(error) => {
+            let _ = active_gpu.shutdown(&mut page_table, &mut frames);
+            display_route.recover();
+            render_firmware_emergency(boot_info, &mut out, &display_route);
+            panic!("повторное обновление штатного экрана завершилось ошибкой: {error:?}");
+        }
+    };
+    assert_eq!(complete_commands, 10);
+    assert_eq!(
+        boot_info.framebuffer.as_ref().map(firmware_sample),
+        firmware_checkpoint,
+        "буфер GOP изменился во время штатного вывода"
+    );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("graphics native present: OK phase=complete commands={complete_commands}"),
+    );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("graphics gop preserved: OK phase=complete"),
+    );
+
     let keyboard_slot = active_xhci
         .binding_for_port(keyboard_port)
         .expect("перед запуском службы клавиатура должна быть подключена")
@@ -1041,10 +1143,17 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // После проверки реального экрана монитором QEMU завершаем сессию
     // GPU. В отличие от обычного объекта драйвер обязан подтвердить сброс
     // до возврата страниц памяти устройства в системный распределитель.
-    let gpu_shutdown = active_gpu
-        .shutdown(&mut page_table, &mut frames)
-        .expect("VirtIO-GPU не смог безопасно остановить графический сеанс");
-    assert_eq!(gpu_shutdown.completed_commands, 9);
+    let gpu_shutdown = match active_gpu.shutdown(&mut page_table, &mut frames) {
+        Ok(report) => report,
+        Err(error) => {
+            // Даже если сброс не подтверждён и память GPU нельзя
+            // освобождать, сохранившийся GOP даёт аварийное изображение.
+            display_route.recover();
+            render_firmware_emergency(boot_info, &mut out, &display_route);
+            panic!("не удалось безопасно остановить VirtIO-GPU: {error:?}");
+        }
+    };
+    assert_eq!(gpu_shutdown.completed_commands, 13);
     assert_eq!(gpu_shutdown.returned_dma_pages, 20);
     serial::line(
         &mut out,
@@ -1052,6 +1161,30 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!(
             "virtio gpu shutdown: OK pages={} commands={}",
             gpu_shutdown.returned_dma_pages, gpu_shutdown.completed_commands
+        ),
+    );
+
+    // Аварийный путь проверяется только после полного отключения GPU:
+    // в штатной фазе GOP не получает никаких записей.
+    display_route.recover();
+    render_firmware_emergency(boot_info, &mut out, &display_route);
+    if let Some(previous) = firmware_checkpoint {
+        let recovered = boot_info
+            .framebuffer
+            .as_ref()
+            .map(firmware_sample)
+            .expect("ранее доступный GOP исчез после остановки GPU");
+        assert_ne!(
+            recovered, previous,
+            "запасной буфер GOP не получил аварийное изображение"
+        );
+    }
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "graphics gop recovery: OK owner={}",
+            display_route.owner().name()
         ),
     );
 
@@ -3174,7 +3307,10 @@ fn heap_self_test() {
     }
 }
 
-fn render_boot_banner(boot_info: &'static mut BootInfo, out: &mut serial::Com1) {
+fn render_boot_banner(boot_info: &mut BootInfo, out: &mut serial::Com1, route: &DisplayRoute) {
+    route
+        .firmware_access(FirmwarePurpose::Boot)
+        .expect("буфер GOP недоступен для штатного вывода");
     let Some(framebuffer) = boot_info.framebuffer.as_mut() else {
         serial::line(out, "WARN", format_args!("framebuffer: unavailable"));
         return;
@@ -3191,6 +3327,36 @@ fn render_boot_banner(boot_info: &'static mut BootInfo, out: &mut serial::Com1) 
         format_args!(
             "framebuffer: {}x{} {} B/px",
             info.width, info.height, info.bytes_per_pixel
+        ),
+    );
+}
+
+fn render_firmware_emergency(
+    boot_info: &mut BootInfo,
+    out: &mut serial::Com1,
+    route: &DisplayRoute,
+) {
+    route
+        .firmware_access(FirmwarePurpose::Emergency)
+        .expect("аварийный вывод GOP не разрешён");
+
+    let Some(framebuffer) = boot_info.framebuffer.as_mut() else {
+        serial::line(
+            out,
+            "WARN",
+            format_args!("graphics gop emergency: unavailable"),
+        );
+        return;
+    };
+
+    let info =
+        draw_emergency_banner(framebuffer).expect("сохранённый буфер GOP имеет неверный формат");
+    serial::line(
+        out,
+        "INFO",
+        format_args!(
+            "graphics emergency banner: OK width={} height={}",
+            info.width, info.height
         ),
     );
 }

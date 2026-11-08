@@ -4,8 +4,16 @@ exception: breakpoint
 acpi platform discovery: OK
 pcie ecam enumeration: OK
 graphics profile discovery: OK profile=virtio-gpu vendor=1af4 id=1050
+graphics firmware boot: OK owner=uefi-boot
 virtio gpu 2d: OK width=128 height=128
-virtio gpu shutdown: OK pages=20
+graphics handoff: OK owner=virtio-gpu gop=reserved
+graphics native present: OK phase=ready commands=8
+graphics gop preserved: OK phase=ready
+graphics native present: OK phase=complete commands=10
+graphics gop preserved: OK phase=complete
+virtio gpu shutdown: OK pages=20 commands=13
+graphics emergency banner: OK
+graphics gop recovery: OK owner=uefi-emergency
 xhci pcie discovery: OK
 nvme pcie discovery: OK
 nvme driver registry probe: OK

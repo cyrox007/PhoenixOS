@@ -61,6 +61,89 @@ pub fn parse_configuration(data: &[u8]) -> Result<UsbInterface, DescriptorError>
     Err(DescriptorError::NoInterface)
 }
 
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HidConfiguration {
+    pub value: u8,
+    pub interface_number: u8,
+    pub protocol: u8,
+    pub endpoint_address: u8,
+    pub max_packet_size: u16,
+    pub interval: u8,
+}
+
+/// Находит одну загрузочную HID-точку прерываний IN в конфигурации.
+///
+/// Поддерживается ограниченный профиль USB-клавиатуры или мыши QEMU.
+/// Длина и границы каждого дескриптора проверяются до чтения полей.
+pub fn parse_hid_configuration(data: &[u8]) -> Result<HidConfiguration, DescriptorError> {
+    if data.len() < 9 {
+        return Err(DescriptorError::Truncated);
+    }
+    if data[0] != 9 || data[1] != 2 {
+        return Err(DescriptorError::WrongType);
+    }
+    let length = usize::from(u16::from_le_bytes([data[2], data[3]]));
+    if length < 9 || data[5] == 0 {
+        return Err(DescriptorError::InvalidLength);
+    }
+    if length > data.len() {
+        return Err(DescriptorError::Truncated);
+    }
+    let mut selected = None;
+    let mut offset = 0;
+    while offset < length {
+        if offset + 2 > length {
+            return Err(DescriptorError::Truncated);
+        }
+        let size = usize::from(data[offset]);
+        if size < 2 || offset + size > length {
+            return Err(DescriptorError::InvalidLength);
+        }
+        let descriptor_type = data[offset + 1];
+        if descriptor_type == 4 {
+            if size < 9 {
+                return Err(DescriptorError::InvalidLength);
+            }
+            selected = None;
+            if data[offset + 3] == 0
+                && data[offset + 5] == 3
+                && data[offset + 6] == 1
+                && matches!(data[offset + 7], 1 | 2)
+            {
+                selected = Some((data[offset + 2], data[offset + 7]));
+            }
+        }
+        if descriptor_type == 5 {
+            if size < 7 {
+                return Err(DescriptorError::InvalidLength);
+            }
+            if let Some((interface_number, protocol)) = selected {
+                let endpoint_address = data[offset + 2];
+                let packet_size = u16::from_le_bytes([data[offset + 4], data[offset + 5]]);
+                let interval = data[offset + 6];
+                if endpoint_address & 0x80 != 0
+                    && endpoint_address & 0x0f != 0
+                    && data[offset + 3] & 3 == 3
+                    && (1..=64).contains(&packet_size)
+                    && interval != 0
+                {
+                    return Ok(HidConfiguration {
+                        value: data[5],
+                        interface_number,
+                        protocol,
+                        endpoint_address,
+                        max_packet_size: packet_size,
+                        interval,
+                    });
+                }
+            }
+        }
+        offset += size;
+    }
+    Err(DescriptorError::NoInterface)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,4 +186,46 @@ mod tests {
         ];
         assert_eq!(parse_configuration(&config).unwrap().protocol, 2);
     }
+    #[test]
+    fn parses_boot_keyboard_and_mouse_interrupt_endpoints() {
+        let keyboard = [
+            9, 2, 34, 0, 1, 1, 0, 0xa0, 50,
+            9, 4, 0, 0, 1, 3, 1, 1, 0,
+            9, 0x21, 0x11, 1, 0, 1, 0x22, 63, 0,
+            7, 5, 0x81, 3, 8, 0, 10,
+        ];
+        assert_eq!(
+            parse_hid_configuration(&keyboard),
+            Ok(HidConfiguration {
+                value: 1,
+                interface_number: 0,
+                protocol: 1,
+                endpoint_address: 0x81,
+                max_packet_size: 8,
+                interval: 10,
+            })
+        );
+        let mut mouse = keyboard;
+        mouse[16] = 2;
+        mouse[31] = 4;
+        assert_eq!(parse_hid_configuration(&mouse).unwrap().protocol, 2);
+        assert_eq!(parse_hid_configuration(&mouse).unwrap().max_packet_size, 4);
+    }
+
+    #[test]
+    fn rejects_invalid_or_outgoing_interrupt_endpoints() {
+        let mut config = [
+            9, 2, 25, 0, 1, 1, 0, 0x80, 50,
+            9, 4, 0, 0, 1, 3, 1, 1, 0,
+            7, 5, 0x01, 3, 8, 0, 10,
+        ];
+        assert_eq!(parse_hid_configuration(&config), Err(DescriptorError::NoInterface));
+        config[20] = 0x81;
+        config[24] = 0;
+        assert_eq!(parse_hid_configuration(&config), Err(DescriptorError::NoInterface));
+        config[24] = 10;
+        config[2] = 26;
+        assert_eq!(parse_hid_configuration(&config), Err(DescriptorError::Truncated));
+    }
+
 }

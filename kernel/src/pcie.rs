@@ -1,5 +1,6 @@
 use bootloader_api::info::MemoryRegion;
 use phoenix_acpi::McfgInfo;
+use phoenix_pcie::nvme::{self, NvmePciController, NvmePciError};
 use phoenix_pcie::xhci::{self, XhciPciController, XhciPciError};
 use phoenix_pcie::{ConfigAccess, EcamSegment, EnumerationSummary, PcieError};
 use x86_64::VirtAddr;
@@ -10,6 +11,7 @@ const MINIMUM_BOOTLOADER_PHYSICAL_MAPPING: u64 = 0x1_0000_0000;
 pub enum PlatformPcieError {
     InvalidSegment(PcieError),
     InvalidXhci(XhciPciError),
+    InvalidNvme(NvmePciError),
     EcamOutsidePhysicalMapping,
     AddressOverflow,
 }
@@ -28,6 +30,8 @@ pub struct PlatformPcieSummary {
     pub usb_controller_count: u32,
     pub xhci_controller_count: u32,
     pub first_xhci: Option<XhciPciController>,
+    pub nvme_controller_count: u32,
+    pub first_nvme: Option<NvmePciController>,
 }
 
 impl PlatformPcieSummary {
@@ -39,6 +43,8 @@ impl PlatformPcieSummary {
             usb_controller_count: 0,
             xhci_controller_count: 0,
             first_xhci: None,
+            nvme_controller_count: 0,
+            first_nvme: None,
         }
     }
 
@@ -89,21 +95,32 @@ pub fn enumerate(
             allocation.end_bus,
         )?;
         validate_segment_mapping(segment, mapped_physical_end)?;
-        let mut first_probe = None;
+        let mut first_xhci_probe = None;
+        let mut first_nvme_probe = None;
         let mut xhci_count = 0_u32;
+        let mut nvme_count = 0_u32;
         let segment_summary = phoenix_pcie::enumerate_segment(&access, segment, |function| {
-            if !xhci::is_xhci(function) {
-                return;
+            if xhci::is_xhci(function) {
+                xhci_count = xhci_count.saturating_add(1);
+                if summary.first_xhci.is_none() && first_xhci_probe.is_none() {
+                    first_xhci_probe = Some(xhci::probe(&access, function));
+                }
             }
-            xhci_count = xhci_count.saturating_add(1);
-            if summary.first_xhci.is_none() && first_probe.is_none() {
-                first_probe = Some(xhci::probe(&access, function));
+            if nvme::is_nvme(function) {
+                nvme_count = nvme_count.saturating_add(1);
+                if summary.first_nvme.is_none() && first_nvme_probe.is_none() {
+                    first_nvme_probe = Some(nvme::probe(&access, function));
+                }
             }
         })?;
         summary.include(segment_summary);
         summary.xhci_controller_count = summary.xhci_controller_count.saturating_add(xhci_count);
-        if let Some(probe) = first_probe {
+        summary.nvme_controller_count = summary.nvme_controller_count.saturating_add(nvme_count);
+        if let Some(probe) = first_xhci_probe {
             summary.first_xhci = Some(probe.map_err(PlatformPcieError::InvalidXhci)?);
+        }
+        if let Some(probe) = first_nvme_probe {
+            summary.first_nvme = Some(probe.map_err(PlatformPcieError::InvalidNvme)?);
         }
     }
 

@@ -57,7 +57,13 @@ impl IoCommand {
         total_blocks: u64,
         address: u64,
     ) -> Result<Self, IoError> {
-        if namespace == 0 || count == 0 || count > 8 || lba.checked_add(u64::from(count)).is_none_or(|end| end > total_blocks) {
+        if namespace == 0
+            || count == 0
+            || count > 8
+            || lba
+                .checked_add(u64::from(count))
+                .is_none_or(|end| end > total_blocks)
+        {
             return Err(IoError::InvalidBlockRange);
         }
         if address == 0 || address % 4096 != 0 {
@@ -78,9 +84,7 @@ impl IoCommand {
 /// Проверка завершения очереди 1, фазового бита, идентификатора и кода состояния.
 pub fn check_completion(words: [u32; 4], id: u16, phase: bool) -> Result<u16, IoError> {
     let status = (words[3] >> 16) as u16;
-    if (status & 1 != 0) != phase
-        || words[3] as u16 != id
-        || (words[2] >> 16) as u16 != IO_QUEUE_ID
+    if (status & 1 != 0) != phase || words[3] as u16 != id || (words[2] >> 16) as u16 != IO_QUEUE_ID
     {
         return Err(IoError::InvalidCompletion);
     }
@@ -102,7 +106,10 @@ mod tests {
         assert_eq!(sq.words[0], (4 << 16) | 1);
         assert_eq!(cq.words[10], 0x000f_0001);
         assert_eq!(sq.words[11], 0x0001_0001);
-        assert_eq!(IoCommand::create_completion(1, 7), Err(IoError::InvalidAddress));
+        assert_eq!(
+            IoCommand::create_completion(1, 7),
+            Err(IoError::InvalidAddress)
+        );
     }
 
     #[test]
@@ -111,16 +118,37 @@ mod tests {
         assert_eq!(command.words[0], (7 << 16) | 1);
         assert_eq!(command.words[10], 32767);
         assert_eq!(command.words[12], 0);
-        assert_eq!(IoCommand::transfer(1, false, 1, 32768, 1, 32768, 0x3000), Err(IoError::InvalidBlockRange));
-        assert_eq!(IoCommand::transfer(1, false, 1, u64::MAX, 2, u64::MAX, 0x3000), Err(IoError::InvalidBlockRange));
-        assert_eq!(IoCommand::transfer(1, false, 1, 0, 0, 32768, 0x3000), Err(IoError::InvalidBlockRange));
+        assert_eq!(
+            IoCommand::transfer(1, false, 1, 32768, 1, 32768, 0x3000),
+            Err(IoError::InvalidBlockRange)
+        );
+        assert_eq!(
+            IoCommand::transfer(1, false, 1, u64::MAX, 2, u64::MAX, 0x3000),
+            Err(IoError::InvalidBlockRange)
+        );
+        assert_eq!(
+            IoCommand::transfer(1, false, 1, 0, 0, 32768, 0x3000),
+            Err(IoError::InvalidBlockRange)
+        );
     }
 
     #[test]
     fn validates_completion_identity_phase_and_status() {
-        assert_eq!(check_completion([0, 0, 0x0001_0001, 0x0007_0001], 7, true), Ok(1));
-        assert_eq!(check_completion([0, 0, 0x0001_0001, 0x0007_0001], 7, false), Err(IoError::InvalidCompletion));
-        assert_eq!(check_completion([0, 0, 0x0000_0001, 0x0007_0001], 7, true), Err(IoError::InvalidCompletion));
-        assert_eq!(check_completion([0, 0, 0x0001_0001, 0x0007_0003], 7, true), Err(IoError::CompletionStatus(1)));
+        assert_eq!(
+            check_completion([0, 0, 0x0001_0001, 0x0007_0001], 7, true),
+            Ok(1)
+        );
+        assert_eq!(
+            check_completion([0, 0, 0x0001_0001, 0x0007_0001], 7, false),
+            Err(IoError::InvalidCompletion)
+        );
+        assert_eq!(
+            check_completion([0, 0, 0x0000_0001, 0x0007_0001], 7, true),
+            Err(IoError::InvalidCompletion)
+        );
+        assert_eq!(
+            check_completion([0, 0, 0x0001_0001, 0x0007_0003], 7, true),
+            Err(IoError::CompletionStatus(1))
+        );
     }
 }

@@ -554,21 +554,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     render_boot_banner(boot_info, &mut out);
 
-    // Контроллер пережил все системные проверки ядра: MMIO и физические
-    // DMA-страницы закреплены, слотам не требуется повторная адресация.
-    for _ in 0..3 {
-        assert!(
-            active_xhci.is_running(),
-            "xHCI завершил работу до конца загрузки ядра"
-        );
-        let event = active_xhci
-            .poll_port_event()
-            .expect("не удалось обслужить кольцо событий xHCI");
-        assert_eq!(
-            event, None,
-            "проверочный профиль не должен отключать USB-устройства"
-        );
-    }
+    // Контроллер пережил остальные самопроверки ядра. Эмулируемый USB
+    // отключается и подключается во время работы службы через монитор QEMU.
+    assert!(active_xhci.is_running(), "xHCI неожиданно остановился");
+    assert_eq!(active_xhci.connected_count(), 2);
     serial::line(
         &mut out,
         "INFO",
@@ -577,6 +566,54 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             retained.first_slot, retained.second_slot, retained.pages
         ),
     );
+    serial::line(&mut out, "INFO", format_args!("xhci hotplug ready: OK"));
+
+    let mut detached = false;
+    let mut reattached = false;
+    for _ in 0..120_000_000_u32 {
+        let step = active_xhci.service_once().expect("ошибка обслуживания USB-порта");
+        match step {
+            xhci_mmio::ServiceResult::Detached(binding) => {
+                assert_eq!(binding.protocol, 1, "должна отключиться клавиатура");
+                assert_eq!(active_xhci.connected_count(), 1);
+                assert_eq!(
+                    active_xhci.binding_for_port(ports.second_connected_port).unwrap().slot,
+                    retained.second_slot,
+                    "мышь потеряла слот при отключении клавиатуры"
+                );
+                detached = true;
+                serial::line(
+                    &mut out,
+                    "INFO",
+                    format_args!("xhci hotplug detached: OK port={} slot={}", binding.port, binding.slot),
+                );
+            }
+            xhci_mmio::ServiceResult::Attached(binding) => {
+                assert!(detached, "USB-устройство появилось до проверки отключения");
+                assert_eq!(binding.protocol, 1, "должна подключиться клавиатура");
+                assert_eq!(active_xhci.connected_count(), 2);
+                assert_eq!(
+                    active_xhci.binding_for_port(ports.second_connected_port).unwrap().slot,
+                    retained.second_slot,
+                    "мышь потеряла слот при повторном подключении"
+                );
+                reattached = true;
+                serial::line(
+                    &mut out,
+                    "INFO",
+                    format_args!("xhci hotplug attached: OK port={} slot={}", binding.port, binding.slot),
+                );
+            }
+            xhci_mmio::ServiceResult::Idle | xhci_mmio::ServiceResult::Unchanged(_) => {}
+        }
+        if detached && reattached {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    assert!(detached && reattached, "не получены обе проверки отключения/подключения");
+    assert!(active_xhci.is_running(), "xHCI остановился во время переподключения");
+    serial::line(&mut out, "INFO", format_args!("xhci hotplug service: OK"));
 
     let free_before_shutdown = frames.free_frames();
     active_xhci

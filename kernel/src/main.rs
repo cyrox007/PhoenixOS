@@ -11,6 +11,7 @@ mod dma_boot;
 mod elf_user_loader;
 mod file_user_memory;
 mod heap;
+mod input_service;
 mod ipc_user_memory;
 mod pcie;
 mod process_space;
@@ -35,6 +36,8 @@ use x86_64::VirtAddr;
 use x86_64::structures::paging::{Page, PageTableFlags, Size4KiB};
 
 static USERSPACE_SMOKE_ELF: &[u8] = include_bytes!(env!("PHOENIX_USERSPACE_SMOKE"));
+static USERSPACE_INPUT_PROBE_ELF: &[u8] = include_bytes!(env!("PHOENIX_USERSPACE_INPUT_PROBE"));
+static USERSPACE_SHELL_ELF: &[u8] = include_bytes!(env!("PHOENIX_USERSPACE_SHELL"));
 
 const SYSTEM_MEMORY_RANGE_CAPACITY: usize = 256;
 const VM_TEST_ADDRESS: u64 = 0x0000_6000_0000_0000;
@@ -144,6 +147,14 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     if !arch::x86_64::syscall::file_dispatch_self_test() {
         panic!("файловые системные вызовы не прошли проверку диспетчера");
     }
+    if !arch::x86_64::syscall::input_dispatch_self_test() {
+        panic!("системный вызов ввода не прошёл проверку аргументов и контекста");
+    }
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("input syscall dispatch self-test: OK"),
+    );
     serial::line(
         &mut out,
         "INFO",
@@ -577,6 +588,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             .expect("ошибка обслуживания USB-порта");
         match step {
             xhci_mmio::ServiceResult::Detached(binding) => {
+                input_service::publish_device(binding.slot, false);
                 assert_eq!(binding.protocol, 1, "должна отключиться клавиатура");
                 assert_eq!(active_xhci.connected_count(), 1);
                 assert_eq!(
@@ -598,6 +610,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
                 );
             }
             xhci_mmio::ServiceResult::Attached(binding) => {
+                input_service::publish_device(binding.slot, true);
                 assert!(detached, "USB-устройство появилось до проверки отключения");
                 assert_eq!(binding.protocol, 1, "должна подключиться клавиатура");
                 assert_eq!(active_xhci.connected_count(), 2);
@@ -668,6 +681,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             .expect("ошибка чтения HID-отчёта в QEMU");
         match step {
             xhci_mmio::ServiceResult::Hid(InputEvent::Key(key)) => {
+                let source = active_xhci
+                    .binding_for_port(keyboard_port)
+                    .expect("событие клавиатуры без действительного устройства")
+                    .slot;
+                input_service::publish_hid(source, InputEvent::Key(key));
                 if key.usage != 4 {
                     continue;
                 }
@@ -689,6 +707,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
                 }
             }
             xhci_mmio::ServiceResult::Hid(InputEvent::Mouse(report)) => {
+                input_service::publish_hid(retained.second_slot, InputEvent::Mouse(report));
                 if report.delta_x != 0 || report.delta_y != 0 {
                     mouse_move = true;
                     serial::line(
@@ -713,6 +732,14 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         "не получены отчёты клавиатуры и мыши"
     );
     serial::line(&mut out, "INFO", format_args!("xhci hid reports: OK"));
+    if input_service::with_events(|queue| queue.len()) != 5 {
+        panic!("общая очередь не сохранила пять реальных событий ввода");
+    }
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("input queue from xhci: OK count=5"),
+    );
 
     let free_before_shutdown = frames.free_frames();
     active_xhci
@@ -728,6 +755,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         "INFO",
         format_args!("xhci resident shutdown: OK pages={}", retained.pages),
     );
+
+    input_elf_execution_self_test(physical_memory_offset, &mut frames);
+    if input_service::with_events(|events| !events.is_empty()) {
+        panic!("пользовательская программа оставила события во входной очереди");
+    }
+    serial::line(&mut out, "INFO", format_args!("input userspace app: OK"));
 
     serial::line(&mut out, "INFO", format_args!("bootstrap: OK"));
     qemu::exit(ExitCode::Success);
@@ -2485,6 +2518,191 @@ fn elf_user_execution_self_test(
     if frames.free_frames() != free_before {
         panic!("запуск ELF не вернул физические страницы распределителю");
     }
+}
+
+#[derive(Clone, Copy)]
+enum InputTestProgram {
+    Probe,
+    Shell,
+}
+
+/// Действительный путь: USB xHCI → очередь ядра → CPL3 → два разных
+/// пользовательских процесса. Все пять событий пришли от модели QEMU.
+fn input_elf_execution_self_test(
+    physical_memory_offset: VirtAddr,
+    frames: &mut SystemFrameAllocator<SYSTEM_MEMORY_RANGE_CAPACITY>,
+) {
+    let probe = run_input_test_program(InputTestProgram::Probe, physical_memory_offset, frames);
+    assert_eq!(
+        probe, 0x5553_4552_5f4f_4b21,
+        "пользовательская программа ввода вернула ошибку {probe:#x}"
+    );
+    assert_eq!(
+        input_service::with_events(|events| events.len()),
+        1,
+        "после проверки клавиатуры должен остаться один отчёт мыши"
+    );
+    let shell = run_input_test_program(InputTestProgram::Shell, physical_memory_offset, frames);
+    assert_eq!(
+        shell, 0,
+        "оболочка не прочитала реальное событие мыши: {shell:#x}"
+    );
+    serial::emergency(format_args!("[INFO] input shell event: OK\n"));
+}
+
+/// Предоставляет строго одно право Device/READ, переданное через блок запуска
+/// в аргументе теста либо в окружении штатной оболочки.
+fn run_input_test_program(
+    program: InputTestProgram,
+    physical_memory_offset: VirtAddr,
+    frames: &mut SystemFrameAllocator<SYSTEM_MEMORY_RANGE_CAPACITY>,
+) -> u64 {
+    use phoenix_capability::{Capability, ObjectId, ObjectKind, Rights};
+    use phoenix_process::{
+        AddressSpaceId, MemoryPermissions, ProcessCapabilitySet, ProcessId, RegionKind,
+        VirtualRegion,
+    };
+    use phoenix_syscall_abi::{PackedCapabilityHandle, ProcessStartInfo, ProcessStartString};
+
+    const STACK_ADDRESS: u64 = 0x0000_0000_4800_0000;
+    const INFO_ADDRESS: u64 = STACK_ADDRESS + 0x100;
+    const VECTOR_ADDRESS: u64 = STACK_ADDRESS + 0x200;
+    const ENV_VECTOR_ADDRESS: u64 = STACK_ADDRESS + 0x300;
+    const DATA_ADDRESS: u64 = STACK_ADDRESS + 0x500;
+
+    let (image, space_id, process_id) = match program {
+        InputTestProgram::Probe => (USERSPACE_INPUT_PROBE_ELF, 49, 900),
+        InputTestProgram::Shell => (USERSPACE_SHELL_ELF, 50, 901),
+    };
+    assert!(!image.is_empty(), "проверочный пользовательский ELF пуст");
+    let free_before = frames.free_frames();
+    let mut space = unsafe {
+        process_space::ProcessAddressSpace::<{ process_space::PROCESS_REGION_CAPACITY }>::new(
+            AddressSpaceId(space_id),
+            physical_memory_offset,
+            frames,
+        )
+    }
+    .expect("не удалось создать адресное пространство программы ввода");
+
+    let loaded = elf_user_loader::load_elf(image, &mut space, frames)
+        .expect("не удалось загрузить пользовательский ELF");
+    assert!(
+        loaded.segment_count > 0,
+        "загруженный ELF не содержит сегментов"
+    );
+    let stack_region = VirtualRegion::new(
+        STACK_ADDRESS,
+        phoenix_process::PAGE_SIZE,
+        MemoryPermissions::USER_READ_WRITE,
+        RegionKind::Stack,
+    )
+    .expect("некорректное описание пользовательского стека ввода");
+    space
+        .map_region(stack_region, frames)
+        .expect("не удалось отобразить стек программы ввода");
+
+    let mut capabilities = ProcessCapabilitySet::<
+        { arch::x86_64::syscall::PROCESS_CAPABILITY_CAPACITY },
+    >::new(ProcessId(process_id));
+    let handle = capabilities
+        .insert(Capability {
+            object: ObjectId(input_service::INPUT_CAPABILITY_OBJECT),
+            kind: ObjectKind::Device,
+            rights: Rights::READ,
+        })
+        .expect("не удалось выдать право на системную очередь ввода");
+    let token = PackedCapabilityHandle::new(handle.slot, handle.generation).raw();
+    let hex = b"0123456789abcdef";
+    let mut token_text = [0_u8; 16];
+    for (index, byte) in token_text.iter_mut().enumerate() {
+        *byte = hex[((token >> ((15 - index) * 4)) & 0x0f) as usize];
+    }
+
+    let mut environment_text = [0_u8; 34];
+    environment_text[..18].copy_from_slice(b"PHOENIX_INPUT_CAP=");
+    environment_text[18..].copy_from_slice(&token_text);
+    let probe_arguments: [&[u8]; 1] = [&token_text];
+    let shell_arguments: [&[u8]; 3] = [b"phxsh", b"-c", b"input"];
+    let shell_environment: [&[u8]; 1] = [&environment_text];
+    let (arguments, environment): (&[&[u8]], &[&[u8]]) = match program {
+        InputTestProgram::Probe => (&probe_arguments, &[]),
+        InputTestProgram::Shell => (&shell_arguments, &shell_environment),
+    };
+    let env_vector = if environment.is_empty() {
+        0
+    } else {
+        ENV_VECTOR_ADDRESS
+    };
+    let info = ProcessStartInfo::new(
+        arguments.len() as u64,
+        VECTOR_ADDRESS,
+        environment.len() as u64,
+        env_vector,
+    )
+    .expect("некорректная схема запуска пользовательской программы ввода");
+    for (index, word) in info.words().iter().enumerate() {
+        space
+            .write_user_bytes(
+                VirtAddr::new(INFO_ADDRESS + index as u64 * 8),
+                &word.to_le_bytes(),
+            )
+            .expect("не удалось записать ABI запуска программы ввода");
+    }
+    let mut data_address = DATA_ADDRESS;
+    for (vector, entries) in [
+        (VECTOR_ADDRESS, arguments),
+        (ENV_VECTOR_ADDRESS, environment),
+    ] {
+        for (index, text) in entries.iter().enumerate() {
+            let entry = ProcessStartString::new(data_address, text.len() as u64);
+            let slot = vector + index as u64 * 16;
+            space
+                .write_user_bytes(VirtAddr::new(slot), &entry.address.to_le_bytes())
+                .expect("не удалось записать адрес строкового параметра");
+            space
+                .write_user_bytes(VirtAddr::new(slot + 8), &entry.length.to_le_bytes())
+                .expect("не удалось записать длину строкового параметра");
+            space
+                .write_user_bytes(VirtAddr::new(data_address), text)
+                .expect("не удалось записать параметр процесса");
+            data_address += text.len() as u64;
+        }
+    }
+
+    let mut endpoint_registry = arch::x86_64::syscall::KernelEndpointRegistry::new();
+    let mut capability_registry = arch::x86_64::syscall::KernelProcessCapabilityRegistry::new();
+    let stack_pointer = STACK_ADDRESS + phoenix_process::PAGE_SIZE - 16;
+    let result = x86_64::instructions::interrupts::without_interrupts(|| {
+        let context_guard = unsafe {
+            arch::x86_64::syscall::install_current_process_context(
+                &mut space,
+                &mut capabilities,
+                &mut endpoint_registry,
+                &mut capability_registry,
+            )
+        }
+        .expect("контекст пользовательской программы ввода уже установлен");
+        let guard = unsafe { space.activate() };
+        let exit = arch::x86_64::syscall::run_user_process_with_start_info(
+            loaded.entry_point,
+            stack_pointer,
+            INFO_ADDRESS,
+        );
+        drop(guard);
+        drop(context_guard);
+        exit
+    });
+    let exit = result.expect("программа ввода не завершила пользовательский цикл");
+    space
+        .destroy(frames)
+        .expect("не удалось освободить адресное пространство программы ввода");
+    assert_eq!(
+        frames.free_frames(),
+        free_before,
+        "проверочная программа ввода не вернула физические страницы"
+    );
+    exit
 }
 
 fn virtual_memory_self_test(

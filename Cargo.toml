@@ -19,6 +19,7 @@ members = [
     "crates/syscall-abi",
     "crates/capability-model",
     "crates/ipc-model",
+    "crates/input-queue",
     "crates/libc-compat",
     "crates/elf-loader",
     "crates/fat",
@@ -26,6 +27,7 @@ members = [
     "crates/user-runtime",
     "crates/vfs",
     "userspace/smoke",
+    "userspace/input-probe",
     "userspace/shell",
 ]
 

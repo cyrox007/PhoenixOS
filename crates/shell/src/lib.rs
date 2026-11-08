@@ -1,5 +1,10 @@
 #![no_std]
 
+use core::fmt::{self, Write};
+use phoenix_syscall_abi::{
+    INPUT_EVENT_DEVICE, INPUT_EVENT_KEY, INPUT_EVENT_MOUSE, InputEventRecord,
+};
+
 pub const MAX_ARGUMENTS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +33,7 @@ impl<'a> Command<'a> {
 pub trait ShellIo {
     fn write(&mut self, bytes: &[u8]) -> Result<(), ()>;
     fn cat(&mut self, path: &str) -> Result<(), ()>;
+    fn read_input(&mut self) -> Result<InputEventRecord, ()>;
 }
 
 pub fn parse(line: &str) -> Result<Command<'_>, ParseError> {
@@ -58,6 +64,7 @@ pub fn execute<I: ShellIo>(command: Command<'_>, io: &mut I) -> i32 {
         "help" => write_help(io),
         "echo" => echo(command, io),
         "cat" => cat(command, io),
+        "input" => read_input(command, io),
         "true" => 0,
         "false" => 1,
         _ => {
@@ -70,7 +77,7 @@ pub fn execute<I: ShellIo>(command: Command<'_>, io: &mut I) -> i32 {
 }
 
 fn write_help<I: ShellIo>(io: &mut I) -> i32 {
-    let text = b"PhoenixOS shell\ncommands: help echo cat true false\n";
+    let text = b"PhoenixOS shell\ncommands: help echo cat input true false\n";
     if io.write(text).is_ok() { 0 } else { 1 }
 }
 
@@ -100,6 +107,53 @@ fn cat<I: ShellIo>(command: Command<'_>, io: &mut I) -> i32 {
     if io.cat(path).is_ok() { 0 } else { 1 }
 }
 
+struct ShellWriter<'a, I: ShellIo>(&'a mut I);
+
+impl<I: ShellIo> Write for ShellWriter<'_, I> {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        self.0.write(text.as_bytes()).map_err(|_| fmt::Error)
+    }
+}
+
+/// Показывает одну запись системы ввода без выделения динамической памяти.
+/// Возвращает ошибку, если очередь пуста или процессу не выдано право.
+fn read_input<I: ShellIo>(command: Command<'_>, io: &mut I) -> i32 {
+    if command.argument_count != 0 {
+        let _ = io.write(b"usage: input\n");
+        return 2;
+    }
+    let event = match io.read_input() {
+        Ok(event) => event,
+        Err(()) => {
+            let _ = io.write(b"input: no event or no permission\n");
+            return 1;
+        }
+    };
+    let mut writer = ShellWriter(io);
+    let output = match event.kind {
+        INPUT_EVENT_KEY => writeln!(
+            writer,
+            "input key source={} usage={} pressed={} modifiers={} seq={} lost={}",
+            event.source, event.code, event.value, event.flags, event.sequence, event.lost
+        ),
+        INPUT_EVENT_MOUSE => writeln!(
+            writer,
+            "input mouse source={} buttons={} dx={} dy={} wheel={} seq={} lost={}",
+            event.source, event.flags, event.x, event.y, event.wheel, event.sequence, event.lost
+        ),
+        INPUT_EVENT_DEVICE => writeln!(
+            writer,
+            "input device source={} connected={} seq={} lost={}",
+            event.source,
+            u32::from(event.code == phoenix_syscall_abi::INPUT_DEVICE_CONNECTED),
+            event.sequence,
+            event.lost
+        ),
+        _ => Err(fmt::Error),
+    };
+    if output.is_ok() { 0 } else { 1 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,6 +163,7 @@ mod tests {
         length: usize,
         cat_path: [u8; 32],
         cat_length: usize,
+        input_event: Option<InputEventRecord>,
     }
 
     impl TestIo {
@@ -118,6 +173,7 @@ mod tests {
                 length: 0,
                 cat_path: [0; 32],
                 cat_length: 0,
+                input_event: None,
             }
         }
 
@@ -144,6 +200,10 @@ mod tests {
             self.cat_path[..path.len()].copy_from_slice(path.as_bytes());
             self.cat_length = path.len();
             self.write(b"file-data")
+        }
+
+        fn read_input(&mut self) -> Result<InputEventRecord, ()> {
+            self.input_event.take().ok_or(())
         }
     }
 
@@ -184,5 +244,40 @@ mod tests {
         let mut io = TestIo::new();
         assert_eq!(execute(parse("missing").unwrap(), &mut io), 127);
         assert_eq!(io.output(), b"phxsh: unknown command: missing\n");
+    }
+    #[test]
+    fn input_command_displays_queued_keyboard_event() {
+        let mut io = TestIo::new();
+        let mut event = InputEventRecord::key(1, 4, true, 0);
+        event.sequence = 5;
+        io.input_event = Some(event);
+        assert_eq!(execute(parse("input").unwrap(), &mut io), 0);
+        assert_eq!(
+            io.output(),
+            b"input key source=1 usage=4 pressed=1 modifiers=0 seq=5 lost=0\n"
+        );
+    }
+
+    #[test]
+    fn input_command_requires_no_arguments_and_a_readable_event() {
+        let mut io = TestIo::new();
+        assert_eq!(execute(parse("input extra").unwrap(), &mut io), 2);
+        let mut io = TestIo::new();
+        assert_eq!(execute(parse("input").unwrap(), &mut io), 1);
+        assert_eq!(io.output(), b"input: no event or no permission\n");
+    }
+
+    #[test]
+    fn input_command_displays_signed_mouse_delta_and_loss_count() {
+        let mut io = TestIo::new();
+        let mut event = InputEventRecord::mouse(2, 1, 12, -6, 0);
+        event.sequence = 8;
+        event.lost = 2;
+        io.input_event = Some(event);
+        assert_eq!(execute(parse("input").unwrap(), &mut io), 0);
+        assert_eq!(
+            io.output(),
+            b"input mouse source=2 buttons=1 dx=12 dy=-6 wheel=0 seq=8 lost=2\n"
+        );
     }
 }

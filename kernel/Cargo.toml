@@ -15,6 +15,7 @@ phoenix-driver-registry = { path = "../crates/driver-registry" }
 phoenix-elf-loader = { path = "../crates/elf-loader" }
 phoenix-framebuffer = { path = "../crates/phoenix-framebuffer" }
 phoenix-ipc = { path = "../crates/ipc-model" }
+phoenix-input = { path = "../crates/input-queue" }
 phoenix-memory = { path = "../crates/boot-memory" }
 phoenix-pcie = { path = "../crates/pcie" }
 phoenix-process = { path = "../crates/process-model" }
@@ -24,9 +25,12 @@ phoenix-service-manager = { path = "../crates/service-manager" }
 phoenix-syscall-abi = { path = "../crates/syscall-abi" }
 phoenix-vfs = { path = "../crates/vfs" }
 phoenix-vm = { path = "../crates/virtual-memory" }
+spin = "0.9.8"
 uart_16550 = "0.8.0"
 x86_64 = "0.15.2"
 
 [build-dependencies]
 userspace-smoke = { package = "phoenix-userspace-smoke", path = "../userspace/smoke", artifact = "bin", target = "x86_64-unknown-none" }
+userspace-input-probe = { package = "phoenix-userspace-input-probe", path = "../userspace/input-probe", artifact = "bin", target = "x86_64-unknown-none" }
+userspace-shell = { package = "phoenix-userspace-shell", path = "../userspace/shell", artifact = "bin", target = "x86_64-unknown-none" }
 

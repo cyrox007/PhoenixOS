@@ -10,10 +10,11 @@ use phoenix_process::{ProcessCapabilitySet, ProcessId};
 use phoenix_syscall_abi::{
     FILE_OPEN_CREATE, FILE_OPEN_READ, FILE_OPEN_TRUNCATE, FILE_OPEN_WRITE, FILE_READY_ERROR,
     FILE_READY_HANGUP, FILE_READY_KNOWN, FILE_READY_READ, FILE_READY_WRITE, FILE_SEEK_CURRENT,
-    FILE_SEEK_END, FILE_SEEK_START, IpcReceiveArguments, IpcReceiveMetadata, IpcSendArguments,
-    NO_TRANSFERRED_CAPABILITY, PackedCapabilityHandle, PackedFileDescriptor, SYSCALL_CONSOLE_WRITE,
-    SYSCALL_FILE_CLOSE, SYSCALL_FILE_OPEN, SYSCALL_FILE_POLL, SYSCALL_FILE_READ, SYSCALL_FILE_SEEK,
-    SYSCALL_FILE_WRITE, SYSCALL_IPC_RECEIVE, SYSCALL_IPC_SEND, SYSCALL_PROCESS_EXIT,
+    FILE_SEEK_END, FILE_SEEK_START, InputEventRecord, IpcReceiveArguments, IpcReceiveMetadata,
+    IpcSendArguments, NO_TRANSFERRED_CAPABILITY, PackedCapabilityHandle, PackedFileDescriptor,
+    SYSCALL_CONSOLE_WRITE, SYSCALL_FILE_CLOSE, SYSCALL_FILE_OPEN, SYSCALL_FILE_POLL,
+    SYSCALL_FILE_READ, SYSCALL_FILE_SEEK, SYSCALL_FILE_WRITE, SYSCALL_INPUT_READ,
+    SYSCALL_IPC_RECEIVE, SYSCALL_IPC_SEND, SYSCALL_PROCESS_EXIT, SYSCALL_STATUS_ACCESS_DENIED,
     SYSCALL_STATUS_BAD_ARGUMENTS, SYSCALL_STATUS_OPERATION_NOT_READY, SYSCALL_STATUS_UNKNOWN_CALL,
     SyscallRequest, SyscallReturn, SyscallStatus,
 };
@@ -24,6 +25,7 @@ use phoenix_vfs::{
 };
 
 use crate::file_user_memory;
+use crate::input_service;
 use crate::ipc_user_memory::{self, IpcUserMemoryError};
 use crate::process_space::{PROCESS_REGION_CAPACITY, ProcessAddressSpace};
 
@@ -1076,6 +1078,7 @@ fn dispatch(request: SyscallRequest) -> SyscallReturn {
         SYSCALL_FILE_CLOSE => return dispatch_file_close(request),
         SYSCALL_FILE_POLL => return dispatch_file_poll(request),
         SYSCALL_CONSOLE_WRITE => return dispatch_console_write(request),
+        SYSCALL_INPUT_READ => return dispatch_input_read(request),
         SELF_TEST_NUMBER => {}
         _ => return syscall_failure(SYSCALL_STATUS_UNKNOWN_CALL),
     }
@@ -1085,6 +1088,88 @@ fn dispatch(request: SyscallRequest) -> SyscallReturn {
     }
 
     SyscallReturn::success(SELF_TEST_RESULT)
+}
+
+/// Читает только одну запись. Проверяет право и всю пользовательскую
+/// память ДО удаления события из очереди; неудачная копия сохраняет запись.
+fn dispatch_input_read(request: SyscallRequest) -> SyscallReturn {
+    let size = core::mem::size_of::<InputEventRecord>() as u64;
+    if request.arguments[3..].iter().any(|&argument| argument != 0)
+        || request.arguments[2] != size
+        || phoenix_vm::UserBuffer::for_array(request.arguments[1], 1, size, 8).is_err()
+    {
+        return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS);
+    }
+
+    let handle = PackedCapabilityHandle::from_raw(request.arguments[0]);
+    let authorized = with_current_process_capabilities(|set| {
+        let capability = set.require(
+            CapabilityHandle {
+                slot: handle.slot(),
+                generation: handle.generation(),
+            },
+            Rights::READ,
+        );
+        matches!(
+            capability,
+            Ok(device)
+                if device.kind == ObjectKind::Device
+                    && device.object.0 == input_service::INPUT_CAPABILITY_OBJECT
+        )
+    });
+    match authorized {
+        Some(true) => {}
+        Some(false) => return syscall_failure(SYSCALL_STATUS_ACCESS_DENIED),
+        None => return syscall_failure(SYSCALL_STATUS_OPERATION_NOT_READY),
+    }
+
+    let destination = request.arguments[1];
+    match with_current_process_address_space(|space| {
+        file_user_memory::validate_user_buffer(space, destination, size)
+    }) {
+        Some(Ok(())) => {}
+        Some(Err(_)) => return syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS),
+        None => return syscall_failure(SYSCALL_STATUS_OPERATION_NOT_READY),
+    }
+
+    input_service::with_events(|events| {
+        let Some(record) = events.front() else {
+            return syscall_failure(SYSCALL_STATUS_OPERATION_NOT_READY);
+        };
+
+        // Полностью инициализированная C-запись без заполнителей. Порядок
+        // полей и размер 48 байт проверяются модульными испытаниями ABI.
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                (&record as *const InputEventRecord).cast::<u8>(),
+                core::mem::size_of::<InputEventRecord>(),
+            )
+        };
+        let copied = with_current_process_address_space(|space| {
+            file_user_memory::copy_to_user(space, destination, size, bytes)
+        });
+        match copied {
+            Some(Ok(())) => {
+                events.commit();
+                SyscallReturn::success(size)
+            }
+            Some(Err(_)) => syscall_failure(SYSCALL_STATUS_BAD_ARGUMENTS),
+            None => syscall_failure(SYSCALL_STATUS_OPERATION_NOT_READY),
+        }
+    })
+}
+
+pub fn input_dispatch_self_test() -> bool {
+    let size = core::mem::size_of::<InputEventRecord>() as u64;
+    let no_context = SyscallRequest::new(SYSCALL_INPUT_READ, [0, 0x4000, size, 0, 0, 0]);
+    let invalid_buffer = SyscallRequest::new(SYSCALL_INPUT_READ, [0, 0, size, 0, 0, 0]);
+    let wrong_size = SyscallRequest::new(SYSCALL_INPUT_READ, [0, 0x4000, size - 1, 0, 0, 0]);
+    let reserved = SyscallRequest::new(SYSCALL_INPUT_READ, [0, 0x4000, size, 1, 0, 0]);
+
+    dispatch(no_context).status.raw() == u64::from(SYSCALL_STATUS_OPERATION_NOT_READY)
+        && dispatch(invalid_buffer).status.raw() == u64::from(SYSCALL_STATUS_BAD_ARGUMENTS)
+        && dispatch(wrong_size).status.raw() == u64::from(SYSCALL_STATUS_BAD_ARGUMENTS)
+        && dispatch(reserved).status.raw() == u64::from(SYSCALL_STATUS_BAD_ARGUMENTS)
 }
 
 fn dispatch_console_write(request: SyscallRequest) -> SyscallReturn {

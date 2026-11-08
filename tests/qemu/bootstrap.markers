@@ -24,6 +24,14 @@ xhci hid key released: OK
 xhci hid mouse moved: OK
 xhci hid reports: OK
 xhci resident shutdown: OK
+input syscall dispatch self-test: OK
+input queue from xhci: OK
+input userspace denied: OK
+input userspace invalid buffer: OK
+input userspace events: OK
+input mouse source=2 buttons=0 dx=12 dy=-6 wheel=0 seq=5 lost=0
+input shell event: OK
+input userspace app: OK
 xhci usb interfaces: OK
 dma kernel mapping self-test: OK
 dma direct address self-test: OK

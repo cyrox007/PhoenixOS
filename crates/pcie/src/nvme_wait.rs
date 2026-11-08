@@ -71,7 +71,11 @@ pub fn failure_model_checks() -> bool {
         || CONTROLLER_READY,
         || {
             polls += 1;
-            if polls == 3 { 1 << 16 } else { 0 }
+            if polls == 3 {
+                1 << 16
+            } else {
+                0
+            }
         },
         true,
         4,
@@ -109,7 +113,11 @@ mod tests {
                 || CONTROLLER_READY,
                 || {
                     checks += 1;
-                    if checks == 4 { 1 << 16 } else { 0 }
+                    if checks == 4 {
+                        1 << 16
+                    } else {
+                        0
+                    }
                 },
                 true,
                 4,

@@ -213,6 +213,8 @@ def validate_modern_qemu_profile(arguments):
         raise ValueError("Загрузочный образ должен идти через NVMe, не через IDE")
     if not any(device.startswith("nvme") and "drive=phoenix-boot" in device and "bootindex=1" in device for device in devices):
         raise ValueError("Не указан явный загрузочный NVMe-контроллер")
+    if not any(device.startswith("nvme") and "drive=phoenix-nvm" in device for device in devices):
+        raise ValueError("Нет отдельного NVMe для безопасного испытания PhoenixFS")
 
 
 def main():

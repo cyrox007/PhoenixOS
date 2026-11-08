@@ -11,8 +11,8 @@ mod dma_boot;
 mod elf_user_loader;
 mod file_user_memory;
 mod heap;
-mod ipc_user_memory;
 mod input_service;
+mod ipc_user_memory;
 mod pcie;
 mod process_space;
 mod qemu;
@@ -150,7 +150,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     if !arch::x86_64::syscall::input_dispatch_self_test() {
         panic!("системный вызов ввода не прошёл проверку аргументов и контекста");
     }
-    serial::line(&mut out, "INFO", format_args!("input syscall dispatch self-test: OK"));
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("input syscall dispatch self-test: OK"),
+    );
     serial::line(
         &mut out,
         "INFO",
@@ -731,7 +735,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     if input_service::with_events(|queue| queue.len()) != 5 {
         panic!("общая очередь не сохранила пять реальных событий ввода");
     }
-    serial::line(&mut out, "INFO", format_args!("input queue from xhci: OK count=5"));
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("input queue from xhci: OK count=5"),
+    );
 
     let free_before_shutdown = frames.free_frames();
     active_xhci
@@ -2535,7 +2543,10 @@ fn input_elf_execution_self_test(
         "после проверки клавиатуры должен остаться один отчёт мыши"
     );
     let shell = run_input_test_program(InputTestProgram::Shell, physical_memory_offset, frames);
-    assert_eq!(shell, 0, "оболочка не прочитала реальное событие мыши: {shell:#x}");
+    assert_eq!(
+        shell, 0,
+        "оболочка не прочитала реальное событие мыши: {shell:#x}"
+    );
     serial::emergency(format_args!("[INFO] input shell event: OK\n"));
 }
 
@@ -2576,7 +2587,10 @@ fn run_input_test_program(
 
     let loaded = elf_user_loader::load_elf(image, &mut space, frames)
         .expect("не удалось загрузить пользовательский ELF");
-    assert!(loaded.segment_count > 0, "загруженный ELF не содержит сегментов");
+    assert!(
+        loaded.segment_count > 0,
+        "загруженный ELF не содержит сегментов"
+    );
     let stack_region = VirtualRegion::new(
         STACK_ADDRESS,
         phoenix_process::PAGE_SIZE,
@@ -2636,7 +2650,10 @@ fn run_input_test_program(
             .expect("не удалось записать ABI запуска программы ввода");
     }
     let mut data_address = DATA_ADDRESS;
-    for (vector, entries) in [(VECTOR_ADDRESS, arguments), (ENV_VECTOR_ADDRESS, environment)] {
+    for (vector, entries) in [
+        (VECTOR_ADDRESS, arguments),
+        (ENV_VECTOR_ADDRESS, environment),
+    ] {
         for (index, text) in entries.iter().enumerate() {
             let entry = ProcessStartString::new(data_address, text.len() as u64);
             let slot = vector + index as u64 * 16;

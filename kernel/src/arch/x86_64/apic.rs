@@ -5,6 +5,7 @@ use x86_64::instructions::interrupts;
 use x86_64::instructions::port::Port;
 
 pub const TIMER_VECTOR: u8 = 0xe0;
+pub const REFERENCE_EDU_VECTOR: u8 = 0xe1;
 pub const SPURIOUS_VECTOR: u8 = 0xff;
 pub const TIMER_REGISTER_CAPTURE_MARKER: u64 = 0x5449_4d52;
 
@@ -130,6 +131,11 @@ pub(super) fn handle_timer_interrupt(context: TimerInterruptContext) -> u64 {
 
     end_of_interrupt();
     notify_timer_hook(tick, context).unwrap_or(context.stack_frame_address)
+}
+
+/// EOI для выделенного внешнего MSI-прерывания эталонного устройства.
+pub fn acknowledge_external_interrupt() {
+    end_of_interrupt();
 }
 
 fn end_of_interrupt() {

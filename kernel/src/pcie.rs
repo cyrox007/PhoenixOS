@@ -1,9 +1,11 @@
 use bootloader_api::info::MemoryRegion;
 use phoenix_acpi::McfgInfo;
+use phoenix_pcie::PcieFunction;
 use phoenix_pcie::graphics::GraphicsInventory;
 use phoenix_pcie::nvme::{self, NvmePciController, NvmePciError};
 use phoenix_pcie::xhci::{self, XhciPciController, XhciPciError};
 use phoenix_pcie::{ConfigAccess, EcamSegment, EnumerationSummary, PcieError};
+use phoenix_reference_edu::{EDU_DEVICE_ID, EDU_VENDOR_ID};
 use x86_64::VirtAddr;
 
 const MINIMUM_BOOTLOADER_PHYSICAL_MAPPING: u64 = 0x1_0000_0000;
@@ -34,6 +36,7 @@ pub struct PlatformPcieSummary {
     pub nvme_controller_count: u32,
     pub first_nvme: Option<NvmePciController>,
     pub graphics: GraphicsInventory,
+    pub first_edu: Option<PcieFunction>,
 }
 
 impl PlatformPcieSummary {
@@ -48,6 +51,7 @@ impl PlatformPcieSummary {
             nvme_controller_count: 0,
             first_nvme: None,
             graphics: GraphicsInventory::empty(),
+            first_edu: None,
         }
     }
 
@@ -104,6 +108,12 @@ pub fn enumerate(
         let mut nvme_count = 0_u32;
         let segment_summary = phoenix_pcie::enumerate_segment(&access, segment, |function| {
             summary.graphics.observe(&access, function);
+            if summary.first_edu.is_none()
+                && function.vendor_id == EDU_VENDOR_ID
+                && function.device_id == EDU_DEVICE_ID
+            {
+                summary.first_edu = Some(function);
+            }
             if xhci::is_xhci(function) {
                 xhci_count = xhci_count.saturating_add(1);
                 if summary.first_xhci.is_none() && first_xhci_probe.is_none() {

@@ -4,15 +4,21 @@
 use core::panic::PanicInfo;
 
 use phoenix_shell::{ShellIo, execute, parse};
-use phoenix_syscall_abi::{ProcessStartInfo, ProcessStartString};
-use phoenix_user_runtime::{OpenOptions, console_write, file_close, file_open, file_read};
+use phoenix_syscall_abi::{
+    InputEventRecord, PackedCapabilityHandle, ProcessStartInfo, ProcessStartString,
+};
+use phoenix_user_runtime::{
+    OpenOptions, console_write, file_close, file_open, file_read, input_read,
+};
 
 const FAILURE_START_INFO: u64 = 2;
 const FAILURE_USAGE: u64 = 2;
 const FAILURE_UTF8: u64 = 2;
 const FAILURE_PANIC: u64 = 126;
 
-struct RuntimeIo;
+struct RuntimeIo {
+    input_capability: Option<PackedCapabilityHandle>,
+}
 
 impl ShellIo for RuntimeIo {
     fn write(&mut self, bytes: &[u8]) -> Result<(), ()> {
@@ -43,6 +49,13 @@ impl ShellIo for RuntimeIo {
 
         let close = file_close(descriptor).map_err(|_| ());
         result.and(close)
+    }
+
+    fn read_input(&mut self) -> Result<InputEventRecord, ()> {
+        let capability = self.input_capability.ok_or(())?;
+        let mut event = InputEventRecord::EMPTY;
+        input_read(capability, &mut event).map_err(|_| ())?;
+        Ok(event)
     }
 }
 
@@ -75,8 +88,35 @@ extern "C" fn program_main(info: *const ProcessStartInfo) -> u64 {
         return FAILURE_USAGE;
     };
 
-    let mut io = RuntimeIo;
+    let mut io = RuntimeIo {
+        input_capability: input_capability_from_environment(info),
+    };
     execute(command, &mut io) as u64
+}
+
+/// Возможность чтения передаётся только при запуске авторизованной
+/// оболочки. Наличие имени переменной само по себе не даёт полномочий:
+/// ядро повторно проверяет поколение, тип объекта и право READ.
+fn input_capability_from_environment(info: &ProcessStartInfo) -> Option<PackedCapabilityHandle> {
+    if info.environment_count == 0 || info.environment_vector == 0 {
+        return None;
+    }
+    for index in 0..info.environment_count as usize {
+        let argument = unsafe {
+            (info.environment_vector as *const ProcessStartString)
+                .add(index)
+                .read()
+        };
+        if argument.address == 0 || argument.length > 128 {
+            continue;
+        }
+        let bytes =
+            unsafe { core::slice::from_raw_parts(argument.address as *const u8, argument.length as usize) };
+        if let Some(value) = bytes.strip_prefix(b"PHOENIX_INPUT_CAP=") {
+            return PackedCapabilityHandle::parse_hex(value);
+        }
+    }
+    None
 }
 
 fn process_argument(info: &ProcessStartInfo, index: usize) -> Result<&str, ()> {

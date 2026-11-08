@@ -1,5 +1,8 @@
 #![no_std]
 
+pub mod region;
+pub use region::BlockRegion;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockGeometry {
     pub block_size: usize,

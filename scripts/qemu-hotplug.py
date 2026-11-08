@@ -94,6 +94,10 @@ def main():
         ready = False
         detached = False
         attached = False
+        hid_ready = False
+        key_pressed = False
+        key_released = False
+        mouse_moved = False
         try:
             with open(serial_log, "w", encoding="utf-8") as log:
                 for line in process.stdout:
@@ -113,9 +117,44 @@ def main():
                         detached = True
                     if "xhci hotplug attached: OK" in line:
                         attached = True
+                    if "xhci hid ready: OK" in line and not hid_ready:
+                        monitor.execute(
+                            "input-send-event",
+                            {"events": [
+                                {"type": "key", "data": {
+                                    "down": True,
+                                    "key": {"type": "qcode", "data": "a"},
+                                }}
+                            ]},
+                        )
+                        hid_ready = True
+                    if "xhci hid key pressed: OK" in line and not key_pressed:
+                        monitor.execute(
+                            "input-send-event",
+                            {"events": [
+                                {"type": "key", "data": {
+                                    "down": False,
+                                    "key": {"type": "qcode", "data": "a"},
+                                }}
+                            ]},
+                        )
+                        key_pressed = True
+                    if "xhci hid key released: OK" in line and not key_released:
+                        monitor.execute(
+                            "input-send-event",
+                            {"events": [
+                                {"type": "rel", "data": {"axis": "x", "value": 12}},
+                                {"type": "rel", "data": {"axis": "y", "value": -6}},
+                            ]},
+                        )
+                        key_released = True
+                    if "xhci hid mouse moved: OK" in line:
+                        mouse_moved = True
             result = process.wait(timeout=3)
             if not (ready and detached and attached):
                 raise RuntimeError("Отсутствует подтверждение полного переподключения USB")
+            if not (hid_ready and key_pressed and key_released and mouse_moved):
+                raise RuntimeError("Отсутствуют отчёты клавиатуры или мыши")
             if result != 33:
                 raise RuntimeError(f"QEMU завершился с кодом {result}, ожидается 33")
         finally:

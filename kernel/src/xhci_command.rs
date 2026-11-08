@@ -9,7 +9,7 @@ use core::sync::atomic::{Ordering, compiler_fence};
 use phoenix_dma::DmaLayout;
 use phoenix_dma::mapping::{DeviceMapping, DirectDmaAperture, PhysicalAddress, QemuDirectDma};
 use phoenix_memory::SystemFrameAllocator;
-use phoenix_pcie::usb_descriptors::{self, DescriptorError};
+use phoenix_pcie::usb_descriptors::{self, DescriptorError, HidConfiguration};
 use phoenix_pcie::xhci_capabilities::XhciCapabilities;
 use phoenix_pcie::xhci_control::{self, OperationalRegisters};
 use phoenix_pcie::xhci_session::{self, CommandCursor, EventCursor, SessionDevice};
@@ -26,6 +26,10 @@ const MAX_POLLS: usize = 5_000_000;
 const LINK_TRB: u32 = (6 << 10) | 2 | 1;
 const COMMAND_COMPLETION_EVENT: u32 = 33;
 const SUCCESS_COMPLETION: u32 = 1;
+const HID_RING_START: usize = 1024;
+const HID_RING_ITEMS: usize = (PAGE_BYTES as usize - HID_RING_START) / 16;
+const HID_REPORT_OFFSET: usize = 896;
+const HID_ENDPOINT_TYPE: u32 = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandError {
@@ -57,6 +61,10 @@ pub enum CommandError {
     UnexpectedPort(u8),
     NoFreeDevicePages,
     ServiceFaulted,
+    AlreadyConfigured,
+    InvalidEndpoint,
+    InvalidHidEvent,
+    EndpointRingFull,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +80,7 @@ pub struct CommandReport {
     pub interface_protocol: u8,
     pub endpoint_count: u8,
     pub configuration_length: u16,
+    pub hid: HidConfiguration,
 }
 
 type DevicePages = SessionDevice;
@@ -129,6 +138,33 @@ struct Completion {
     code: u8,
     slot: u8,
     pointer: u64,
+    remaining: u32,
+}
+
+/// Действующая передача по USB-точке прерываний.
+/// Кольцо размещается в свободной части страницы дескриптора.
+#[derive(Clone, Copy)]
+struct HidChannel {
+    pages: DevicePages,
+    slot: u8,
+    descriptor: HidConfiguration,
+    index: usize,
+    cycle: u32,
+    outstanding: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HidRawReport {
+    pub slot: u8,
+    pub protocol: u8,
+    pub length: u8,
+    pub bytes: [u8; 8],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeEvent {
+    Port(RuntimePortEvent),
+    Hid(HidRawReport),
 }
 
 /// Состояние двух колец и отложенных извещений портов.
@@ -136,6 +172,9 @@ struct IoState {
     commands: CommandCursor,
     events: EventCursor,
     pending_ports: [Option<RuntimePortEvent>; 256],
+    hid: [Option<HidChannel>; 2],
+    pending_hid: [Option<Completion>; 2],
+    control_next: [usize; 2],
 }
 
 impl IoState {
@@ -144,6 +183,9 @@ impl IoState {
             commands: CommandCursor::new(),
             events: EventCursor::new(),
             pending_ports: [None; 256],
+            hid: [None; 2],
+            pending_hid: [None; 2],
+            control_next: [12, 9],
         }
     }
 
@@ -155,6 +197,15 @@ impl IoState {
         }
         None
     }
+}
+
+fn hid_transfer_index(io: &IoState, event: Completion) -> Option<usize> {
+    if event.kind != 32 {
+        return None;
+    }
+    io.hid.iter().position(|channel| {
+        channel.is_some_and(|hid| hid.slot == event.slot && hid.outstanding == event.pointer)
+    })
 }
 
 fn poll_event<R: OperationalRegisters>(
@@ -176,6 +227,7 @@ fn poll_event<R: OperationalRegisters>(
         slot: (control >> 24) as u8,
         pointer: u64::from(memory.read(EVENT_RING_PAGE, offset))
             | (u64::from(memory.read(EVENT_RING_PAGE, offset + 4)) << 32),
+        remaining: memory.read(EVENT_RING_PAGE, offset + 8) & 0x00ff_ffff,
     };
     io.events.advance();
     // ERDP всегда адресует следующий элемент, в том числе после оборота.
@@ -205,6 +257,10 @@ fn await_completion<R: OperationalRegisters>(
                 port,
                 completion_code: event.code,
             });
+            continue;
+        }
+        if let Some(index) = hid_transfer_index(io, event) {
+            io.pending_hid[index] = Some(event);
             continue;
         }
         return Ok(event);
@@ -448,6 +504,11 @@ fn read_descriptor<R: OperationalRegisters>(
     }
     let interface = usb_descriptors::parse_configuration(&configuration[..configuration_size])
         .map_err(CommandError::Configuration)?;
+    let hid = usb_descriptors::parse_hid_configuration(&configuration[..configuration_size])
+        .map_err(CommandError::Configuration)?;
+    if hid.protocol != interface.protocol {
+        return Err(CommandError::InvalidConfiguration);
+    }
     Ok(CommandReport {
         completion_code: event.code,
         event_type: event.kind,
@@ -460,6 +521,7 @@ fn read_descriptor<R: OperationalRegisters>(
         interface_protocol: interface.protocol,
         endpoint_count: interface.endpoint_count,
         configuration_length: interface.total_length,
+        hid,
     })
 }
 
@@ -696,6 +758,212 @@ pub unsafe fn start_pair<const N: usize, R: OperationalRegisters>(
     ))
 }
 
+/// Кодирует завершающий управляющий запрос SET_CONFIGURATION через EP0.
+/// Для короткого управляющего запроса нужны Setup и Status TRB.
+fn set_configuration<R: OperationalRegisters>(
+    registers: &R,
+    capabilities: XhciCapabilities,
+    base: u64,
+    memory: &GuestMemory,
+    io: &mut IoState,
+    pages: DevicePages,
+    slot: u8,
+    index: usize,
+    configuration: u8,
+) -> Result<(), CommandError> {
+    if configuration == 0 || index + 2 >= RING_ITEMS as usize - 1 {
+        return Err(CommandError::EndpointRingFull);
+    }
+    let offset = index * 16;
+    let setup = u32::from(configuration) << 16 | (9 << 8);
+    memory.write(pages.transfer, offset, setup);
+    memory.write(pages.transfer, offset + 4, 0);
+    memory.write(pages.transfer, offset + 8, 8);
+    memory.write(pages.transfer, offset + 12, (2 << 10) | (1 << 6) | 1);
+    memory.write(pages.transfer, offset + 16, 0);
+    memory.write(pages.transfer, offset + 20, 0);
+    memory.write(pages.transfer, offset + 24, 0);
+    memory.write(
+        pages.transfer,
+        offset + 28,
+        (4 << 10) | (1 << 16) | (1 << 5) | 1,
+    );
+    compiler_fence(Ordering::SeqCst);
+    registers.write_u32(capabilities.doorbell_offset + u64::from(slot) * 4, 1);
+    let event = await_completion(
+        registers,
+        capabilities.runtime_offset + 0x20,
+        base,
+        memory,
+        io,
+    )?;
+    let expected = base + pages.transfer * PAGE_BYTES + offset as u64 + 16;
+    if event.kind != 32 || event.slot != slot || event.pointer != expected || event.code != 1 {
+        return Err(CommandError::InvalidTransferEvent);
+    }
+    Ok(())
+}
+
+fn interrupt_interval(microframes: u8, speed: u8) -> u32 {
+    if speed > 2 {
+        return u32::from(microframes.saturating_sub(1)).min(15);
+    }
+    let periods = u32::from(microframes).saturating_mul(8).max(1);
+    31 - periods.leading_zeros()
+}
+
+fn configure_interrupt_endpoint<R: OperationalRegisters>(
+    registers: &R,
+    capabilities: XhciCapabilities,
+    base: u64,
+    memory: &GuestMemory,
+    io: &mut IoState,
+    pages: DevicePages,
+    slot: u8,
+    hid: HidConfiguration,
+) -> Result<(), CommandError> {
+    let endpoint_number = u32::from(hid.endpoint_address & 0x0f);
+    let dci = endpoint_number * 2 + 1;
+    if dci > 31 {
+        return Err(CommandError::InvalidEndpoint);
+    }
+    let context = usize::from(capabilities.context_size_bytes);
+    let input_slot = context;
+    let output_slot = pages.output;
+    for word in 0..context / 4 {
+        let value = memory.read(output_slot, word * 4);
+        memory.write(pages.input, input_slot + word * 4, value);
+    }
+    let slot_flags = memory.read(pages.input, input_slot);
+    memory.write(
+        pages.input,
+        input_slot,
+        (slot_flags & !(0x1f << 27)) | (dci << 27),
+    );
+    memory.write(pages.input, 0, 0);
+    memory.write(pages.input, 4, 1 | (1 << dci));
+
+    let ring = base + pages.descriptor * PAGE_BYTES + HID_RING_START as u64;
+    let link_offset = (HID_RING_ITEMS - 1) * 16 + HID_RING_START;
+    memory.write(pages.descriptor, link_offset, ring as u32);
+    memory.write(pages.descriptor, link_offset + 4, (ring >> 32) as u32);
+    memory.write(pages.descriptor, link_offset + 8, 0);
+    memory.write(pages.descriptor, link_offset + 12, LINK_TRB);
+
+    let speed = ((slot_flags >> 20) & 0x0f) as u8;
+    let interval = interrupt_interval(hid.interval, speed);
+    let endpoint_offset = context * (dci as usize + 1);
+    memory.write(pages.input, endpoint_offset, interval << 16);
+    memory.write(
+        pages.input,
+        endpoint_offset + 4,
+        (3 << 1) | (HID_ENDPOINT_TYPE << 3) | (u32::from(hid.max_packet_size) << 16),
+    );
+    memory.write(pages.input, endpoint_offset + 8, (ring | 1) as u32);
+    memory.write(pages.input, endpoint_offset + 12, (ring >> 32) as u32);
+    memory.write(
+        pages.input,
+        endpoint_offset + 16,
+        u32::from(hid.max_packet_size) | (u32::from(hid.max_packet_size) << 16),
+    );
+    compiler_fence(Ordering::SeqCst);
+    let event = command(
+        registers,
+        capabilities,
+        base,
+        memory,
+        io,
+        base + pages.input * PAGE_BYTES,
+        (12 << 10) | (u32::from(slot) << 24),
+    )?;
+    if event.slot != slot {
+        return Err(CommandError::InvalidSlot);
+    }
+    Ok(())
+}
+
+fn arm_hid<R: OperationalRegisters>(
+    registers: &R,
+    capabilities: XhciCapabilities,
+    base: u64,
+    memory: &GuestMemory,
+    channel: &mut HidChannel,
+) {
+    let address = base + channel.pages.descriptor * PAGE_BYTES + HID_REPORT_OFFSET as u64;
+    let trb = HID_RING_START + channel.index * 16;
+    // Только один активный TRB на устройство: отчёт читается до повторной
+    // выдачи того же буфера xHCI.
+    for offset in (0..8).step_by(4) {
+        memory.write(channel.pages.descriptor, HID_REPORT_OFFSET + offset, 0);
+    }
+    memory.write(channel.pages.descriptor, trb, address as u32);
+    memory.write(channel.pages.descriptor, trb + 4, (address >> 32) as u32);
+    memory.write(
+        channel.pages.descriptor,
+        trb + 8,
+        u32::from(channel.descriptor.max_packet_size),
+    );
+    memory.write(
+        channel.pages.descriptor,
+        trb + 12,
+        (1 << 10) | (1 << 5) | channel.cycle,
+    );
+    channel.outstanding = base + channel.pages.descriptor * PAGE_BYTES + trb as u64;
+    channel.index += 1;
+    if channel.index == HID_RING_ITEMS - 1 {
+        let link = HID_RING_START + (HID_RING_ITEMS - 1) * 16 + 12;
+        memory.write(
+            channel.pages.descriptor,
+            link,
+            (6 << 10) | 2 | channel.cycle,
+        );
+        channel.index = 0;
+        channel.cycle ^= 1;
+    }
+    compiler_fence(Ordering::SeqCst);
+    let dci = u32::from(channel.descriptor.endpoint_address & 0x0f) * 2 + 1;
+    registers.write_u32(
+        capabilities.doorbell_offset + u64::from(channel.slot) * 4,
+        dci,
+    );
+}
+
+fn completed_hid<R: OperationalRegisters>(
+    registers: &R,
+    capabilities: XhciCapabilities,
+    base: u64,
+    memory: &GuestMemory,
+    io: &mut IoState,
+    event: Completion,
+) -> Result<HidRawReport, CommandError> {
+    let index = hid_transfer_index(io, event).ok_or(CommandError::InvalidHidEvent)?;
+    let mut channel = io.hid[index].ok_or(CommandError::InvalidHidEvent)?;
+    if event.code != 1 && event.code != 13 {
+        return Err(CommandError::WrongCompletionCode);
+    }
+    let transfer_size = u32::from(channel.descriptor.max_packet_size);
+    if event.remaining > transfer_size {
+        return Err(CommandError::InvalidHidEvent);
+    }
+    let received = (transfer_size - event.remaining) as usize;
+    if received > 8 {
+        return Err(CommandError::InvalidHidEvent);
+    }
+    let mut bytes = [0_u8; 8];
+    for (offset, byte) in bytes.iter_mut().take(received).enumerate() {
+        *byte = memory.read_byte(channel.pages.descriptor, HID_REPORT_OFFSET + offset);
+    }
+    let report = HidRawReport {
+        slot: channel.slot,
+        protocol: channel.descriptor.protocol,
+        length: received as u8,
+        bytes,
+    };
+    arm_hid(registers, capabilities, base, memory, &mut channel);
+    io.hid[index] = Some(channel);
+    Ok(report)
+}
+
 /// Владелец закреплённых DMA-страниц живого контроллера xHCI.
 ///
 /// Нельзя освободить страницы посредством Drop: прежде требуется
@@ -792,6 +1060,12 @@ impl ActiveDma {
             }
         };
         debug_assert_eq!(event.slot, slot);
+        for index in 0..self.io.hid.len() {
+            if self.io.hid[index].is_some_and(|channel| channel.slot == slot) {
+                self.io.hid[index] = None;
+                self.io.pending_hid[index] = None;
+            }
+        }
         // Аппаратное подтверждение Disable Slot означает отсутствие
         // дальнейшего доступа xHCI к выходному контексту этого слота.
         self.memory.write(0, usize::from(slot) * 8, 0);
@@ -837,6 +1111,9 @@ impl ActiveDma {
             speed,
             &mut self.io,
         );
+        if result.is_ok() {
+            self.io.control_next[device_index] = 9;
+        }
         if result.is_err() {
             // Ошибка после Enable Slot может оставить в устройстве
             // незавершённые аппаратные обращения. До общего shutdown
@@ -844,6 +1121,156 @@ impl ActiveDma {
             self.faulted = true;
         }
         result
+    }
+
+    /// Активирует выбранную HID-конфигурацию USB и прерывание IN.
+    /// Требует ранее адресованный слот и не выполняет повторного выделения DMA.
+    pub fn configure_hid<R: OperationalRegisters>(
+        &mut self,
+        registers: &R,
+        capabilities: XhciCapabilities,
+        device_index: usize,
+        slot: u8,
+    ) -> Result<HidConfiguration, CommandError> {
+        if self.stopped || self.released {
+            return Err(CommandError::AlreadyStopped);
+        }
+        if self.faulted {
+            return Err(CommandError::ServiceFaulted);
+        }
+        let pages = match device_index {
+            0 => xhci_session::FIRST_DEVICE,
+            1 => xhci_session::SECOND_DEVICE,
+            _ => return Err(CommandError::NoFreeDevicePages),
+        };
+        if self.io.hid[device_index].is_some() {
+            return Err(CommandError::AlreadyConfigured);
+        }
+        let length = (self.memory.read(pages.descriptor, 128) >> 16) as usize;
+        if !(9..=128).contains(&length) {
+            return Err(CommandError::InvalidConfiguration);
+        }
+        let mut bytes = [0_u8; 128];
+        for (offset, byte) in bytes.iter_mut().take(length).enumerate() {
+            *byte = self.memory.read_byte(pages.descriptor, 128 + offset);
+        }
+        let config = usb_descriptors::parse_hid_configuration(&bytes[..length])
+            .map_err(CommandError::Configuration)?;
+        if (config.protocol == 1 && config.max_packet_size < 8)
+            || (config.protocol == 2 && config.max_packet_size < 3)
+            || config.max_packet_size > 8
+        {
+            return Err(CommandError::InvalidEndpoint);
+        }
+        let result = (|| {
+            configure_interrupt_endpoint(
+                registers,
+                capabilities,
+                self.base,
+                &self.memory,
+                &mut self.io,
+                pages,
+                slot,
+                config,
+            )?;
+            let trb = self.io.control_next[device_index];
+            set_configuration(
+                registers,
+                capabilities,
+                self.base,
+                &self.memory,
+                &mut self.io,
+                pages,
+                slot,
+                trb,
+                config.value,
+            )?;
+            self.io.control_next[device_index] = trb + 2;
+            let mut channel = HidChannel {
+                pages,
+                slot,
+                descriptor: config,
+                index: 0,
+                cycle: 1,
+                outstanding: 0,
+            };
+            arm_hid(
+                registers,
+                capabilities,
+                self.base,
+                &self.memory,
+                &mut channel,
+            );
+            self.io.hid[device_index] = Some(channel);
+            Ok(config)
+        })();
+        if result.is_err() {
+            // Неопределённый результат Configure Endpoint и EP0 запрещает
+            // дальнейшее переиспользование памяти до общего сброса xHCI.
+            self.faulted = true;
+        }
+        result
+    }
+
+    /// События портов и завершающиеся отчёты HID используют одно
+    /// аппаратное кольцо и извлекаются без потери чужих извещений.
+    pub fn poll_runtime_event<R: OperationalRegisters>(
+        &mut self,
+        registers: &R,
+        capabilities: XhciCapabilities,
+    ) -> Result<Option<RuntimeEvent>, CommandError> {
+        if self.stopped || self.released {
+            return Err(CommandError::AlreadyStopped);
+        }
+        if self.faulted {
+            return Err(CommandError::ServiceFaulted);
+        }
+        if !wait_halted(registers, capabilities.operational_offset, false) {
+            return Err(CommandError::ControllerStopped);
+        }
+        if let Some(port) = self.io.take_port() {
+            return Ok(Some(RuntimeEvent::Port(port)));
+        }
+        for index in 0..self.io.pending_hid.len() {
+            if let Some(event) = self.io.pending_hid[index].take() {
+                let report = completed_hid(
+                    registers,
+                    capabilities,
+                    self.base,
+                    &self.memory,
+                    &mut self.io,
+                    event,
+                )?;
+                return Ok(Some(RuntimeEvent::Hid(report)));
+            }
+        }
+        let runtime = capabilities.runtime_offset + 0x20;
+        let Some(event) = poll_event(registers, runtime, self.base, &self.memory, &mut self.io)
+        else {
+            return Ok(None);
+        };
+        if event.kind == 34 {
+            let port = (event.pointer >> 24) as u8;
+            if port == 0 || port > capabilities.max_ports {
+                return Err(CommandError::InvalidPortEvent);
+            }
+            return Ok(Some(RuntimeEvent::Port(RuntimePortEvent {
+                port,
+                completion_code: event.code,
+            })));
+        }
+        if event.kind == 32 {
+            let report = completed_hid(
+                registers,
+                capabilities,
+                self.base,
+                &self.memory,
+                &mut self.io,
+                event,
+            )?;
+            return Ok(Some(RuntimeEvent::Hid(report)));
+        }
+        Err(CommandError::UnexpectedRuntimeEvent(event.kind))
     }
 
     pub fn is_mapped(&self) -> bool {

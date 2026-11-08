@@ -34,7 +34,8 @@ use alloc::vec::Vec;
 use bootloader_api::config::{BootloaderConfig, Mapping};
 use bootloader_api::{BootInfo, entry_point};
 use core::alloc::Layout;
-use phoenix_framebuffer::draw_boot_banner;
+use phoenix_framebuffer::route::{DisplayRoute, FirmwarePurpose};
+use phoenix_framebuffer::{draw_boot_banner, draw_emergency_banner, firmware_sample};
 use phoenix_memory::{MemorySummary, SystemFrameAllocator};
 use phoenix_vm::{ActivePageTable, InactivePageTable};
 use qemu::ExitCode;
@@ -473,21 +474,39 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         ),
     );
 
+    // Сохраняем буфер GOP для раннего/аварийного экрана до перехода на
+    // собственный видеодрайвер. В обычном режиме записи в GOP запрещены.
+    let mut display_route = DisplayRoute::new();
+    render_boot_banner(boot_info, &mut out, &display_route);
+    let firmware_checkpoint = boot_info.framebuffer.as_ref().map(firmware_sample);
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("graphics firmware boot: OK owner={}", display_route.owner().name()),
+    );
+
     // Действительное обновление виртуального экрана, выполненное собственным
     // драйвером VirtIO-GPU. Только QEMU: физические AMD/NVIDIA не трогаем.
     let gpu_controller = pcie
         .graphics
         .virtio_gpu
         .expect("в проверочном профиле QEMU требуется VirtIO-GPU");
-    let (gpu_launch, gpu_report, mut active_gpu) = unsafe {
+    let started_gpu = unsafe {
         virtio_gpu::start(
             gpu_controller,
             &mut page_table,
             &mut frames,
             physical_memory_offset,
         )
-    }
-    .expect("VirtIO-GPU не выполнил двухмерное обновление экрана");
+    };
+    let (gpu_launch, gpu_report, mut active_gpu) = match started_gpu {
+        Ok(started) => started,
+        Err(error) => {
+            display_route.recover();
+            render_firmware_emergency(boot_info, &mut out, &display_route);
+            panic!("VirtIO-GPU не смог передать графику: {error:?}");
+        }
+    };
     assert_eq!(gpu_launch.name, "virtio-gpu-2d");
     assert_eq!(gpu_report.width, 128);
     assert_eq!(gpu_report.height, 128);
@@ -515,6 +534,47 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             "virtio gpu active: OK dma_pages={}",
             gpu_report.reserved_dma_pages
         ),
+    );
+
+    display_route
+        .claim_native(active_gpu.is_running() && gpu_report.completed_commands == 6)
+        .expect("штатный графический путь не подтвердил готовность");
+    display_route
+        .native_access()
+        .expect("ошибка владения основным экраном");
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "graphics handoff: OK owner={} gop=reserved",
+            display_route.owner().name()
+        ),
+    );
+
+    let ready_commands = match active_gpu.present_scene(virtio_gpu::NativeScene::Ready) {
+        Ok(commands) => commands,
+        Err(error) => {
+            let _ = active_gpu.shutdown(&mut page_table, &mut frames);
+            display_route.recover();
+            render_firmware_emergency(boot_info, &mut out, &display_route);
+            panic!("первое обновление штатного экрана завершилось ошибкой: {error:?}");
+        }
+    };
+    assert_eq!(ready_commands, 8);
+    assert_eq!(
+        boot_info.framebuffer.as_ref().map(firmware_sample),
+        firmware_checkpoint,
+        "загрузочный буфер GOP изменился при работе VirtIO-GPU"
+    );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("graphics native present: OK phase=ready commands={ready_commands}"),
+    );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("graphics gop preserved: OK phase=ready"),
     );
 
     // Реальный запуск выбранного драйвера с ресурсами ядра.
@@ -801,7 +861,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     init_apic_timer(&mut out);
 
-    render_boot_banner(boot_info, &mut out);
+    // GOP больше не используется для штатных графических обновлений.
+    display_route
+        .native_access()
+        .expect("во время работы USB потерян штатный экран");
 
     // Контроллер пережил остальные самопроверки ядра. Эмулируемый USB
     // отключается и подключается во время работы службы через монитор QEMU.

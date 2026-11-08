@@ -887,7 +887,7 @@ fn xhci_scheduled_service_self_test(
         "служба не выполняла экономного ожидания"
     );
     assert!(
-        report.supervisor_ticks > 1,
+        report.supervisor_ticks >= 64,
         "второй поток не выполнялся одновременно со службой USB"
     );
     serial::emergency(format_args!(

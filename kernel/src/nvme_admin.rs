@@ -522,22 +522,19 @@ impl<'a> NvmeBlockDevice<'a> {
     }
 
     fn issue(&mut self, command: IoCommand) -> Result<(), BlockError> {
-        if !self.queue_state.can_submit() {
-            return Err(BlockError::BackendFailure);
-        }
-        if submit_io(
-            self.registers,
-            self.dma,
-            &mut self.cursor,
-            self.doorbell_stride,
-            command,
-        )
-        .is_err()
-        {
-            // Не продолжаем обращаться к очереди с неподтверждённой командой.
-            self.queue_state.quarantine();
-            return Err(BlockError::BackendFailure);
-        }
+        // Отказ от повторной команды выполняется самим охранным состоянием:
+        // даже при ошибке проверки завершения очередь остаётся изолированной.
+        self.queue_state
+            .submit(|| {
+                submit_io(
+                    self.registers,
+                    self.dma,
+                    &mut self.cursor,
+                    self.doorbell_stride,
+                    command,
+                )
+            })
+            .map_err(|_| BlockError::BackendFailure)?;
         self.completed_commands = self.completed_commands.wrapping_add(1);
         Ok(())
     }

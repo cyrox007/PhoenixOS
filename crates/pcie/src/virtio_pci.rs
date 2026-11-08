@@ -228,14 +228,17 @@ mod tests {
     fn setup() -> FakeConfig {
         let mut data = [0_u32; 64];
         data[0x34 / 4] = 0x80;
-        data[0x80 / 4] = 0x0004_1409 | (0xa0 << 8);
+        data[0x80 / 4] = 0x0014_0009 | (0xa0 << 8) | ((COMMON_CFG as u32) << 24);
+        data[0x84 / 4] = 4;
         data[0x88 / 4] = 0;
         data[0x8c / 4] = 56;
-        data[0xa0 / 4] = 0x0004_1409 | (0xc0 << 8) | (NOTIFY_CFG as u32) << 24;
+        data[0xa0 / 4] = 0x0014_0009 | (0xc0 << 8) | ((NOTIFY_CFG as u32) << 24);
+        data[0xa4 / 4] = 4;
         data[0xa8 / 4] = 0x3000;
         data[0xac / 4] = 4096;
         data[0xb0 / 4] = 4;
-        data[0xc0 / 4] = 0x0004_1009 | (DEVICE_CFG as u32) << 24;
+        data[0xc0 / 4] = 0x0010_0009 | ((DEVICE_CFG as u32) << 24);
+        data[0xc4 / 4] = 4;
         data[0xc8 / 4] = 0x2000;
         data[0xcc / 4] = 16;
         data[0x20 / 4] = 0x8000_0004;
@@ -265,8 +268,8 @@ mod tests {
         config.data[0xc0 / 4] |= 0x80 << 8;
         assert_eq!(discover(&config, gpu()), Err(VirtioPciError::CapabilityLoop));
         config = setup();
-        config.data[0xc0 / 4] |= 0x01 << 8;
-        assert_eq!(discover(&config, gpu()), Err(VirtioPciError::InvalidCapability));
+        config.data[0xc4 / 4] = 0;
+        assert_eq!(discover(&config, gpu()), Err(VirtioPciError::IncompatibleRegions));
     }
 
     #[test]

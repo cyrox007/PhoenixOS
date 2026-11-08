@@ -155,6 +155,7 @@ def main():
             # собственного графического драйвера.
             "-vga", "std",
             "-device", "virtio-gpu-pci,id=phoenix-gpu",
+            "-device", "edu,id=phoenix-edu",
             "-device", "qemu-xhci,id=phoenix-xhci",
             "-device", "usb-kbd,id=phoenix-keyboard,bus=phoenix-xhci.0",
             "-device", "usb-mouse,id=phoenix-mouse,bus=phoenix-xhci.0",

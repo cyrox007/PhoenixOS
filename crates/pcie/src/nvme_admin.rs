@@ -179,9 +179,18 @@ mod tests {
     fn queue_sizes_and_configuration_are_spec_compliant() {
         assert_eq!(queue_attributes(16, 2048), Ok(0x000f_000f));
         assert_eq!(enabled_configuration(), 0x0046_0001);
-        assert_eq!(queue_attributes(0, 2048), Err(AdminQueueError::InvalidQueueDepth));
-        assert_eq!(queue_attributes(16, 8), Err(AdminQueueError::InvalidQueueDepth));
-        assert_eq!(queue_attributes(65, 2048), Err(AdminQueueError::InvalidQueueDepth));
+        assert_eq!(
+            queue_attributes(0, 2048),
+            Err(AdminQueueError::InvalidQueueDepth)
+        );
+        assert_eq!(
+            queue_attributes(16, 8),
+            Err(AdminQueueError::InvalidQueueDepth)
+        );
+        assert_eq!(
+            queue_attributes(65, 2048),
+            Err(AdminQueueError::InvalidQueueDepth)
+        );
     }
 
     #[test]

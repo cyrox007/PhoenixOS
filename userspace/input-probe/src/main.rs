@@ -9,9 +9,9 @@ use core::panic::PanicInfo;
 use phoenix_syscall_abi::{
     INPUT_DEVICE_CONNECTED, INPUT_DEVICE_DISCONNECTED, INPUT_EVENT_DEVICE, INPUT_EVENT_KEY,
     InputEventRecord, PackedCapabilityHandle, ProcessStartInfo, ProcessStartString,
-    SYSCALL_STATUS_ACCESS_DENIED,
+    SYSCALL_STATUS_ACCESS_DENIED, SYSCALL_STATUS_BAD_ARGUMENTS,
 };
-use phoenix_user_runtime::{console_write, input_read, process_exit};
+use phoenix_user_runtime::{console_write, input_read, phoenix_input_read, process_exit};
 
 const SUCCESS: u64 = 0x5553_4552_5f4f_4b21;
 const FAILURE_ARGUMENTS: u64 = 1;
@@ -19,6 +19,7 @@ const FAILURE_PERMISSIONS: u64 = 2;
 const FAILURE_RECEIVE: u64 = 3;
 const FAILURE_CONTENT: u64 = 4;
 const FAILURE_CONSOLE: u64 = 6;
+const FAILURE_BUFFER: u64 = 7;
 const FAILURE_PANIC: u64 = 126;
 
 #[unsafe(no_mangle)]
@@ -47,6 +48,14 @@ extern "C" fn program_main(info: *const ProcessStartInfo) -> u64 {
         _ => return FAILURE_PERMISSIONS,
     }
     if console_write(b"input userspace denied: OK\n").is_err() {
+        return FAILURE_CONSOLE;
+    }
+
+    let invalid = phoenix_input_read(capability, core::ptr::null_mut());
+    if invalid.status != u64::from(SYSCALL_STATUS_BAD_ARGUMENTS) {
+        return FAILURE_BUFFER;
+    }
+    if console_write(b"input userspace invalid buffer: OK\n").is_err() {
         return FAILURE_CONSOLE;
     }
 

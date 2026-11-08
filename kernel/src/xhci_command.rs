@@ -9,7 +9,7 @@ use core::sync::atomic::{Ordering, compiler_fence};
 use phoenix_dma::DmaLayout;
 use phoenix_dma::mapping::{DeviceMapping, DirectDmaAperture, PhysicalAddress, QemuDirectDma};
 use phoenix_memory::SystemFrameAllocator;
-use phoenix_pcie::usb_descriptors::{self, DescriptorError};
+use phoenix_pcie::usb_descriptors::{self, DescriptorError, HidConfiguration};
 use phoenix_pcie::xhci_capabilities::XhciCapabilities;
 use phoenix_pcie::xhci_control::{self, OperationalRegisters};
 use phoenix_pcie::xhci_session::{self, CommandCursor, EventCursor, SessionDevice};
@@ -57,6 +57,10 @@ pub enum CommandError {
     UnexpectedPort(u8),
     NoFreeDevicePages,
     ServiceFaulted,
+    AlreadyConfigured,
+    InvalidEndpoint,
+    InvalidHidEvent,
+    EndpointRingFull,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +76,7 @@ pub struct CommandReport {
     pub interface_protocol: u8,
     pub endpoint_count: u8,
     pub configuration_length: u16,
+    pub hid: HidConfiguration,
 }
 
 type DevicePages = SessionDevice;
@@ -448,6 +453,11 @@ fn read_descriptor<R: OperationalRegisters>(
     }
     let interface = usb_descriptors::parse_configuration(&configuration[..configuration_size])
         .map_err(CommandError::Configuration)?;
+    let hid = usb_descriptors::parse_hid_configuration(&configuration[..configuration_size])
+        .map_err(CommandError::Configuration)?;
+    if hid.protocol != interface.protocol {
+        return Err(CommandError::InvalidConfiguration);
+    }
     Ok(CommandReport {
         completion_code: event.code,
         event_type: event.kind,
@@ -460,6 +470,7 @@ fn read_descriptor<R: OperationalRegisters>(
         interface_protocol: interface.protocol,
         endpoint_count: interface.endpoint_count,
         configuration_length: interface.total_length,
+        hid,
     })
 }
 

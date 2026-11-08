@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path
 
 
-def verify_gpu_screenshot(path):
+def verify_gpu_screenshot(path, phase="initial"):
     """Сравнить настоящие пиксели снимка второго видеоконтроллера QEMU."""
     with open(path, "rb") as image:
         if image.readline().strip() != b"P6":
@@ -49,12 +49,39 @@ def verify_gpu_screenshot(path):
         + ", ".join(f"({x},{y})={pixel(x,y)}" for x, y, _ in expected),
         flush=True,
     )
+    if phase == "ready":
+        expected.append((96, 20, (58, 108, 242)))
+    elif phase == "complete":
+        expected.append((96, 20, (21, 196, 117)))
+
     for x, y, color in expected:
         if pixel(x, y) != color:
             raise RuntimeError(
                 f"VirtIO-GPU: пиксель ({x},{y}) = {pixel(x, y)}, ожидалось {color}"
             )
     print(f"Снимок VirtIO-GPU: OK {width}x{height}, проверено {len(expected)} пикселя", flush=True)
+
+
+def verify_firmware_screenshot(path):
+    """Проверить, что ранний буфер GOP не изменён при работе VirtIO-GPU."""
+    with open(path, "rb") as image:
+        if image.readline().strip() != b"P6":
+            raise RuntimeError("GOP: снимок не является двоичным PPM")
+        geometry = image.readline()
+        while geometry.startswith(b"#"):
+            geometry = image.readline()
+        width, height = map(int, geometry.split())
+        if width < 128 or height < 64 or image.readline().strip() != b"255":
+            raise RuntimeError("GOP: некорректный размер раннего изображения")
+        pixels = image.read()
+    if len(pixels) != width * height * 3:
+        raise RuntimeError("GOP: неполные пиксели раннего изображения")
+    x, y = 16, 12
+    start = (y * width + x) * 3
+    observed = tuple(pixels[start:start + 3])
+    if observed != (24, 31, 46):
+        raise RuntimeError(f"GOP: панель была перерисована после передачи: {observed}")
+    print(f"Сохранность раннего GOP: OK {width}x{height}", flush=True)
 
 
 class Qmp:
@@ -147,6 +174,9 @@ def main():
         )
         monitor = Qmp(path)
         gpu_screen_verified = False
+        gpu_ready_verified = False
+        gpu_complete_verified = False
+        firmware_held_verified = False
         ready = False
         detached = False
         attached = False
@@ -181,6 +211,31 @@ def main():
                         })
                         verify_gpu_screenshot(screenshot)
                         gpu_screen_verified = True
+                    if "graphics native present: OK phase=ready" in line and not gpu_ready_verified:
+                        screenshot = Path(directory) / "virtio-gpu-ready.ppm"
+                        monitor.execute("screendump", {
+                            "filename": str(screenshot),
+                            "device": "phoenix-gpu",
+                            "head": 0,
+                        })
+                        verify_gpu_screenshot(screenshot, phase="ready")
+                        gpu_ready_verified = True
+
+                        early_screenshot = Path(directory) / "gop-early.ppm"
+                        monitor.execute("screendump", {"filename": str(early_screenshot)})
+                        verify_firmware_screenshot(early_screenshot)
+                        firmware_held_verified = True
+
+                    if "graphics native present: OK phase=complete" in line and not gpu_complete_verified:
+                        screenshot = Path(directory) / "virtio-gpu-complete.ppm"
+                        monitor.execute("screendump", {
+                            "filename": str(screenshot),
+                            "device": "phoenix-gpu",
+                            "head": 0,
+                        })
+                        verify_gpu_screenshot(screenshot, phase="complete")
+                        gpu_complete_verified = True
+
                     if "xhci hotplug ready: OK" in line and not ready:
                         monitor.execute("device_del", {"id": "phoenix-keyboard"})
                         ready = True
@@ -270,8 +325,10 @@ def main():
                     if "xhci scheduled stopped: OK" in line:
                         scheduled_stopped = True
             result = process.wait(timeout=3)
-            if not gpu_screen_verified:
-                raise RuntimeError("Отсутствует снимок изображения VirtIO-GPU")
+            if not gpu_screen_verified or not gpu_ready_verified or not gpu_complete_verified:
+                raise RuntimeError("Отсутствуют снимки двух штатных кадров VirtIO-GPU")
+            if not firmware_held_verified:
+                raise RuntimeError("Ранний буфер GOP не прошёл проверку сохранности")
             if not (ready and detached and attached):
                 raise RuntimeError("Отсутствует подтверждение полного переподключения USB")
             if not (hid_ready and key_pressed and key_released and mouse_moved):

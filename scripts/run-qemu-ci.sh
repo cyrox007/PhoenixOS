@@ -35,8 +35,10 @@ if [[ -z "$OVMF_CODE" || -z "$OVMF_VARS" ]]; then
 fi
 
 vars_copy="$(mktemp)"
-serial_log="$(mktemp)"
-trap 'rm -f "$vars_copy" "$serial_log"' EXIT
+mkdir -p artifacts
+serial_log="$PWD/artifacts/qemu-serial.log"
+: > "$serial_log"
+trap 'rm -f "$vars_copy"' EXIT
 cp "$OVMF_VARS" "$vars_copy"
 
 if [[ ! -c /dev/kvm ]]; then
@@ -50,17 +52,29 @@ set +e
 # Виртуальная машина загружает несколько устройств и проверяет два цикла
 # USB-переподключения, DMA, NVMe и снимки графики. 30 секунд недостаточно
 # на нагруженных исполнителях CI; таймаут остаётся конечным и настраиваемым.
-QEMU_TIMEOUT_SECONDS="${PHOENIXOS_QEMU_TIMEOUT_SECONDS:-90}"
+QEMU_TIMEOUT_SECONDS="${PHOENIXOS_QEMU_TIMEOUT_SECONDS:-180}"
+QEMU_IDLE_TIMEOUT_SECONDS="${PHOENIXOS_QEMU_IDLE_TIMEOUT_SECONDS:-60}"
 if [[ ! "$QEMU_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
   echo "Некорректное время ожидания QEMU: $QEMU_TIMEOUT_SECONDS" >&2
   exit 2
 fi
-timeout -k 5s "${QEMU_TIMEOUT_SECONDS}s" sudo python3 scripts/qemu-hotplug.py "$IMAGE" "$OVMF_CODE" "$vars_copy" "$serial_log"
+if [[ ! "$QEMU_IDLE_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Некорректное время простоя QEMU: $QEMU_IDLE_TIMEOUT_SECONDS" >&2
+  exit 2
+fi
+# Внутренний сторожевой механизм сообщает последнюю контрольную точку;
+# внешний предел на 15 секунд больше, чтобы успели завершиться очистка и вывод.
+timeout -k 5s "$(( QEMU_TIMEOUT_SECONDS + 15 ))s" sudo env \
+  "PHOENIXOS_QEMU_TIMEOUT_SECONDS=$QEMU_TIMEOUT_SECONDS" \
+  "PHOENIXOS_QEMU_IDLE_TIMEOUT_SECONDS=$QEMU_IDLE_TIMEOUT_SECONDS" \
+  python3 scripts/qemu-hotplug.py "$IMAGE" "$OVMF_CODE" "$vars_copy" "$serial_log"
 status=$?
 set -e
 
 if [[ "$status" -ne 0 ]]; then
   echo "Проверка USB-переподключения QEMU завершилась с кодом $status" >&2
+  echo "Последние сообщения последовательного порта:" >&2
+  tail -n 40 "$serial_log" >&2 || true
   exit 1
 fi
 

@@ -18,6 +18,24 @@ pub enum IoError {
     CompletionStatus(u16),
 }
 
+/// После сомнительного завершения очередь блокируется до аппаратного
+/// сброса; одно только повторное чтение фазы не возобновляет обмен.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoQueueState {
+    Ready,
+    Quarantined,
+}
+
+impl IoQueueState {
+    pub const fn can_submit(self) -> bool {
+        matches!(self, Self::Ready)
+    }
+
+    pub fn quarantine(&mut self) {
+        *self = Self::Quarantined;
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IoCommand {
     pub words: [u32; 16],
@@ -151,6 +169,18 @@ mod tests {
             IoCommand::transfer(1, false, 1, 0, 0, 32768, 0x3000),
             Err(IoError::InvalidBlockRange)
         );
+    }
+
+    #[test]
+    fn uncertain_queue_cannot_be_reused_without_reinitialization() {
+        let mut state = IoQueueState::Ready;
+        assert!(state.can_submit());
+        state.quarantine();
+        assert!(!state.can_submit());
+        state.quarantine();
+        assert!(!state.can_submit());
+        let reset_queue = IoQueueState::Ready;
+        assert!(reset_queue.can_submit());
     }
 
     #[test]

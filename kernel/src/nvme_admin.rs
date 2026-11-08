@@ -327,12 +327,8 @@ fn map_completion_wait(error: WaitError) -> AdminRuntimeError {
 }
 
 fn wait_ready(regs: &RegisterWindow, expected: bool) -> Result<(), AdminRuntimeError> {
-    nvme_wait::wait_ready(
-        || regs.read_u32(nvme_admin::REG_CSTS),
-        expected,
-        POLL_LIMIT,
-    )
-    .map_err(map_ready_wait)
+    nvme_wait::wait_ready(|| regs.read_u32(nvme_admin::REG_CSTS), expected, POLL_LIMIT)
+        .map_err(map_ready_wait)
 }
 
 fn disable(regs: &RegisterWindow) -> Result<(), AdminRuntimeError> {

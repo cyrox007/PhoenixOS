@@ -53,6 +53,7 @@ pub enum AdminRuntimeError {
     InvalidControllerIdentity(u16),
     InvalidNamespace,
     InvalidBlockFormat,
+    UnsafeTestDevice,
     DataMismatch,
     Io(IoError),
     Block(BlockError),
@@ -727,6 +728,10 @@ fn exercise(
     if format & 0xffff != 0 || (format >> 16) & 0xff != 9 {
         return Err(AdminRuntimeError::InvalidBlockFormat);
     }
+    // Самопроверка с записью допускается только для временного тома QEMU 16 МиБ.
+    if blocks != 32_768 {
+        return Err(AdminRuntimeError::UnsafeTestDevice);
+    }
     let (io_commands, verified_blocks) = exercise_blocks(regs, arena, &mut cursor, blocks, stride)?;
     Ok(AdminTestReport {
         queue_depth: QUEUE_DEPTH,
@@ -753,6 +758,10 @@ pub unsafe fn self_test<const N: usize>(
     table: &mut ActivePageTable,
     frames: &mut SystemFrameAllocator<N>,
 ) -> Result<AdminTestReport, AdminRuntimeError> {
+    // Запрещаем изменять данные физического SSD и любого другого контроллера.
+    if controller.function.vendor_id != 0x1b36 || controller.function.device_id != 0x0010 {
+        return Err(AdminRuntimeError::UnsafeTestDevice);
+    }
     let mut registers = RegisterWindow::map(controller, table, frames)?;
     // Предыдущее состояние UEFI не означает, что можно переназначить
     // очереди: контроллер должен подтвердить RDY=0 до выдачи нового DMA.

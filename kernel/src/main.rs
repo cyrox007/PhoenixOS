@@ -18,9 +18,9 @@ mod nvme_driver;
 mod nvme_fs;
 mod nvme_mmio;
 mod pcie;
-mod reference_edu;
 mod process_space;
 mod qemu;
+mod reference_edu;
 mod serial;
 mod thread;
 mod thread_manager;
@@ -904,11 +904,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         "INFO",
         format_args!(
             "reference edu irq dma: OK mask={:#x} returned_pages={}",
-            edu_report.irq_mask,
-            edu_report.returned_dma_pages
+            edu_report.irq_mask, edu_report.returned_dma_pages
         ),
     );
-
 
     // GOP больше не используется для штатных графических обновлений.
     display_route

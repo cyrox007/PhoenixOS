@@ -539,9 +539,14 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         ),
     );
 
-    display_route
-        .claim_native(active_gpu.is_running() && gpu_report.completed_commands == 6)
-        .expect("штатный графический путь не подтвердил готовность");
+    if let Err(error) =
+        display_route.claim_native(active_gpu.is_running() && gpu_report.completed_commands == 6)
+    {
+        let _ = active_gpu.shutdown(&mut page_table, &mut frames);
+        display_route.recover();
+        render_firmware_emergency(boot_info, &mut out, &display_route);
+        panic!("штатный экран не подтвердил готовность: {error:?}");
+    }
     display_route
         .native_access()
         .expect("ошибка владения основным экраном");
@@ -1138,9 +1143,16 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // После проверки реального экрана монитором QEMU завершаем сессию
     // GPU. В отличие от обычного объекта драйвер обязан подтвердить сброс
     // до возврата страниц памяти устройства в системный распределитель.
-    let gpu_shutdown = active_gpu
-        .shutdown(&mut page_table, &mut frames)
-        .expect("VirtIO-GPU не смог безопасно остановить графический сеанс");
+    let gpu_shutdown = match active_gpu.shutdown(&mut page_table, &mut frames) {
+        Ok(report) => report,
+        Err(error) => {
+            // Даже если сброс не подтверждён и память GPU нельзя
+            // освобождать, сохранившийся GOP даёт аварийное изображение.
+            display_route.recover();
+            render_firmware_emergency(boot_info, &mut out, &display_route);
+            panic!("не удалось безопасно остановить VirtIO-GPU: {error:?}");
+        }
+    };
     assert_eq!(gpu_shutdown.completed_commands, 13);
     assert_eq!(gpu_shutdown.returned_dma_pages, 20);
     serial::line(

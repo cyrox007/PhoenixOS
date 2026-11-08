@@ -15,6 +15,12 @@ pub const FORMAT_X8R8G8B8: u32 = 4;
 pub const CONTROL_HEADER_LEN: usize = 24;
 pub const RESOURCE_ID: u32 = 1;
 
+/// Представление байтов для эмулируемого формата X8R8G8B8:
+/// первый байт не несёт цвета, затем следуют R, G и B.
+pub const fn pixel_x8r8g8b8(red: u8, green: u8, blue: u8) -> u32 {
+    (blue as u32) << 24 | (green as u32) << 16 | (red as u32) << 8
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuProtocolError {
     InvalidDimensions,
@@ -164,6 +170,13 @@ fn get_u32(buffer: &[u8], start: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pixel_format_has_expected_byte_order_for_qemu() {
+        assert_eq!(pixel_x8r8g8b8(24, 31, 46).to_le_bytes(), [0, 24, 31, 46]);
+        assert_eq!(pixel_x8r8g8b8(255, 255, 255).to_le_bytes(), [0, 255, 255, 255]);
+        assert_eq!(pixel_x8r8g8b8(229, 94, 54).to_le_bytes(), [0, 229, 94, 54]);
+    }
 
     #[test]
     fn command_layout_matches_virtio_gpu_protocol() {

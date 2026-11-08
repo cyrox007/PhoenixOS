@@ -56,6 +56,7 @@ pub enum CommandError {
     AlreadyStopped,
     UnexpectedPort(u8),
     NoFreeDevicePages,
+    ServiceFaulted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -690,6 +691,7 @@ pub unsafe fn start_pair<const N: usize, R: OperationalRegisters>(
             io,
             stopped: false,
             released: false,
+            faulted: false,
         },
     ))
 }
@@ -707,6 +709,7 @@ pub struct ActiveDma {
     io: IoState,
     stopped: bool,
     released: bool,
+    faulted: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -762,10 +765,13 @@ impl ActiveDma {
         if self.stopped || self.released {
             return Err(CommandError::AlreadyStopped);
         }
+        if self.faulted {
+            return Err(CommandError::ServiceFaulted);
+        }
         if slot == 0 || slot > capabilities.max_slots {
             return Err(CommandError::InvalidSlot);
         }
-        let event = command(
+        let result = command(
             registers,
             capabilities,
             self.base,
@@ -773,10 +779,19 @@ impl ActiveDma {
             &mut self.io,
             0,
             (10 << 10) | (u32::from(slot) << 24),
-        )?;
-        if event.slot != slot {
-            return Err(CommandError::InvalidSlot);
-        }
+        );
+        let event = match result {
+            Ok(event) if event.slot == slot => event,
+            Ok(_) => {
+                self.faulted = true;
+                return Err(CommandError::InvalidSlot);
+            }
+            Err(error) => {
+                self.faulted = true;
+                return Err(error);
+            }
+        };
+        debug_assert_eq!(event.slot, slot);
         // Аппаратное подтверждение Disable Slot означает отсутствие
         // дальнейшего доступа xHCI к выходному контексту этого слота.
         self.memory.write(0, usize::from(slot) * 8, 0);
@@ -797,6 +812,9 @@ impl ActiveDma {
         if self.stopped || self.released {
             return Err(CommandError::AlreadyStopped);
         }
+        if self.faulted {
+            return Err(CommandError::ServiceFaulted);
+        }
         let pages = match device_index {
             0 => xhci_session::FIRST_DEVICE,
             1 => xhci_session::SECOND_DEVICE,
@@ -809,7 +827,7 @@ impl ActiveDma {
                 core::ptr::write_bytes(self.memory.address(page, 0), 0, (PAGE_BYTES / 4) as usize);
             }
         }
-        read_descriptor(
+        let result = read_descriptor(
             registers,
             capabilities,
             self.base,
@@ -818,7 +836,14 @@ impl ActiveDma {
             port,
             speed,
             &mut self.io,
-        )
+        );
+        if result.is_err() {
+            // Ошибка после Enable Slot может оставить в устройстве
+            // незавершённые аппаратные обращения. До общего shutdown
+            // запрещено отдавать этот комплект страниц другому USB.
+            self.faulted = true;
+        }
+        result
     }
 
     pub fn is_mapped(&self) -> bool {

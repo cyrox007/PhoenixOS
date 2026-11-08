@@ -73,7 +73,9 @@ fn verify_contents<D: BlockDevice>(
 /// Опасное форматирование возможно только после строгой проверки геометрии
 /// временного NVMe. Соседние секторы читаются до и после форматирования
 /// для подтверждения изоляции тестовой области.
+#[inline(never)]
 pub fn exercise<D: BlockDevice>(disk: &mut D) -> Result<NvmeFsReport, NvmeFsError> {
+    crate::serial::emergency(format_args!("[INFO] nvme trace: fs exercise entered\n"));
     if disk.geometry() != EXPECTED_GEOMETRY {
         return Err(NvmeFsError::UnsafeDevice);
     }
@@ -85,9 +87,11 @@ pub fn exercise<D: BlockDevice>(disk: &mut D) -> Result<NvmeFsReport, NvmeFsErro
     disk.read_blocks(before_lba, &mut before_guard)?;
     disk.read_blocks(after_lba, &mut after_guard)?;
 
+    crate::serial::emergency(format_args!("[INFO] nvme trace: fs guard read OK\n"));
     let region = BlockRegion::new(disk, TEST_REGION_START_LBA, TEST_REGION_BLOCKS)?;
     let mut format_buffer = [0_u8; FILESYSTEM_BLOCK_SIZE];
     let mut filesystem = PhoenixVfs::format_new(region, VOLUME_ID, 1, &mut format_buffer)?;
+    crate::serial::emergency(format_args!("[INFO] nvme trace: fs formatted\n"));
     let root = filesystem.root_node()?;
     let directory = filesystem.create_node(root, b"diagnostics", NodeKind::Directory)?;
     let file = filesystem.create_node(directory, b"nvme.txt", NodeKind::File)?;
@@ -103,6 +107,7 @@ pub fn exercise<D: BlockDevice>(disk: &mut D) -> Result<NvmeFsReport, NvmeFsErro
         return Err(NvmeFsError::DataMismatch);
     }
 
+    crate::serial::emergency(format_args!("[INFO] nvme trace: fs file checked\n"));
     let mut region = filesystem.into_device();
     region.flush()?;
     let mut superblock_a = [0_u8; FILESYSTEM_BLOCK_SIZE];
@@ -111,6 +116,7 @@ pub fn exercise<D: BlockDevice>(disk: &mut D) -> Result<NvmeFsReport, NvmeFsErro
     if remounted.active_superblock().superblock.generation != generation {
         return Err(NvmeFsError::DataMismatch);
     }
+    crate::serial::emergency(format_args!("[INFO] nvme trace: fs remounted\n"));
     let mounted_root = remounted.root_node()?;
     let mounted_directory = remounted.lookup_child(mounted_root, b"diagnostics")?;
     let mounted_file = remounted.lookup_child(mounted_directory, b"nvme.txt")?;

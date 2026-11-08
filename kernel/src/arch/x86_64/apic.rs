@@ -199,22 +199,18 @@ unsafe fn init_x2apic() {
 /// флага CPUID недостаточно для объявления x2APIC рабочим.
 unsafe fn x2apic_registers_active() -> bool {
     let base = unsafe { read_msr(IA32_APIC_BASE) };
-    if base & (APIC_GLOBAL_ENABLE | X2APIC_ENABLE)
-        != APIC_GLOBAL_ENABLE | X2APIC_ENABLE
-    {
+    if base & (APIC_GLOBAL_ENABLE | X2APIC_ENABLE) != APIC_GLOBAL_ENABLE | X2APIC_ENABLE {
         return false;
     }
 
     let spurious = unsafe { read_msr(IA32_X2APIC_SPURIOUS_VECTOR) };
-    if spurious & (APIC_SOFTWARE_ENABLE | 0xff)
-        != APIC_SOFTWARE_ENABLE | u64::from(SPURIOUS_VECTOR)
+    if spurious & (APIC_SOFTWARE_ENABLE | 0xff) != APIC_SOFTWARE_ENABLE | u64::from(SPURIOUS_VECTOR)
     {
         return false;
     }
 
     let timer = unsafe { read_msr(IA32_X2APIC_LVT_TIMER) };
-    timer & (TIMER_PERIODIC_MODE | 0xff)
-        == TIMER_PERIODIC_MODE | u64::from(TIMER_VECTOR)
+    timer & (TIMER_PERIODIC_MODE | 0xff) == TIMER_PERIODIC_MODE | u64::from(TIMER_VECTOR)
 }
 
 unsafe fn ensure_apic_global_enable() -> u64 {

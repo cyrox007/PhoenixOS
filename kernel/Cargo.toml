@@ -31,4 +31,5 @@ x86_64 = "0.15.2"
 
 [build-dependencies]
 userspace-smoke = { package = "phoenix-userspace-smoke", path = "../userspace/smoke", artifact = "bin", target = "x86_64-unknown-none" }
+userspace-input-probe = { package = "phoenix-userspace-input-probe", path = "../userspace/input-probe", artifact = "bin", target = "x86_64-unknown-none" }
 

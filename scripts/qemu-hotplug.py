@@ -82,6 +82,11 @@ def main():
             "-serial", "stdio",
             "-no-reboot",
             "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+            # Второй видеоконтроллер для настоящего перечисления PCIe.
+            # Стандартный UEFI-адаптер остаётся основным до запуска
+            # собственного графического драйвера.
+            "-vga", "std",
+            "-device", "virtio-gpu-pci,id=phoenix-gpu",
             "-device", "qemu-xhci,id=phoenix-xhci",
             "-device", "usb-kbd,id=phoenix-keyboard,bus=phoenix-xhci.0",
             "-device", "usb-mouse,id=phoenix-mouse,bus=phoenix-xhci.0",

@@ -74,6 +74,10 @@ pub struct EventCursor {
 }
 
 impl EventCursor {
+    pub const fn new() -> Self {
+        Self { index: 0, cycle: 1 }
+    }
+
     pub const fn after_enumeration() -> Self {
         Self {
             index: RECHECK_EVENT_INDEX + 1,
@@ -119,5 +123,56 @@ mod resident_tests {
         assert_eq!(cursor.cycle, 0);
         assert!(cursor.available(34 << 10));
         assert!(!cursor.available((34 << 10) | 1));
+    }
+}
+
+ 
+/// Положение следующего элемента командного кольца.
+/// Последний (255-й) элемент занят переходом на начало кольца.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandCursor {
+    pub index: usize,
+    pub cycle: u32,
+}
+
+impl CommandCursor {
+    pub const fn new() -> Self {
+        Self { index: 0, cycle: 1 }
+    }
+
+    /// Возвращает true при переходе через конечный элемент Link TRB.
+    pub fn advance(&mut self) -> bool {
+        self.index += 1;
+        if self.index < RING_ITEMS - 1 {
+            return false;
+        }
+        self.index = 0;
+        self.cycle ^= 1;
+        true
+    }
+}
+
+#[cfg(test)]
+mod command_cursor_tests {
+    use super::*;
+
+    #[test]
+    fn indexes_skip_the_link_and_toggle_the_cycle() {
+        let mut cursor = CommandCursor::new();
+        for _ in 0..RING_ITEMS - 2 {
+            assert!(!cursor.advance());
+        }
+        assert_eq!(cursor.index, RING_ITEMS - 2);
+        assert_eq!(cursor.cycle, 1);
+        assert!(cursor.advance());
+        assert_eq!(cursor.index, 0);
+        assert_eq!(cursor.cycle, 0);
+        assert!(!cursor.advance());
+        assert_eq!(cursor.index, 1);
+    }
+
+    #[test]
+    fn event_cursor_starts_at_zero_with_producer_cycle() {
+        assert_eq!(EventCursor::new(), EventCursor { index: 0, cycle: 1 });
     }
 }

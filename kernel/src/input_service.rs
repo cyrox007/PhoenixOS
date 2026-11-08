@@ -16,8 +16,13 @@ pub const INPUT_QUEUE_CAPACITY: usize = 64;
 static EVENTS: Mutex<InputQueue<INPUT_QUEUE_CAPACITY>> = Mutex::new(InputQueue::new());
 
 pub fn with_events<T>(operation: impl FnOnce(&mut InputQueue<INPUT_QUEUE_CAPACITY>) -> T) -> T {
-    let mut queue = EVENTS.lock();
-    operation(&mut queue)
+    // На одном процессоре вытеснение держателя замка планировщиком
+    // способно заблокировать следующий поток до возврата IRQ. Держим
+    // критический участок коротким и без аппаратных прерываний.
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut queue = EVENTS.lock();
+        operation(&mut queue)
+    })
 }
 
 pub fn publish_hid(source: u8, event: InputEvent) {

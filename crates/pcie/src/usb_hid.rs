@@ -238,6 +238,7 @@ mod tests {
         assert!(!release.entries[2].unwrap().pressed);
         assert_eq!(release.entries[2].unwrap().usage, 5);
     }
+
     #[test]
     fn mouse_button_release_without_movement_is_not_lost() {
         let mut state = MouseState::new();
@@ -247,4 +248,5 @@ mod tests {
         let released = MouseReport::parse(&[0, 0, 0]).unwrap();
         assert_eq!(state.update(released), Some(released));
         assert_eq!(state.update(released), None);
-    }}
+    }
+}

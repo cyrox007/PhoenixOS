@@ -343,14 +343,17 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial::line(&mut out, "INFO", format_args!("nvme read-only probe: OK"));
 
     // Запускаем собственные административные очереди после штатного
-    // отключения контроллера, оставшегося в состоянии UEFI. Все три
-    // закреплённые страницы DMA возвращаются до запуска xHCI.
+    // отключения контроллера, оставшегося в состоянии UEFI. Все шесть
+    // закреплённых страниц DMA возвращаются до запуска xHCI.
     let nvme_admin = unsafe { nvme_admin::self_test(nvme, &mut page_table, &mut frames) }
         .expect("административные очереди NVMe не завершили аппаратные команды");
     assert_eq!(nvme_admin.queue_depth, 16);
     assert_eq!(nvme_admin.completed_commands, 2);
     assert_eq!(nvme_admin.controller_vendor, nvme.function.vendor_id);
     assert!(nvme_admin.namespace_blocks > 0);
+    assert_eq!(nvme_admin.io_commands, 5);
+    assert_eq!(nvme_admin.verified_blocks, 2);
+    assert_eq!(nvme_admin.returned_dma_pages, 6);
     serial::line(
         &mut out,
         "INFO",
@@ -373,6 +376,23 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!(
             "nvme identify namespace: OK blocks={}",
             nvme_admin.namespace_blocks
+        ),
+    );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "nvme io queues: OK depth=16 completed={}",
+            nvme_admin.io_commands
+        ),
+    );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "nvme block read write restore: OK verified={} lba={}",
+            nvme_admin.verified_blocks,
+            nvme_admin.namespace_blocks - 1
         ),
     );
     serial::line(

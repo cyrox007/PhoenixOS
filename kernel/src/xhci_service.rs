@@ -221,9 +221,7 @@ pub extern "C" fn supervisor_thread(argument: usize) {
                 state.fail(7);
                 return;
             }
-            serial::emergency(format_args!(
-                "[INFO] xhci scheduled stop requested: OK\n"
-            ));
+            serial::emergency(format_args!("[INFO] xhci scheduled stop requested: OK\n"));
             return;
         }
         state.supervisor_ticks.fetch_add(1, Ordering::Release);

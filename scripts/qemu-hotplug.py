@@ -39,11 +39,16 @@ def verify_gpu_screenshot(path):
         return tuple(pixels[start:start + 3])
 
     expected = [
-        (2, 2, (255, 255, 255)),
+        (124, 124, (255, 255, 255)),
         (50, 15, (24, 31, 46)),
         (50, 60, (229, 94, 54)),
         (50, 105, (44, 174, 152)),
     ]
+    print(
+        "Снимок VirtIO-GPU, проверочные цвета: "
+        + ", ".join(f"({x},{y})={pixel(x,y)}" for x, y, _ in expected),
+        flush=True,
+    )
     for x, y, color in expected:
         if pixel(x, y) != color:
             raise RuntimeError(

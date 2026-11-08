@@ -24,6 +24,18 @@ xhci hid key released: OK
 xhci hid mouse moved: OK
 xhci hid reports: OK
 xhci resident shutdown: OK
+xhci scheduled ready: OK
+xhci scheduled detached: OK
+xhci scheduled attached: OK
+xhci scheduled key pressed: OK
+xhci scheduled key released: OK
+xhci scheduled mouse moved: OK
+xhci scheduled stop requested: OK
+xhci scheduled stopped: OK
+xhci scheduled lifecycle: OK
+xhci scheduled concurrent: OK
+xhci scheduled input queue: OK
+xhci scheduled dma shutdown: OK
 input syscall dispatch self-test: OK
 input queue from xhci: OK
 input userspace denied: OK

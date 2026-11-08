@@ -71,28 +71,19 @@ pub fn failure_model_checks() -> bool {
         || CONTROLLER_READY,
         || {
             polls += 1;
-            if polls == 3 {
-                1 << 16
-            } else {
-                0
-            }
+            if polls == 3 { 1 << 16 } else { 0 }
         },
         true,
         4,
     ) == Ok(1 << 16);
-    let timeout = wait_completion_phase(|| CONTROLLER_READY, || 0, true, 3)
-        == Err(WaitError::TimedOut);
-    let fatal = wait_completion_phase(
-        || CONTROLLER_READY | CONTROLLER_FATAL,
-        || 1 << 16,
-        true,
-        3,
-    ) == Err(WaitError::ControllerFault);
-    let not_ready = wait_completion_phase(|| 0, || 1 << 16, true, 3)
-        == Err(WaitError::ControllerNotReady);
+    let timeout =
+        wait_completion_phase(|| CONTROLLER_READY, || 0, true, 3) == Err(WaitError::TimedOut);
+    let fatal = wait_completion_phase(|| CONTROLLER_READY | CONTROLLER_FATAL, || 1 << 16, true, 3)
+        == Err(WaitError::ControllerFault);
+    let not_ready =
+        wait_completion_phase(|| 0, || 1 << 16, true, 3) == Err(WaitError::ControllerNotReady);
     let stop = wait_ready(|| CONTROLLER_FATAL, false, 3) == Ok(());
-    let stuck = wait_ready(|| CONTROLLER_READY, false, 3)
-        == Err(WaitError::TimedOut);
+    let stuck = wait_ready(|| CONTROLLER_READY, false, 3) == Err(WaitError::TimedOut);
     completed && polls == 3 && timeout && fatal && not_ready && stop && stuck
 }
 
@@ -113,11 +104,7 @@ mod tests {
                 || CONTROLLER_READY,
                 || {
                     checks += 1;
-                    if checks == 4 {
-                        1 << 16
-                    } else {
-                        0
-                    }
+                    if checks == 4 { 1 << 16 } else { 0 }
                 },
                 true,
                 4,
@@ -190,9 +177,6 @@ mod tests {
             wait_ready(|| CONTROLLER_READY, false, 2),
             Err(WaitError::TimedOut),
         );
-        assert_eq!(
-            wait_ready(|| 0, true, 0),
-            Err(WaitError::TimedOut),
-        );
+        assert_eq!(wait_ready(|| 0, true, 0), Err(WaitError::TimedOut),);
     }
 }

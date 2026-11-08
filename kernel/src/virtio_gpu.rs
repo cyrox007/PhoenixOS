@@ -13,7 +13,9 @@ use phoenix_driver_registry::{
     DriverStartError, DriverVersion, PcieMatchRule,
 };
 use phoenix_memory::SystemFrameAllocator;
-use phoenix_pcie::graphics::{GraphicsController, GraphicsProfile, VIRTIO_GPU_DEVICE_ID, VIRTIO_VENDOR_ID};
+use phoenix_pcie::graphics::{
+    GraphicsController, GraphicsProfile, VIRTIO_GPU_DEVICE_ID, VIRTIO_VENDOR_ID,
+};
 use phoenix_pcie::virtio_gpu_2d::{
     self as gpu, GpuProtocolError, GpuRequest, RESP_OK_DISPLAY_INFO, RESP_OK_NODATA,
 };
@@ -175,15 +177,27 @@ impl MmioWindow {
     }
 
     fn write_u8(&self, offset: u64, value: u8) {
-        unsafe { (self.base + offset).as_mut_ptr::<u8>().write_volatile(value) };
+        unsafe {
+            (self.base + offset)
+                .as_mut_ptr::<u8>()
+                .write_volatile(value)
+        };
     }
 
     fn write_u16(&self, offset: u64, value: u16) {
-        unsafe { (self.base + offset).as_mut_ptr::<u16>().write_volatile(value) };
+        unsafe {
+            (self.base + offset)
+                .as_mut_ptr::<u16>()
+                .write_volatile(value)
+        };
     }
 
     fn write_u32(&self, offset: u64, value: u32) {
-        unsafe { (self.base + offset).as_mut_ptr::<u32>().write_volatile(value) };
+        unsafe {
+            (self.base + offset)
+                .as_mut_ptr::<u32>()
+                .write_volatile(value)
+        };
     }
 
     fn write_u64(&self, offset: u64, value: u64) {
@@ -195,7 +209,9 @@ impl MmioWindow {
         while self.pages > 0 {
             let index = self.pages - 1;
             let page = Page::<Size4KiB>::containing_address(self.base + index * PAGE_SIZE);
-            table.unmap_4k(page).map_err(|_| GpuRuntimeError::MmioUnmapping)?;
+            table
+                .unmap_4k(page)
+                .map_err(|_| GpuRuntimeError::MmioUnmapping)?;
             self.pages -= 1;
         }
         Ok(())
@@ -227,26 +243,25 @@ impl DmaArena {
         let mut backend = unsafe { QemuDirectDma::<1>::new(aperture) };
         let layout = DmaLayout::new((DMA_PAGES * PAGE_SIZE) as usize, PAGE_SIZE as usize)
             .map_err(|_| GpuRuntimeError::DeviceMapping)?;
-        let mut mapping = match DeviceMapping::establish(
-            &mut backend,
-            PhysicalAddress::new(physical),
-            layout,
-        ) {
-            Ok(mapping) => mapping,
-            Err(_) => {
-                frames
-                    .release_contiguous_4k(first_frame, DMA_PAGES)
-                    .map_err(|_| GpuRuntimeError::DmaRelease)?;
-                return Err(GpuRuntimeError::DeviceMapping);
-            }
-        };
+        let mut mapping =
+            match DeviceMapping::establish(&mut backend, PhysicalAddress::new(physical), layout) {
+                Ok(mapping) => mapping,
+                Err(_) => {
+                    frames
+                        .release_contiguous_4k(first_frame, DMA_PAGES)
+                        .map_err(|_| GpuRuntimeError::DmaRelease)?;
+                    return Err(GpuRuntimeError::DeviceMapping);
+                }
+            };
         let mut ranges = KernelVirtualRanges::<1>::new(DMA_VIRTUAL_BASE, DMA_PAGES)
             .map_err(|_| GpuRuntimeError::DmaMapping)?;
         let mut windows = ManagedDmaWindows::<1>::new();
         let handle = match windows.reserve(&mut ranges, physical, DMA_PAGES) {
             Ok(handle) => handle,
             Err(_) => {
-                mapping.close(&mut backend).map_err(|_| GpuRuntimeError::DeviceMapping)?;
+                mapping
+                    .close(&mut backend)
+                    .map_err(|_| GpuRuntimeError::DeviceMapping)?;
                 frames
                     .release_contiguous_4k(first_frame, DMA_PAGES)
                     .map_err(|_| GpuRuntimeError::DmaRelease)?;
@@ -254,7 +269,9 @@ impl DmaArena {
             }
         };
         let virtual_start = VirtAddr::new(
-            windows.virtual_start(&ranges, handle).map_err(|_| GpuRuntimeError::DmaMapping)?,
+            windows
+                .virtual_start(&ranges, handle)
+                .map_err(|_| GpuRuntimeError::DmaMapping)?,
         );
         let result = {
             let mut access = unsafe {
@@ -266,9 +283,15 @@ impl DmaArena {
             let mut access = unsafe {
                 ActiveDmaPageAccess::with_cache_policy(table, frames, DmaCachePolicy::WriteBack)
             };
-            windows.unmap_all(handle, &mut access).map_err(|_| GpuRuntimeError::DmaMapping)?;
-            windows.release(&mut ranges, handle).map_err(|_| GpuRuntimeError::DmaRelease)?;
-            mapping.close(&mut backend).map_err(|_| GpuRuntimeError::DeviceMapping)?;
+            windows
+                .unmap_all(handle, &mut access)
+                .map_err(|_| GpuRuntimeError::DmaMapping)?;
+            windows
+                .release(&mut ranges, handle)
+                .map_err(|_| GpuRuntimeError::DmaRelease)?;
+            mapping
+                .close(&mut backend)
+                .map_err(|_| GpuRuntimeError::DeviceMapping)?;
             frames
                 .release_contiguous_4k(first_frame, DMA_PAGES)
                 .map_err(|_| GpuRuntimeError::DmaRelease)?;
@@ -581,8 +604,8 @@ fn paint_image(arena: &DmaArena) -> u64 {
     let mut checksum = 0_u64;
     for y in 0..IMAGE_HEIGHT as usize {
         for x in 0..IMAGE_WIDTH as usize {
-            let border = x < 4 || y < 4 || x >= IMAGE_WIDTH as usize - 4
-                || y >= IMAGE_HEIGHT as usize - 4;
+            let border =
+                x < 4 || y < 4 || x >= IMAGE_WIDTH as usize - 4 || y >= IMAGE_HEIGHT as usize - 4;
             let diagonal = x.abs_diff(y) < 3;
             let color = if border || diagonal {
                 0x00ff_ffff
@@ -705,8 +728,7 @@ pub unsafe fn self_test<const N: usize>(
     frames: &mut SystemFrameAllocator<N>,
     physical_memory_offset: VirtAddr,
 ) -> Result<(DriverLaunch, GpuReport), GpuRuntimeError> {
-    let mut registry =
-        DriverRegistry::<1, ContextRegisteredDriver<StartContext<'_, N>>>::new();
+    let mut registry = DriverRegistry::<1, ContextRegisteredDriver<StartContext<'_, N>>>::new();
     registry
         .register(ContextRegisteredDriver {
             descriptor: DriverDescriptor::new(

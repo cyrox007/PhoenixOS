@@ -44,13 +44,15 @@ if [[ ! -c /dev/kvm ]]; then
   exit 2
 fi
 
+# Управляемая проверка: QEMU отключает и повторно подключает клавиатуру
+# после сигнала готовности из ядра. Монитор работает отдельным UNIX-сокетом.
 set +e
-timeout 30s sudo qemu-system-x86_64   -machine q35,accel=kvm   -cpu host   -m 512M   -display none   -serial stdio   -no-reboot   -device isa-debug-exit,iobase=0xf4,iosize=0x04   -device qemu-xhci,id=phoenix-xhci   -device usb-kbd,bus=phoenix-xhci.0   -device usb-mouse,bus=phoenix-xhci.0   -drive "if=pflash,format=raw,unit=0,file=$OVMF_CODE,readonly=on"   -drive "if=pflash,format=raw,unit=1,file=$vars_copy"   -drive "format=raw,file=$IMAGE" 2>&1 | tee "$serial_log"
-status=${PIPESTATUS[0]}
+timeout -k 5s 30s sudo python3 scripts/qemu-hotplug.py "$IMAGE" "$OVMF_CODE" "$vars_copy" "$serial_log"
+status=$?
 set -e
 
-if [[ "$status" -ne 33 ]]; then
-  echo "Проверочная загрузка PhoenixOS завершилась кодом QEMU $status" >&2
+if [[ "$status" -ne 0 ]]; then
+  echo "Проверка USB-переподключения QEMU завершилась с кодом $status" >&2
   exit 1
 fi
 

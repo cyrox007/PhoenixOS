@@ -12,7 +12,7 @@ use phoenix_memory::SystemFrameAllocator;
 use phoenix_pcie::usb_descriptors::{self, DescriptorError};
 use phoenix_pcie::xhci_capabilities::XhciCapabilities;
 use phoenix_pcie::xhci_control::{self, OperationalRegisters};
-use phoenix_pcie::xhci_session::{self, EventCursor, SessionDevice};
+use phoenix_pcie::xhci_session::{self, CommandCursor, EventCursor, SessionDevice};
 use x86_64::VirtAddr;
 use x86_64::structures::paging::{PhysFrame, Size4KiB};
 
@@ -54,6 +54,9 @@ pub enum CommandError {
     UnexpectedRuntimeEvent(u8),
     InvalidPortEvent,
     AlreadyStopped,
+    UnexpectedPort(u8),
+    NoFreeDevicePages,
+    ServiceFaulted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,34 +131,82 @@ struct Completion {
     pointer: u64,
 }
 
+/// Состояние двух колец и отложенных извещений портов.
+struct IoState {
+    commands: CommandCursor,
+    events: EventCursor,
+    pending_ports: [Option<RuntimePortEvent>; 256],
+}
+
+impl IoState {
+    fn new() -> Self {
+        Self {
+            commands: CommandCursor::new(),
+            events: EventCursor::new(),
+            pending_ports: [None; 256],
+        }
+    }
+
+    fn take_port(&mut self) -> Option<RuntimePortEvent> {
+        for pending in &mut self.pending_ports {
+            if let Some(event) = pending.take() {
+                return Some(event);
+            }
+        }
+        None
+    }
+}
+
+fn poll_event<R: OperationalRegisters>(
+    registers: &R,
+    runtime: u64,
+    base: u64,
+    memory: &GuestMemory,
+    io: &mut IoState,
+) -> Option<Completion> {
+    let offset = io.events.index * 16;
+    let control = memory.read(EVENT_RING_PAGE, offset + 12);
+    if !io.events.available(control) {
+        return None;
+    }
+    compiler_fence(Ordering::SeqCst);
+    let event = Completion {
+        kind: ((control >> 10) & 0x3f) as u8,
+        code: (memory.read(EVENT_RING_PAGE, offset + 8) >> 24) as u8,
+        slot: (control >> 24) as u8,
+        pointer: u64::from(memory.read(EVENT_RING_PAGE, offset))
+            | (u64::from(memory.read(EVENT_RING_PAGE, offset + 4)) << 32),
+    };
+    io.events.advance();
+    // ERDP всегда адресует следующий элемент, в том числе после оборота.
+    let next = base + EVENT_RING_PAGE * PAGE_BYTES + (io.events.index * 16) as u64;
+    write_address(registers, runtime + 0x18, next | (1 << 3));
+    Some(event)
+}
+
 fn await_completion<R: OperationalRegisters>(
     registers: &R,
     runtime: u64,
     base: u64,
     memory: &GuestMemory,
-    index: usize,
+    io: &mut IoState,
 ) -> Result<Completion, CommandError> {
-    let offset = index * 16;
     for _ in 0..MAX_POLLS {
-        let control = memory.read(EVENT_RING_PAGE, offset + 12);
-        if control & 1 == 0 {
+        let Some(event) = poll_event(registers, runtime, base, memory, io) else {
             core::hint::spin_loop();
             continue;
-        }
-        compiler_fence(Ordering::SeqCst);
-        let event = Completion {
-            kind: ((control >> 10) & 0x3f) as u8,
-            code: (memory.read(EVENT_RING_PAGE, offset + 8) >> 24) as u8,
-            slot: (control >> 24) as u8,
-            pointer: u64::from(memory.read(EVENT_RING_PAGE, offset))
-                | (u64::from(memory.read(EVENT_RING_PAGE, offset + 4)) << 32),
         };
-        // Указываем следующий свободный элемент, учитывая бит EHB.
-        write_address(
-            registers,
-            runtime + 0x18,
-            base + EVENT_RING_PAGE * PAGE_BYTES + ((index + 1) * 16) as u64 | (1 << 3),
-        );
+        if event.kind == 34 {
+            let port = (event.pointer >> 24) as u8;
+            if port == 0 {
+                return Err(CommandError::InvalidPortEvent);
+            }
+            io.pending_ports[usize::from(port)] = Some(RuntimePortEvent {
+                port,
+                completion_code: event.code,
+            });
+            continue;
+        }
         return Ok(event);
     }
     Err(CommandError::CommandTimeout)
@@ -166,16 +217,17 @@ fn command<R: OperationalRegisters>(
     capabilities: XhciCapabilities,
     base: u64,
     memory: &GuestMemory,
-    index: usize,
-    event_index: usize,
+    io: &mut IoState,
     parameter: u64,
     control: u32,
 ) -> Result<Completion, CommandError> {
+    let index = io.commands.index;
+    let cycle = io.commands.cycle;
     let address = base + COMMAND_RING_PAGE * PAGE_BYTES + (index * 16) as u64;
     memory.write(COMMAND_RING_PAGE, index * 16, parameter as u32);
     memory.write(COMMAND_RING_PAGE, index * 16 + 4, (parameter >> 32) as u32);
     memory.write(COMMAND_RING_PAGE, index * 16 + 8, 0);
-    memory.write(COMMAND_RING_PAGE, index * 16 + 12, control | 1);
+    memory.write(COMMAND_RING_PAGE, index * 16 + 12, control | cycle);
     compiler_fence(Ordering::SeqCst);
     registers.write_u32(capabilities.doorbell_offset, 0);
     let event = await_completion(
@@ -183,7 +235,7 @@ fn command<R: OperationalRegisters>(
         capabilities.runtime_offset + 0x20,
         base,
         memory,
-        event_index,
+        io,
     )?;
     if event.kind != COMMAND_COMPLETION_EVENT as u8 {
         return Err(CommandError::WrongEventType);
@@ -193,6 +245,13 @@ fn command<R: OperationalRegisters>(
     }
     if event.code != SUCCESS_COMPLETION as u8 {
         return Err(CommandError::WrongCompletionCode);
+    }
+    if io.commands.advance() {
+        // Прежний Link TRB уже пройден контроллером. Подготавливаем
+        // цикловый бит для следующего оборота командного кольца.
+        let offset = (RING_ITEMS as usize - 1) * 16 + 12;
+        memory.write(COMMAND_RING_PAGE, offset, (6 << 10) | 2 | io.commands.cycle);
+        compiler_fence(Ordering::SeqCst);
     }
     Ok(event)
 }
@@ -209,7 +268,7 @@ fn configuration_transfer<R: OperationalRegisters>(
     trb: usize,
     length: usize,
     buffer_offset: usize,
-    event_index: usize,
+    io: &mut IoState,
 ) -> Result<(), CommandError> {
     if length == 0 || length > 512 || buffer_offset + length > PAGE_BYTES as usize {
         return Err(CommandError::InvalidConfiguration);
@@ -236,7 +295,7 @@ fn configuration_transfer<R: OperationalRegisters>(
         capabilities.runtime_offset + 0x20,
         base,
         memory,
-        event_index,
+        io,
     )?;
     if event.kind != 32 || event.code != 1 || event.slot != slot {
         return Err(CommandError::InvalidTransferEvent);
@@ -255,19 +314,9 @@ fn read_descriptor<R: OperationalRegisters>(
     pages: DevicePages,
     port: u8,
     speed: u8,
+    io: &mut IoState,
 ) -> Result<CommandReport, CommandError> {
-    let command_index = pages.command_index;
-    let event_index = pages.event_index;
-    let enabled = command(
-        registers,
-        capabilities,
-        base,
-        memory,
-        command_index,
-        event_index,
-        0,
-        9 << 10,
-    )?;
+    let enabled = command(registers, capabilities, base, memory, io, 0, 9 << 10)?;
     if enabled.slot == 0 || enabled.slot > capabilities.max_slots {
         return Err(CommandError::InvalidSlot);
     }
@@ -314,8 +363,7 @@ fn read_descriptor<R: OperationalRegisters>(
         capabilities,
         base,
         memory,
-        command_index + 1,
-        event_index + 1,
+        io,
         input,
         (11 << 10) | (u32::from(slot) << 24),
     )?;
@@ -341,7 +389,7 @@ fn read_descriptor<R: OperationalRegisters>(
         capabilities.runtime_offset + 0x20,
         base,
         memory,
-        event_index + 2,
+        io,
     )?;
     if event.kind != 32 || event.code != 1 || event.slot != slot {
         return Err(CommandError::InvalidTransferEvent);
@@ -368,7 +416,7 @@ fn read_descriptor<R: OperationalRegisters>(
         3,
         9,
         64,
-        event_index + 3,
+        io,
     )?;
     let header = memory.read(pages.descriptor, 64);
     if header & 0xffff != 0x0209 {
@@ -388,7 +436,7 @@ fn read_descriptor<R: OperationalRegisters>(
         6,
         configuration_size,
         128,
-        event_index + 4,
+        io,
     )?;
     let mut configuration = [0_u8; 512];
     for (index, byte) in configuration
@@ -424,7 +472,7 @@ fn issue_enumeration<R: OperationalRegisters>(
     first_speed: u8,
     second_port: u8,
     second_speed: u8,
-) -> Result<(CommandReport, CommandReport, RetainedSlotsReport), CommandError> {
+) -> Result<(CommandReport, CommandReport, RetainedSlotsReport, IoState), CommandError> {
     let operational = capabilities.operational_offset;
     let runtime = capabilities.runtime_offset + 0x20;
     let command_address = base + COMMAND_RING_PAGE * PAGE_BYTES;
@@ -475,7 +523,8 @@ fn issue_enumeration<R: OperationalRegisters>(
     }
 
     // Проверяем старый безопасный путь No Op до выдачи слота.
-    let noop = command(registers, capabilities, base, memory, 0, 0, 0, 23 << 10)?;
+    let mut io = IoState::new();
+    let noop = command(registers, capabilities, base, memory, &mut io, 0, 23 << 10)?;
     if noop.code != SUCCESS_COMPLETION as u8 {
         return Err(CommandError::WrongCompletionCode);
     }
@@ -489,8 +538,9 @@ fn issue_enumeration<R: OperationalRegisters>(
         first_pages,
         first_port,
         first_speed,
+        &mut io,
     )?;
-    // Индексы команд и событий берём из проверенной общей схемы сеанса.
+    // Командный и событийный курсоры продолжают движение независимо.
     let second = read_descriptor(
         registers,
         capabilities,
@@ -499,6 +549,7 @@ fn issue_enumeration<R: OperationalRegisters>(
         second_pages,
         second_port,
         second_speed,
+        &mut io,
     )?;
     if first.slot_id == second.slot_id {
         return Err(CommandError::DuplicateSlot);
@@ -518,7 +569,7 @@ fn issue_enumeration<R: OperationalRegisters>(
         xhci_session::RECHECK_TRANSFER_TRB,
         usize::from(first.configuration_length),
         768,
-        xhci_session::RECHECK_EVENT_INDEX,
+        &mut io,
     )?;
     for index in 0..usize::from(first.configuration_length) {
         let previous = memory.read_byte(first_pages.descriptor, 128 + index);
@@ -539,6 +590,7 @@ fn issue_enumeration<R: OperationalRegisters>(
             rechecked_slot: first.slot_id,
             pages: PAGE_COUNT,
         },
+        io,
     ))
 }
 
@@ -605,7 +657,7 @@ pub unsafe fn start_pair<const N: usize, R: OperationalRegisters>(
 
     // При ошибке инициализации обязательно останавливаем аппаратный DMA
     // перед возвратом страниц. При ошибке остановки память остаётся занятой.
-    let (first_report, second_report, retained) = match result {
+    let (first_report, second_report, retained, io) = match result {
         Ok(reports) => reports,
         Err(error) => {
             xhci_control::stop_and_reset(
@@ -636,9 +688,10 @@ pub unsafe fn start_pair<const N: usize, R: OperationalRegisters>(
             base,
             backend,
             device_mapping,
-            cursor: EventCursor::after_enumeration(),
+            io,
             stopped: false,
             released: false,
+            faulted: false,
         },
     ))
 }
@@ -653,9 +706,10 @@ pub struct ActiveDma {
     base: u64,
     backend: QemuDirectDma<1>,
     device_mapping: DeviceMapping,
-    cursor: EventCursor,
+    io: IoState,
     stopped: bool,
     released: bool,
+    faulted: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -679,32 +733,117 @@ impl ActiveDma {
         if !wait_halted(registers, capabilities.operational_offset, false) {
             return Err(CommandError::ControllerStopped);
         }
-        let offset = self.cursor.index * 16;
-        let control = self.memory.read(EVENT_RING_PAGE, offset + 12);
-        if !self.cursor.available(control) {
+        if let Some(event) = self.io.take_port() {
+            return Ok(Some(event));
+        }
+        let runtime = capabilities.runtime_offset + 0x20;
+        let Some(event) = poll_event(registers, runtime, self.base, &self.memory, &mut self.io)
+        else {
             return Ok(None);
+        };
+        if event.kind != 34 {
+            return Err(CommandError::UnexpectedRuntimeEvent(event.kind));
         }
-        compiler_fence(Ordering::SeqCst);
-        let kind = ((control >> 10) & 0x3f) as u8;
-        if kind != 34 {
-            return Err(CommandError::UnexpectedRuntimeEvent(kind));
-        }
-        let port = (self.memory.read(EVENT_RING_PAGE, offset) >> 24) as u8;
+        let port = (event.pointer >> 24) as u8;
         if port == 0 || port > capabilities.max_ports {
             return Err(CommandError::InvalidPortEvent);
         }
-        let completion_code = (self.memory.read(EVENT_RING_PAGE, offset + 8) >> 24) as u8;
-        self.cursor.advance();
-        let next = self.base + EVENT_RING_PAGE * PAGE_BYTES + (self.cursor.index * 16) as u64;
-        write_address(
-            registers,
-            capabilities.runtime_offset + 0x20 + 0x18,
-            next | (1 << 3),
-        );
         Ok(Some(RuntimePortEvent {
             port,
-            completion_code,
+            completion_code: event.code,
         }))
+    }
+
+    /// Освобождает адресованный слот в действующем контроллере.
+    /// Контексты и буфер остаются закреплёнными до общего shutdown.
+    pub fn disable_slot<R: OperationalRegisters>(
+        &mut self,
+        registers: &R,
+        capabilities: XhciCapabilities,
+        slot: u8,
+    ) -> Result<(), CommandError> {
+        if self.stopped || self.released {
+            return Err(CommandError::AlreadyStopped);
+        }
+        if self.faulted {
+            return Err(CommandError::ServiceFaulted);
+        }
+        if slot == 0 || slot > capabilities.max_slots {
+            return Err(CommandError::InvalidSlot);
+        }
+        let result = command(
+            registers,
+            capabilities,
+            self.base,
+            &self.memory,
+            &mut self.io,
+            0,
+            (10 << 10) | (u32::from(slot) << 24),
+        );
+        let event = match result {
+            Ok(event) if event.slot == slot => event,
+            Ok(_) => {
+                self.faulted = true;
+                return Err(CommandError::InvalidSlot);
+            }
+            Err(error) => {
+                self.faulted = true;
+                return Err(error);
+            }
+        };
+        debug_assert_eq!(event.slot, slot);
+        // Аппаратное подтверждение Disable Slot означает отсутствие
+        // дальнейшего доступа xHCI к выходному контексту этого слота.
+        self.memory.write(0, usize::from(slot) * 8, 0);
+        self.memory.write(0, usize::from(slot) * 8 + 4, 0);
+        Ok(())
+    }
+
+    /// Повторно адресует новое устройство через освобождённый комплект
+    /// контекстов. Выделение физических страниц не повторяется.
+    pub fn attach_device<R: OperationalRegisters>(
+        &mut self,
+        registers: &R,
+        capabilities: XhciCapabilities,
+        device_index: usize,
+        port: u8,
+        speed: u8,
+    ) -> Result<CommandReport, CommandError> {
+        if self.stopped || self.released {
+            return Err(CommandError::AlreadyStopped);
+        }
+        if self.faulted {
+            return Err(CommandError::ServiceFaulted);
+        }
+        let pages = match device_index {
+            0 => xhci_session::FIRST_DEVICE,
+            1 => xhci_session::SECOND_DEVICE,
+            _ => return Err(CommandError::NoFreeDevicePages),
+        };
+        // После подтверждённой команды Disable Slot отсутствуют обращения
+        // контроллера к прежним контекстам; можно переиспользовать 4 страницы.
+        for page in [pages.input, pages.output, pages.transfer, pages.descriptor] {
+            unsafe {
+                core::ptr::write_bytes(self.memory.address(page, 0), 0, (PAGE_BYTES / 4) as usize);
+            }
+        }
+        let result = read_descriptor(
+            registers,
+            capabilities,
+            self.base,
+            &self.memory,
+            pages,
+            port,
+            speed,
+            &mut self.io,
+        );
+        if result.is_err() {
+            // Ошибка после Enable Slot может оставить в устройстве
+            // незавершённые аппаратные обращения. До общего shutdown
+            // запрещено отдавать этот комплект страниц другому USB.
+            self.faulted = true;
+        }
+        result
     }
 
     pub fn is_mapped(&self) -> bool {

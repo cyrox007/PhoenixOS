@@ -124,11 +124,6 @@ impl LegacyPciAudit {
             .saturating_add(self.ehci)
     }
 
-    /// Это число обнаруженных, но не выбранных устаревших контроллеров.
-    /// Не проверяет их питание и не подтверждает переключение портов USB.
-    pub const fn legacy_bound_to_working_driver(self) -> u32 {
-        0
-    }
 }
 
 impl Default for LegacyPciAudit {
@@ -208,7 +203,6 @@ mod tests {
         audit.observe(sata);
         assert_eq!(audit.nvme, 1);
         assert_eq!(audit.ide_pata, 0);
-        assert_eq!(audit.legacy_bound_to_working_driver(), 0);
     }
 
     #[test]

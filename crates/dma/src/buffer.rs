@@ -31,6 +31,63 @@ pub trait DmaBufferPlatform: DmaMappingBackend {
     fn free(&mut self, physical: PhysicalAddress, layout: DmaLayout) -> Result<(), DmaError>;
 }
 
+/// Отделяет владение физическими страницами и процессорским отображением
+/// от выбранного механизма выдачи адресов устройству.
+///
+/// Можно заменить прямой вариант на будущую реализацию IOMMU без изменений
+/// `DmaBuffer`, `DmaRegion` и драйверов, использующих их. Аппаратные
+/// таблицы, очистка кэша и запрет доступа должны обеспечиваться реализацией
+/// `DmaMappingBackend`. При ошибке unmap её состояние остаётся активным.
+pub struct SplitDmaPlatform<'a, M: DmaBufferPlatform, B: DmaMappingBackend> {
+    memory: &'a mut M,
+    device_mapper: &'a mut B,
+}
+
+impl<'a, M: DmaBufferPlatform, B: DmaMappingBackend> SplitDmaPlatform<'a, M, B> {
+    pub fn new(memory: &'a mut M, device_mapper: &'a mut B) -> Self {
+        Self {
+            memory,
+            device_mapper,
+        }
+    }
+}
+
+impl<M: DmaBufferPlatform, B: DmaMappingBackend> DmaMappingBackend for SplitDmaPlatform<'_, M, B> {
+    fn map(
+        &mut self,
+        physical: PhysicalAddress,
+        layout: DmaLayout,
+    ) -> Result<DeviceAddress, DmaError> {
+        self.device_mapper.map(physical, layout)
+    }
+
+    fn unmap(&mut self, device: DeviceAddress, layout: DmaLayout) -> Result<(), DmaError> {
+        self.device_mapper.unmap(device, layout)
+    }
+}
+
+impl<M: DmaBufferPlatform, B: DmaMappingBackend> DmaBufferPlatform for SplitDmaPlatform<'_, M, B> {
+    fn reserve(&mut self, layout: DmaLayout) -> Result<PhysicalAddress, DmaError> {
+        self.memory.reserve(layout)
+    }
+
+    fn map_cpu(
+        &mut self,
+        physical: PhysicalAddress,
+        layout: DmaLayout,
+    ) -> Result<CpuVirtualAddress, DmaError> {
+        self.memory.map_cpu(physical, layout)
+    }
+
+    fn unmap_cpu(&mut self, cpu: CpuVirtualAddress, layout: DmaLayout) -> Result<(), DmaError> {
+        self.memory.unmap_cpu(cpu, layout)
+    }
+
+    fn free(&mut self, physical: PhysicalAddress, layout: DmaLayout) -> Result<(), DmaError> {
+        self.memory.free(physical, layout)
+    }
+}
+
 /// Последовательно закрываемая область, не использующая кучу.
 /// Прерывания и многопоточный доступ синхронизируются вызывающей стороной.
 pub struct DmaBuffer {

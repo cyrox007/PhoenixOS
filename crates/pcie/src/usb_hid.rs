@@ -40,6 +40,23 @@ pub struct KeyChange {
     pub modifiers: u8,
 }
 
+/// До восьми клавиш-модификаторов и шести обычных клавиш,
+/// которые могли измениться при одной передаче.
+pub const MAX_KEY_CHANGES: usize = 20;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyChanges {
+    pub entries: [Option<KeyChange>; MAX_KEY_CHANGES],
+    pub count: usize,
+}
+
+impl KeyChanges {
+    fn push(&mut self, event: KeyChange) {
+        self.entries[self.count] = Some(event);
+        self.count += 1;
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyboardState {
     previous: KeyboardReport,
@@ -55,14 +72,28 @@ impl KeyboardState {
         }
     }
 
-    /// Возвращает первое изменение кода клавиши. Состояние остальных
-    /// клавиш сохраняется, их отдельная доставка пока не реализована.
-    pub fn update(&mut self, next: KeyboardReport) -> Option<KeyChange> {
+    /// Все изменения отчёта без потерь, включая модификаторы Ctrl/Shift/Alt.
+    /// Сначала идут отпущенные, затем нажатые обычные клавиши.
+    pub fn update_all(&mut self, next: KeyboardReport) -> KeyChanges {
         let previous = self.previous;
         self.previous = next;
+        let mut result = KeyChanges {
+            entries: [None; MAX_KEY_CHANGES],
+            count: 0,
+        };
+        for modifier in 0..8 {
+            let bit = 1 << modifier;
+            if (previous.modifiers ^ next.modifiers) & bit != 0 {
+                result.push(KeyChange {
+                    usage: 0xe0 + modifier,
+                    pressed: next.modifiers & bit != 0,
+                    modifiers: next.modifiers,
+                });
+            }
+        }
         for &usage in previous.keys.iter().filter(|&&usage| usage != 0) {
             if !next.keys.contains(&usage) {
-                return Some(KeyChange {
+                result.push(KeyChange {
                     usage,
                     pressed: false,
                     modifiers: next.modifiers,
@@ -71,14 +102,19 @@ impl KeyboardState {
         }
         for &usage in next.keys.iter().filter(|&&usage| usage != 0) {
             if !previous.keys.contains(&usage) {
-                return Some(KeyChange {
+                result.push(KeyChange {
                     usage,
                     pressed: true,
                     modifiers: next.modifiers,
                 });
             }
         }
-        None
+        result
+    }
+
+    /// Упрощённый доступ к первому изменению для отдельных проверок.
+    pub fn update(&mut self, next: KeyboardReport) -> Option<KeyChange> {
+        self.update_all(next).entries[0]
     }
 }
 
@@ -162,4 +198,23 @@ mod tests {
         assert_eq!(MouseReport::parse(&[0, 0]), Err(HidError::ShortMouse));
         assert_eq!(state.update(KeyboardReport::parse(&[0; 8]).unwrap()), None);
     }
+    #[test]
+    fn preserves_multiple_changes_and_modifier_transitions() {
+        let mut state = KeyboardState::new();
+        let report = KeyboardReport::parse(&[0b0000_0010, 0, 4, 5, 0, 0, 0, 0]).unwrap();
+        let changes = state.update_all(report);
+        assert_eq!(changes.count, 3);
+        assert_eq!(changes.entries[0].unwrap().usage, 0xe1);
+        assert!(changes.entries[0].unwrap().pressed);
+        assert_eq!(changes.entries[1].unwrap().usage, 4);
+        assert_eq!(changes.entries[2].unwrap().usage, 5);
+
+        let release = state.update_all(KeyboardReport::parse(&[0; 8]).unwrap());
+        assert_eq!(release.count, 3);
+        assert!(!release.entries[0].unwrap().pressed);
+        assert!(!release.entries[1].unwrap().pressed);
+        assert!(!release.entries[2].unwrap().pressed);
+        assert_eq!(release.entries[2].unwrap().usage, 5);
+    }
+
 }

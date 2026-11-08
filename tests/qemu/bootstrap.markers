@@ -13,6 +13,10 @@ xhci usb descriptor: OK
 xhci usb second descriptor: OK
 xhci usb persistent slots: OK
 xhci resident service: OK
+xhci hotplug ready: OK
+xhci hotplug detached: OK
+xhci hotplug attached: OK
+xhci hotplug service: OK
 xhci resident shutdown: OK
 xhci usb interfaces: OK
 dma kernel mapping self-test: OK

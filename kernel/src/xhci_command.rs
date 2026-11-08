@@ -751,6 +751,76 @@ impl ActiveDma {
         }))
     }
 
+    /// Освобождает адресованный слот в действующем контроллере.
+    /// Контексты и буфер остаются закреплёнными до общего shutdown.
+    pub fn disable_slot<R: OperationalRegisters>(
+        &mut self,
+        registers: &R,
+        capabilities: XhciCapabilities,
+        slot: u8,
+    ) -> Result<(), CommandError> {
+        if self.stopped || self.released {
+            return Err(CommandError::AlreadyStopped);
+        }
+        if slot == 0 || slot > capabilities.max_slots {
+            return Err(CommandError::InvalidSlot);
+        }
+        let event = command(
+            registers,
+            capabilities,
+            self.base,
+            &self.memory,
+            &mut self.io,
+            0,
+            (10 << 10) | (u32::from(slot) << 24),
+        )?;
+        if event.slot != slot {
+            return Err(CommandError::InvalidSlot);
+        }
+        // Аппаратное подтверждение Disable Slot означает отсутствие
+        // дальнейшего доступа xHCI к выходному контексту этого слота.
+        self.memory.write(0, usize::from(slot) * 8, 0);
+        self.memory.write(0, usize::from(slot) * 8 + 4, 0);
+        Ok(())
+    }
+
+    /// Повторно адресует новое устройство через освобождённый комплект
+    /// контекстов. Выделение физических страниц не повторяется.
+    pub fn attach_device<R: OperationalRegisters>(
+        &mut self,
+        registers: &R,
+        capabilities: XhciCapabilities,
+        device_index: usize,
+        port: u8,
+        speed: u8,
+    ) -> Result<CommandReport, CommandError> {
+        if self.stopped || self.released {
+            return Err(CommandError::AlreadyStopped);
+        }
+        let pages = match device_index {
+            0 => xhci_session::FIRST_DEVICE,
+            1 => xhci_session::SECOND_DEVICE,
+            _ => return Err(CommandError::NoFreeDevicePages),
+        };
+        // После подтверждённой команды Disable Slot отсутствуют обращения
+        // контроллера к прежним контекстам; можно переиспользовать 4 страницы.
+        for page in [pages.input, pages.output, pages.transfer, pages.descriptor] {
+            unsafe {
+                core::ptr::write_bytes(self.memory.address(page, 0), 0, (PAGE_BYTES / 4) as usize);
+            }
+        }
+        read_descriptor(
+            registers,
+            capabilities,
+            self.base,
+            &self.memory,
+            pages,
+            port,
+            speed,
+            &mut self.io,
+        )
+    }
+
     pub fn is_mapped(&self) -> bool {
         self.device_mapping.is_mapped() && !self.released
     }

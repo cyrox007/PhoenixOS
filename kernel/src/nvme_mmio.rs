@@ -70,8 +70,7 @@ pub unsafe fn probe<const N: usize>(
         return Err(NvmeMmioError::VirtualRangeOccupied);
     }
     let page = Page::<Size4KiB>::containing_address(virtual_address);
-    let frame =
-        PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(controller.mmio_base));
+    let frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(controller.mmio_base));
     let flags = PageTableFlags::WRITABLE
         | PageTableFlags::NO_EXECUTE
         | PageTableFlags::NO_CACHE

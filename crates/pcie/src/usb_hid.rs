@@ -118,17 +118,36 @@ mod tests {
     fn keyboard_press_and_release_are_separate_events() {
         let mut state = KeyboardState::new();
         let report = KeyboardReport::parse(&[0, 0, 4, 0, 0, 0, 0, 0]).unwrap();
-        assert_eq!(state.update(report), Some(KeyChange { usage: 4, pressed: true, modifiers: 0 }));
+        assert_eq!(
+            state.update(report),
+            Some(KeyChange {
+                usage: 4,
+                pressed: true,
+                modifiers: 0
+            })
+        );
         assert_eq!(state.update(report), None);
         let release = KeyboardReport::parse(&[0; 8]).unwrap();
-        assert_eq!(state.update(release), Some(KeyChange { usage: 4, pressed: false, modifiers: 0 }));
+        assert_eq!(
+            state.update(release),
+            Some(KeyChange {
+                usage: 4,
+                pressed: false,
+                modifiers: 0
+            })
+        );
     }
 
     #[test]
     fn mouse_reports_preserve_signed_deltas() {
         assert_eq!(
             MouseReport::parse(&[1, 12, 250, 0]),
-            Ok(MouseReport { buttons: 1, delta_x: 12, delta_y: -6, wheel: 0 })
+            Ok(MouseReport {
+                buttons: 1,
+                delta_x: 12,
+                delta_y: -6,
+                wheel: 0
+            })
         );
     }
 
@@ -136,7 +155,10 @@ mod tests {
     fn invalid_reports_do_not_change_keyboard_state() {
         let mut state = KeyboardState::new();
         assert_eq!(KeyboardReport::parse(&[0; 7]), Err(HidError::ShortKeyboard));
-        assert_eq!(KeyboardReport::parse(&[0, 0, 1, 0, 0, 0, 0, 0]), Err(HidError::InvalidKeyboardRollover));
+        assert_eq!(
+            KeyboardReport::parse(&[0, 0, 1, 0, 0, 0, 0, 0]),
+            Err(HidError::InvalidKeyboardRollover)
+        );
         assert_eq!(MouseReport::parse(&[0, 0]), Err(HidError::ShortMouse));
         assert_eq!(state.update(KeyboardReport::parse(&[0; 8]).unwrap()), None);
     }

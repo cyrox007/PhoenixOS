@@ -3,6 +3,7 @@ bootstrap: OK
 exception: breakpoint
 acpi platform discovery: OK
 pcie ecam enumeration: OK
+modern pci policy: OK nvme=1 xhci=1
 reference edu driver: OK
 reference edu irq dma: OK
 graphics profile discovery: OK profile=virtio-gpu vendor=1af4 id=1050

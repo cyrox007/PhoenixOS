@@ -238,17 +238,20 @@ impl MsiConfiguration {
         );
         config.write_u16(offset + 2, (control & !0x70) | 1);
 
-        if config.read_u16(offset + 2) & 1 == 0 {
-            return Err(ReferenceError::InvalidMsi);
-        }
-        Ok(Self {
+        let saved = Self {
             offset,
             control,
             address_low,
             address_high,
             data,
             is_64bit,
-        })
+        };
+        if config.read_u16(offset + 2) & 1 == 0 {
+            // Частично настроенный MSI нельзя оставлять действующим.
+            saved.disable(config);
+            return Err(ReferenceError::InvalidMsi);
+        }
+        Ok(saved)
     }
 
     fn disable(self, config: &PciConfig) {
@@ -419,11 +422,21 @@ fn exercise_dma<const N: usize>(
     let layout = DmaLayout::new(PAGE_SIZE as usize, PAGE_SIZE as usize)
         .map_err(|_| ReferenceError::DmaAddress)?;
     let mut dma = DmaBuffer::reserve(&mut platform, layout).map_err(ReferenceError::Dma)?;
-    dma.map_cpu(&mut platform).map_err(ReferenceError::Dma)?;
-    dma.map_device(&mut platform).map_err(ReferenceError::Dma)?;
-    let region = dma.region().map_err(ReferenceError::Dma)?;
-    edu::check_dma_range(region.device_address().value(), edu::EDU_TRANSFER_BYTES)
-        .map_err(|_| ReferenceError::DmaAddress)?;
+    let ready = (|| -> Result<_, ReferenceError> {
+        dma.map_cpu(&mut platform).map_err(ReferenceError::Dma)?;
+        dma.map_device(&mut platform).map_err(ReferenceError::Dma)?;
+        let region = dma.region().map_err(ReferenceError::Dma)?;
+        edu::check_dma_range(region.device_address().value(), edu::EDU_TRANSFER_BYTES)
+            .map_err(|_| ReferenceError::DmaAddress)?;
+        Ok(region)
+    })();
+    let region = match ready {
+        Ok(region) => region,
+        Err(error) => {
+            dma.close(&mut platform).map_err(ReferenceError::Dma)?;
+            return Err(error);
+        }
+    };
     let pointer = region.cpu_address().value() as *mut u8;
     for index in 0..edu::EDU_TRANSFER_BYTES {
         unsafe {
@@ -434,7 +447,10 @@ fn exercise_dma<const N: usize>(
     }
     fence(Ordering::SeqCst);
 
-    dma.begin_device_access().map_err(ReferenceError::Dma)?;
+    if let Err(error) = dma.begin_device_access() {
+        dma.close(&mut platform).map_err(ReferenceError::Dma)?;
+        return Err(ReferenceError::Dma(error));
+    }
     transfer(
         mmio,
         region.device_address().value(),
@@ -454,18 +470,25 @@ fn exercise_dma<const N: usize>(
         edu::EDU_TRANSFER_BYTES,
         edu::EDU_DMA_START | edu::EDU_DMA_FROM_DEVICE | edu::EDU_DMA_INTERRUPT,
     )?;
-    wait_irq(edu::EDU_IRQ_DMA)?;
-    for index in 0..edu::EDU_TRANSFER_BYTES {
-        let expected = (index as u8).wrapping_mul(7).wrapping_add(11);
-        if unsafe { pointer.add(index).read_volatile() } != expected {
-            return Err(ReferenceError::UnexpectedData);
-        }
-    }
+    // Оба аппаратных переноса завершились. Даже если не придёт ожидаемый
+    // MSI или проверка содержимого обнаружит ошибку, страницу необходимо
+    // вернуть после подтверждённой остановки устройства.
     dma.finish_device_access().map_err(ReferenceError::Dma)?;
+    let verification = (|| -> Result<(), ReferenceError> {
+        wait_irq(edu::EDU_IRQ_DMA)?;
+        for index in 0..edu::EDU_TRANSFER_BYTES {
+            let expected = (index as u8).wrapping_mul(7).wrapping_add(11);
+            if unsafe { pointer.add(index).read_volatile() } != expected {
+                return Err(ReferenceError::UnexpectedData);
+            }
+        }
+        Ok(())
+    })();
     dma.close(&mut platform).map_err(ReferenceError::Dma)?;
     if platform.frames.free_frames() != initial_free {
         return Err(ReferenceError::DmaNotReleased);
     }
+    verification?;
     Ok((edu::EDU_TRANSFER_BYTES, 1))
 }
 
@@ -495,13 +518,20 @@ pub unsafe fn self_test<const N: usize>(
     };
     let physical = config.bar0()?;
     let mut mmio = EduMmio::map(physical, table, frames)?;
-    let identifier = mmio.read32(edu::MMIO_IDENTIFICATION);
-    if identifier & 0xff != 0xed {
-        return Err(ReferenceError::InvalidIdentity);
-    }
-    mmio.write32(edu::MMIO_LIVENESS, 0x1357_2468);
-    if mmio.read32(edu::MMIO_LIVENESS) != !0x1357_2468_u32 {
-        return Err(ReferenceError::InvalidIdentity);
+    let validation = (|| -> Result<(), ReferenceError> {
+        let identifier = mmio.read32(edu::MMIO_IDENTIFICATION);
+        if identifier & 0xff != 0xed {
+            return Err(ReferenceError::InvalidIdentity);
+        }
+        mmio.write32(edu::MMIO_LIVENESS, 0x1357_2468);
+        if mmio.read32(edu::MMIO_LIVENESS) != !0x1357_2468_u32 {
+            return Err(ReferenceError::InvalidIdentity);
+        }
+        Ok(())
+    })();
+    if let Err(error) = validation {
+        mmio.unmap(table)?;
+        return Err(error);
     }
 
     let initial_command = config.read_u16(PCI_COMMAND_OFFSET);
@@ -509,25 +539,48 @@ pub unsafe fn self_test<const N: usize>(
         PCI_COMMAND_OFFSET,
         initial_command | PCI_MEMORY_ENABLE | PCI_BUS_MASTER | PCI_INTX_DISABLE,
     );
-    EDU_IRQ_ADDRESS.store(mmio.base.as_u64(), Ordering::Release);
-    let msi = MsiConfiguration::enable(&config)?;
+    let msi = x86_64::instructions::interrupts::without_interrupts(|| {
+        EDU_INTERRUPTS.reset();
+        EDU_IRQ_ADDRESS.store(mmio.base.as_u64(), Ordering::Release);
+        MsiConfiguration::enable(&config)
+    });
+    let msi = match msi {
+        Ok(msi) => msi,
+        Err(error) => {
+            EDU_IRQ_ADDRESS.store(0, Ordering::Release);
+            config.write_u16(PCI_COMMAND_OFFSET, initial_command & !PCI_BUS_MASTER);
+            mmio.unmap(table)?;
+            return Err(error);
+        }
+    };
 
-    mmio.write32(edu::MMIO_IRQ_RAISE, edu::EDU_IRQ_PROBE);
-    wait_irq(edu::EDU_IRQ_PROBE)?;
+    let result = (|| -> Result<(usize, u64, u32), ReferenceError> {
+        mmio.write32(edu::MMIO_IRQ_RAISE, edu::EDU_IRQ_PROBE);
+        wait_irq(edu::EDU_IRQ_PROBE)?;
+        let (bytes, returned) = exercise_dma(&mmio, frames, physical_memory_offset)?;
+        let mask = EDU_INTERRUPTS.observed();
+        if mask & (edu::EDU_IRQ_PROBE | edu::EDU_IRQ_DMA) != (edu::EDU_IRQ_PROBE | edu::EDU_IRQ_DMA)
+        {
+            return Err(ReferenceError::InterruptTimeout);
+        }
+        Ok((bytes, returned, mask))
+    })();
 
-    let (verified_bytes, returned_dma_pages) = exercise_dma(&mmio, frames, physical_memory_offset)?;
-    let irq_mask = EDU_INTERRUPTS.observed();
-    if irq_mask & (edu::EDU_IRQ_PROBE | edu::EDU_IRQ_DMA) != (edu::EDU_IRQ_PROBE | edu::EDU_IRQ_DMA)
-    {
-        return Err(ReferenceError::InterruptTimeout);
-    }
-
+    // Снимаем MSI и адрес обработчика на любом выходе, включая таймауты
+    // и ошибки данных. При незавершённом DMA его страницу не возвращаем:
+    // это безопаснее, чем повторно выделить её другому владельцу.
     x86_64::instructions::interrupts::without_interrupts(|| {
         msi.disable(&config);
         EDU_IRQ_ADDRESS.store(0, Ordering::Release);
     });
-    config.write_u16(PCI_COMMAND_OFFSET, initial_command);
+    let restored = if result.is_ok() {
+        initial_command
+    } else {
+        initial_command & !PCI_BUS_MASTER
+    };
+    config.write_u16(PCI_COMMAND_OFFSET, restored);
     mmio.unmap(table)?;
+    let (verified_bytes, returned_dma_pages, irq_mask) = result?;
 
     Ok(ReferenceReport {
         pci_bus: function.bus,

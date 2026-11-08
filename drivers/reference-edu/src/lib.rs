@@ -133,6 +133,13 @@ impl InterruptMailbox {
         self.pending.swap(0, Ordering::AcqRel)
     }
 
+    /// Сбрасывать только при отключённом источнике IRQ. Иначе новое
+    /// аппаратное событие может быть потеряно при повторной инициализации.
+    pub fn reset(&self) {
+        self.pending.store(0, Ordering::Release);
+        self.observed.store(0, Ordering::Release);
+    }
+
     pub fn observed(&self) -> u32 {
         self.observed.load(Ordering::Acquire)
     }
@@ -238,6 +245,11 @@ mod tests {
         assert_eq!(mailbox.observed(), EDU_IRQ_PROBE | EDU_IRQ_DMA);
         assert_eq!(mailbox.take(), EDU_IRQ_PROBE | EDU_IRQ_DMA);
         assert_eq!(mailbox.take(), 0);
+        mailbox.reset();
+        assert_eq!(mailbox.observed(), 0);
+        mailbox.record(EDU_IRQ_DMA);
+        assert_eq!(mailbox.take(), EDU_IRQ_DMA);
+        assert_eq!(mailbox.observed(), EDU_IRQ_DMA);
     }
 
     #[derive(Default)]

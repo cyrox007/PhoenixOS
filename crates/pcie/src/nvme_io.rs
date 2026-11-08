@@ -4,6 +4,7 @@ pub const CREATE_IO_CQ: u8 = 0x05;
 pub const CREATE_IO_SQ: u8 = 0x01;
 pub const READ: u8 = 0x02;
 pub const WRITE: u8 = 0x01;
+pub const FLUSH: u8 = 0x00;
 pub const IO_QUEUE_ID: u16 = 1;
 pub const IO_QUEUE_DEPTH: u16 = 16;
 pub const LOGICAL_BLOCK_BYTES: usize = 512;
@@ -35,6 +36,17 @@ impl IoCommand {
         command.words[10] = (u32::from(IO_QUEUE_DEPTH - 1) << 16) | u32::from(IO_QUEUE_ID);
         command.words[11] = (u32::from(IO_QUEUE_ID) << 16) | 1;
         Ok(command)
+    }
+
+    /// Фиксация данных пространства имён до отключения устройства.
+    pub fn flush(id: u16, namespace: u32) -> Result<Self, IoError> {
+        if namespace == 0 {
+            return Err(IoError::InvalidBlockRange);
+        }
+        let mut words = [0; 16];
+        words[0] = u32::from(id) << 16 | u32::from(FLUSH);
+        words[1] = namespace;
+        Ok(Self { words })
     }
 
     fn queue_command(opcode: u8, id: u16, address: u64) -> Result<Self, IoError> {
@@ -110,6 +122,15 @@ mod tests {
             IoCommand::create_completion(1, 7),
             Err(IoError::InvalidAddress)
         );
+    }
+
+    #[test]
+    fn flush_uses_namespace_and_command_id() {
+        let flush = IoCommand::flush(0x1234, 1).unwrap();
+        assert_eq!(flush.words[0], 0x1234_0000);
+        assert_eq!(flush.words[1], 1);
+        assert!(flush.words[2..].iter().all(|word| *word == 0));
+        assert_eq!(IoCommand::flush(7, 0), Err(IoError::InvalidBlockRange));
     }
 
     #[test]

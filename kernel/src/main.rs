@@ -345,10 +345,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // Запускаем собственные административные очереди после штатного
     // отключения контроллера, оставшегося в состоянии UEFI. Все три
     // закреплённые страницы DMA возвращаются до запуска xHCI.
-    let nvme_admin = unsafe {
-        nvme_admin::self_test(nvme, &mut page_table, &mut frames)
-    }
-    .expect("административные очереди NVMe не завершили аппаратные команды");
+    let nvme_admin = unsafe { nvme_admin::self_test(nvme, &mut page_table, &mut frames) }
+        .expect("административные очереди NVMe не завершили аппаратные команды");
     assert_eq!(nvme_admin.queue_depth, 16);
     assert_eq!(nvme_admin.completed_commands, 2);
     assert_eq!(nvme_admin.controller_vendor, nvme.function.vendor_id);
@@ -358,9 +356,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         "INFO",
         format_args!(
             "nvme admin queues: OK depth={} completed={} dma_pages={}",
-            nvme_admin.queue_depth,
-            nvme_admin.completed_commands,
-            nvme_admin.returned_dma_pages
+            nvme_admin.queue_depth, nvme_admin.completed_commands, nvme_admin.returned_dma_pages
         ),
     );
     serial::line(

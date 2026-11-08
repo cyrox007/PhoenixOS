@@ -2,6 +2,7 @@ use bootloader_api::info::MemoryRegion;
 use phoenix_acpi::McfgInfo;
 use phoenix_pcie::PcieFunction;
 use phoenix_pcie::graphics::GraphicsInventory;
+use phoenix_pcie::modern_profile::{LegacyPciAudit, WorkingController, supported_storage_or_usb};
 use phoenix_pcie::nvme::{self, NvmePciController, NvmePciError};
 use phoenix_pcie::xhci::{self, XhciPciController, XhciPciError};
 use phoenix_pcie::{ConfigAccess, EcamSegment, EnumerationSummary, PcieError};
@@ -36,6 +37,7 @@ pub struct PlatformPcieSummary {
     pub nvme_controller_count: u32,
     pub first_nvme: Option<NvmePciController>,
     pub graphics: GraphicsInventory,
+    pub legacy: LegacyPciAudit,
     pub first_edu: Option<PcieFunction>,
 }
 
@@ -51,6 +53,7 @@ impl PlatformPcieSummary {
             nvme_controller_count: 0,
             first_nvme: None,
             graphics: GraphicsInventory::empty(),
+            legacy: LegacyPciAudit::new(),
             first_edu: None,
         }
     }
@@ -108,23 +111,27 @@ pub fn enumerate(
         let mut nvme_count = 0_u32;
         let segment_summary = phoenix_pcie::enumerate_segment(&access, segment, |function| {
             summary.graphics.observe(&access, function);
+            summary.legacy.observe(function);
             if summary.first_edu.is_none()
                 && function.vendor_id == EDU_VENDOR_ID
                 && function.device_id == EDU_DEVICE_ID
             {
                 summary.first_edu = Some(function);
             }
-            if xhci::is_xhci(function) {
-                xhci_count = xhci_count.saturating_add(1);
-                if summary.first_xhci.is_none() && first_xhci_probe.is_none() {
-                    first_xhci_probe = Some(xhci::probe(&access, function));
+            match supported_storage_or_usb(function) {
+                Some(WorkingController::Xhci) => {
+                    xhci_count = xhci_count.saturating_add(1);
+                    if summary.first_xhci.is_none() && first_xhci_probe.is_none() {
+                        first_xhci_probe = Some(xhci::probe(&access, function));
+                    }
                 }
-            }
-            if nvme::is_nvme(function) {
-                nvme_count = nvme_count.saturating_add(1);
-                if summary.first_nvme.is_none() && first_nvme_probe.is_none() {
-                    first_nvme_probe = Some(nvme::probe(&access, function));
+                Some(WorkingController::Nvme) => {
+                    nvme_count = nvme_count.saturating_add(1);
+                    if summary.first_nvme.is_none() && first_nvme_probe.is_none() {
+                        first_nvme_probe = Some(nvme::probe(&access, function));
+                    }
                 }
+                None => {}
             }
         })?;
         summary.include(segment_summary);

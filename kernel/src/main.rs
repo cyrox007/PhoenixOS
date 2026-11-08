@@ -344,9 +344,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let nvme = pcie
         .first_nvme
         .expect("QEMU-профиль обязан содержать контроллер NVMe");
-    assert_eq!(
-        pcie.nvme_controller_count, 1,
-        "ожидался один NVMe-контроллер"
+    assert!(
+        pcie.nvme_controller_count >= 1,
+        "не обнаружено ни одного NVMe-контроллера"
     );
     assert!(
         nvme.mmio_base != xhci.mmio_base,

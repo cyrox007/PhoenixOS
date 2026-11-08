@@ -1,5 +1,7 @@
 #![no_std]
 
+pub mod route;
+
 use bootloader_api::info::{FrameBuffer, FrameBufferInfo, PixelFormat};
 use noto_sans_mono_bitmap::{FontWeight, RasterHeight, get_raster};
 
@@ -35,6 +37,8 @@ const PANEL: Color = Color::rgb(24, 31, 46);
 const ACCENT: Color = Color::rgb(229, 94, 54);
 const PRIMARY_TEXT: Color = Color::rgb(245, 247, 250);
 const SECONDARY_TEXT: Color = Color::rgb(168, 179, 196);
+const EMERGENCY_PANEL: Color = Color::rgb(106, 21, 32);
+const EMERGENCY_ACCENT: Color = Color::rgb(245, 74, 89);
 
 pub fn draw_boot_banner(framebuffer: &mut FrameBuffer) -> Result<BannerInfo, RenderError> {
     let info = framebuffer.info();
@@ -61,6 +65,49 @@ pub fn draw_boot_banner(framebuffer: &mut FrameBuffer) -> Result<BannerInfo, Ren
         height: info.height,
         bytes_per_pixel: info.bytes_per_pixel,
     })
+}
+
+/// Аварийный рисунок появляется только после передачи владения обратно
+/// сохранённому буферу GOP; повторная инициализация прошивки не требуется.
+pub fn draw_emergency_banner(framebuffer: &mut FrameBuffer) -> Result<BannerInfo, RenderError> {
+    let info = framebuffer.info();
+    validate_info(info, framebuffer.buffer().len())?;
+
+    let mut canvas = Canvas {
+        buffer: framebuffer.buffer_mut(),
+        info,
+    };
+    canvas.clear(BACKGROUND)?;
+    let panel_height = core::cmp::min(info.height, 112);
+    canvas.fill_rect(0, 0, info.width, panel_height, EMERGENCY_PANEL)?;
+    canvas.fill_rect(0, 0, core::cmp::min(info.width, 8), panel_height, EMERGENCY_ACCENT)?;
+
+    if info.width >= 250 && info.height >= 64 {
+        canvas.draw_text(24, 18, "PhoenixOS", PRIMARY_TEXT, EMERGENCY_PANEL, 2)?;
+        canvas.draw_text(24, 62, "DISPLAY RECOVERY / GOP", PRIMARY_TEXT, EMERGENCY_PANEL, 1)?;
+    }
+
+    Ok(BannerInfo {
+        width: info.width,
+        height: info.height,
+        bytes_per_pixel: info.bytes_per_pixel,
+    })
+}
+
+/// Читаем выборку исходного буфера GOP, чтобы аппаратный тест мог доказать
+/// отсутствие штатных записей в него после переключения графического пути.
+/// Проверка не изменяет видеопамять и не претендует на полный контроль DMA.
+pub fn firmware_sample(framebuffer: &FrameBuffer) -> u64 {
+    let bytes = framebuffer.buffer();
+    let step = core::cmp::max(bytes.len() / 4096, 1);
+    let mut fingerprint = 0xcbf2_9ce4_8422_2325_u64 ^ bytes.len() as u64;
+
+    for index in (0..bytes.len()).step_by(step) {
+        let byte = unsafe { core::ptr::read_volatile(bytes.as_ptr().add(index)) };
+        fingerprint = (fingerprint ^ u64::from(byte)).wrapping_mul(0x1000_0000_01b3);
+    }
+
+    fingerprint
 }
 
 fn validate_info(info: FrameBufferInfo, buffer_len: usize) -> Result<(), RenderError> {
@@ -246,6 +293,27 @@ mod tests {
             bytes_per_pixel,
             stride: 8,
         }
+    }
+
+    #[test]
+    fn recovery_panel_uses_distinct_color_from_normal_banner() {
+        assert_ne!(EMERGENCY_PANEL, PANEL);
+        let info = FrameBufferInfo {
+            byte_len: 32 * 32 * 4,
+            width: 32,
+            height: 32,
+            pixel_format: PixelFormat::Bgr,
+            bytes_per_pixel: 4,
+            stride: 32,
+        };
+        let mut buffer = [0_u8; 32 * 32 * 4];
+        let mut canvas = Canvas {
+            buffer: &mut buffer,
+            info,
+        };
+        canvas.fill_rect(0, 0, 32, 32, EMERGENCY_PANEL).unwrap();
+        let offset = (12 * 32 + 16) * 4;
+        assert_eq!(&buffer[offset..offset + 4], &[32, 21, 106, 0]);
     }
 
     #[test]

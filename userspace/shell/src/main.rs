@@ -110,8 +110,9 @@ fn input_capability_from_environment(info: &ProcessStartInfo) -> Option<PackedCa
         if argument.address == 0 || argument.length > 128 {
             continue;
         }
-        let bytes =
-            unsafe { core::slice::from_raw_parts(argument.address as *const u8, argument.length as usize) };
+        let bytes = unsafe {
+            core::slice::from_raw_parts(argument.address as *const u8, argument.length as usize)
+        };
         if let Some(value) = bytes.strip_prefix(b"PHOENIX_INPUT_CAP=") {
             return PackedCapabilityHandle::parse_hex(value);
         }

@@ -16,6 +16,47 @@ import tempfile
 from pathlib import Path
 
 
+def verify_gpu_screenshot(path):
+    """Сравнить настоящие пиксели снимка второго видеоконтроллера QEMU."""
+    with open(path, "rb") as image:
+        if image.readline().strip() != b"P6":
+            raise RuntimeError("VirtIO-GPU: снимок не является двоичным PPM")
+        geometry = image.readline()
+        while geometry.startswith(b"#"):
+            geometry = image.readline()
+        dimensions = geometry.split()
+        if len(dimensions) != 2:
+            raise RuntimeError("VirtIO-GPU: неверные размеры снимка")
+        width, height = map(int, dimensions)
+        if width < 128 or height < 128 or image.readline().strip() != b"255":
+            raise RuntimeError("VirtIO-GPU: нет ожидаемой области изображения")
+        pixels = image.read()
+    if len(pixels) != width * height * 3:
+        raise RuntimeError("VirtIO-GPU: неполные данные снимка")
+
+    def pixel(x, y):
+        start = (y * width + x) * 3
+        return tuple(pixels[start:start + 3])
+
+    expected = [
+        (124, 124, (255, 255, 255)),
+        (50, 15, (24, 31, 46)),
+        (50, 60, (229, 94, 54)),
+        (50, 105, (44, 174, 152)),
+    ]
+    print(
+        "Снимок VirtIO-GPU, проверочные цвета: "
+        + ", ".join(f"({x},{y})={pixel(x,y)}" for x, y, _ in expected),
+        flush=True,
+    )
+    for x, y, color in expected:
+        if pixel(x, y) != color:
+            raise RuntimeError(
+                f"VirtIO-GPU: пиксель ({x},{y}) = {pixel(x, y)}, ожидалось {color}"
+            )
+    print(f"Снимок VirtIO-GPU: OK {width}x{height}, проверено {len(expected)} пикселя", flush=True)
+
+
 class Qmp:
     def __init__(self, path):
         self.path = path
@@ -105,6 +146,7 @@ def main():
             bufsize=1,
         )
         monitor = Qmp(path)
+        gpu_screen_verified = False
         ready = False
         detached = False
         attached = False
@@ -126,8 +168,20 @@ def main():
                     sys.stdout.flush()
                     log.write(line)
                     log.flush()
-                    if "xhci hotplug ready: OK" in line and not ready:
+                    if "virtio gpu 2d: OK" in line and not gpu_screen_verified:
+                        # GPU остаётся включённым до окончания USB-испытаний.
+                        # Снимок строится самим QEMU из вторичного scanout,
+                        # а не из буфера гостя или заранее созданного образца.
                         monitor.connect()
+                        screenshot = Path(directory) / "virtio-gpu.ppm"
+                        monitor.execute("screendump", {
+                            "filename": str(screenshot),
+                            "device": "phoenix-gpu",
+                            "head": 0,
+                        })
+                        verify_gpu_screenshot(screenshot)
+                        gpu_screen_verified = True
+                    if "xhci hotplug ready: OK" in line and not ready:
                         monitor.execute("device_del", {"id": "phoenix-keyboard"})
                         ready = True
                     if "xhci hotplug detached: OK" in line and not detached:
@@ -216,6 +270,8 @@ def main():
                     if "xhci scheduled stopped: OK" in line:
                         scheduled_stopped = True
             result = process.wait(timeout=3)
+            if not gpu_screen_verified:
+                raise RuntimeError("Отсутствует снимок изображения VirtIO-GPU")
             if not (ready and detached and attached):
                 raise RuntimeError("Отсутствует подтверждение полного переподключения USB")
             if not (hid_ready and key_pressed and key_released and mouse_moved):

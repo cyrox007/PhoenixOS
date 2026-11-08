@@ -277,3 +277,5 @@ mod tests {
 
 pub mod usb_descriptors;
 pub mod usb_hid;
+pub mod virtio_gpu_2d;
+pub mod virtio_pci;

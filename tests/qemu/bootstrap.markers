@@ -4,6 +4,9 @@ exception: breakpoint
 acpi platform discovery: OK
 pcie ecam enumeration: OK
 graphics profile discovery: OK profile=virtio-gpu vendor=1af4 id=1050
+graphics gop early: OK
+graphics handoff: OK owner=virtio-gpu gop=early-only
+graphics handoff shutdown: OK gop=emergency-only
 virtio gpu 2d: OK width=128 height=128
 virtio gpu shutdown: OK pages=20
 xhci pcie discovery: OK

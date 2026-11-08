@@ -559,8 +559,7 @@ pub unsafe fn self_test<const N: usize>(
         wait_irq(edu::EDU_IRQ_PROBE)?;
         let (bytes, returned) = exercise_dma(&mmio, frames, physical_memory_offset)?;
         let mask = EDU_INTERRUPTS.observed();
-        if mask & (edu::EDU_IRQ_PROBE | edu::EDU_IRQ_DMA)
-            != (edu::EDU_IRQ_PROBE | edu::EDU_IRQ_DMA)
+        if mask & (edu::EDU_IRQ_PROBE | edu::EDU_IRQ_DMA) != (edu::EDU_IRQ_PROBE | edu::EDU_IRQ_DMA)
         {
             return Err(ReferenceError::InterruptTimeout);
         }

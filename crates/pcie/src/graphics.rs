@@ -82,9 +82,7 @@ pub const fn classify(function: PcieFunction) -> Option<GraphicsProfile> {
 
     match (function.vendor_id, function.device_id) {
         (AMD_VENDOR_ID, AMD_CEZANNE_DEVICE_ID) => Some(GraphicsProfile::AmdCezanne),
-        (NVIDIA_VENDOR_ID, NVIDIA_GTX_1650_DEVICE_ID) => {
-            Some(GraphicsProfile::NvidiaGtx1650)
-        }
+        (NVIDIA_VENDOR_ID, NVIDIA_GTX_1650_DEVICE_ID) => Some(GraphicsProfile::NvidiaGtx1650),
         (VIRTIO_VENDOR_ID, VIRTIO_GPU_DEVICE_ID) => Some(GraphicsProfile::VirtioGpu),
         _ => None,
     }
@@ -216,8 +214,7 @@ mod tests {
     fn config(subsystem_vendor: u16, subsystem_device: u16) -> FakeConfig {
         FakeConfig {
             subsystem_address: 0x8002_802c,
-            subsystem_value: u32::from(subsystem_vendor)
-                | (u32::from(subsystem_device) << 16),
+            subsystem_value: u32::from(subsystem_vendor) | (u32::from(subsystem_device) << 16),
         }
     }
 
@@ -256,7 +253,10 @@ mod tests {
     fn unknown_vga_and_wrong_classes_cannot_be_selected() {
         let mut inventory = GraphicsInventory::empty();
         inventory.observe(&config(0, 0), pci(0x1234, 0x1111, DISPLAY_CLASS));
-        inventory.observe(&config(0, 0), pci(AMD_VENDOR_ID, AMD_CEZANNE_DEVICE_ID, 0x01));
+        inventory.observe(
+            &config(0, 0),
+            pci(AMD_VENDOR_ID, AMD_CEZANNE_DEVICE_ID, 0x01),
+        );
         inventory.observe(&config(0, 0), pci(VIRTIO_VENDOR_ID, 0x1041, DISPLAY_CLASS));
         assert_eq!(inventory.display_controllers, 2);
         assert_eq!(inventory.unknown_controllers, 2);

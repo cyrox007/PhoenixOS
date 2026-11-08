@@ -148,11 +148,7 @@ impl ActiveXhci {
                 .map_err(XhciMmioError::HidReport)?;
             let buttons_changed = parsed.buttons != self.mouse_buttons;
             self.mouse_buttons = parsed.buttons;
-            if !buttons_changed
-                && parsed.delta_x == 0
-                && parsed.delta_y == 0
-                && parsed.wheel == 0
-            {
+            if !buttons_changed && parsed.delta_x == 0 && parsed.delta_y == 0 && parsed.wheel == 0 {
                 return Ok(ServiceResult::Idle);
             }
             return Ok(ServiceResult::Hid(InputEvent::Mouse(parsed)));

@@ -480,7 +480,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         .virtio_gpu
         .expect("в проверочном профиле QEMU требуется VirtIO-GPU");
     let (gpu_launch, gpu_report) = unsafe {
-        virtio_gpu::self_test(gpu_controller, &mut page_table, &mut frames, physical_memory_offset)
+        virtio_gpu::self_test(
+            gpu_controller,
+            &mut page_table,
+            &mut frames,
+            physical_memory_offset,
+        )
     }
     .expect("VirtIO-GPU не выполнил двухмерное обновление экрана");
     assert_eq!(gpu_launch.name, "virtio-gpu-2d");

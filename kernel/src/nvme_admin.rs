@@ -709,7 +709,6 @@ fn exercise_blocks(
 
     let mut device = NvmeBlockDevice::new(regs, arena, blocks, stride)?;
     let verified = verify_block_device(&mut device, blocks - TEST_BLOCKS)?;
-    crate::serial::emergency(format_args!("[INFO] nvme trace: block device verified\n"));
     let block_commands = device.completed_commands();
 
     // После завершения проверки отдельных блоков монтируем полноценную
@@ -729,7 +728,6 @@ fn exercise(
     max_entries: u32,
     stride: u32,
 ) -> Result<AdminTestReport, AdminRuntimeError> {
-    crate::serial::emergency(format_args!("[INFO] nvme trace: exercise entered\n"));
     enable(regs, arena, max_entries)?;
     let mut cursor = AdminQueueCursor::new(QUEUE_DEPTH).map_err(AdminRuntimeError::Protocol)?;
     execute_identify(regs, arena, &mut cursor, true)?;
@@ -785,7 +783,6 @@ pub unsafe fn self_test<const N: usize>(
     table: &mut ActivePageTable,
     frames: &mut SystemFrameAllocator<N>,
 ) -> Result<AdminTestReport, AdminRuntimeError> {
-    crate::serial::emergency(format_args!("[INFO] nvme trace: self_test entered\n"));
     // Запрещаем изменять данные физического SSD и любого другого контроллера.
     if controller.function.vendor_id != 0x1b36 || controller.function.device_id != 0x0010 {
         return Err(AdminRuntimeError::UnsafeTestDevice);

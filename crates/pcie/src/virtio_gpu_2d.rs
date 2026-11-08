@@ -178,10 +178,19 @@ mod tests {
         assert_eq!(get_u32(backing.bytes(), 24), RESOURCE_ID);
         assert_eq!(get_u32(backing.bytes(), 28), 1);
         assert_eq!(get_u32(backing.bytes(), 40), 65536);
-        assert_eq!(get_u32(GpuRequest::scanout(128, 128, true).bytes(), 44), RESOURCE_ID);
+        assert_eq!(
+            get_u32(GpuRequest::scanout(128, 128, true).bytes(), 44),
+            RESOURCE_ID
+        );
         assert_eq!(get_u32(GpuRequest::scanout(128, 128, false).bytes(), 44), 0);
-        assert_eq!(get_u32(GpuRequest::transfer(128, 128).bytes(), 48), RESOURCE_ID);
-        assert_eq!(get_u32(GpuRequest::flush(128, 128).bytes(), 40), RESOURCE_ID);
+        assert_eq!(
+            get_u32(GpuRequest::transfer(128, 128).bytes(), 48),
+            RESOURCE_ID
+        );
+        assert_eq!(
+            get_u32(GpuRequest::flush(128, 128).bytes(), 40),
+            RESOURCE_ID
+        );
     }
 
     #[test]

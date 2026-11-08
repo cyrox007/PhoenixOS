@@ -568,7 +568,6 @@ pub unsafe fn start_pair<const N: usize, R: OperationalRegisters>(
     ),
     CommandError,
 > {
-    let free_before = frames.free_frames();
     let first = frames
         .allocate_contiguous_below_4k(PAGE_COUNT, 1, 0xffff_ffff)
         .ok_or(CommandError::NoFrames)?;
@@ -648,8 +647,7 @@ pub unsafe fn start_pair<const N: usize, R: OperationalRegisters>(
             cursor: EventCursor::after_enumeration(),
             stopped: false,
             released: false,
-            free_before,
-        },
+         },
     ))
 }
 
@@ -666,8 +664,7 @@ pub struct ActiveDma {
     cursor: EventCursor,
     stopped: bool,
     released: bool,
-    free_before: u64,
-}
+ }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimePortEvent {
@@ -748,13 +745,14 @@ impl ActiveDma {
                 .close(&mut self.backend)
                 .map_err(|_| CommandError::DeviceUnmapFailed)?;
         }
+        let free_before = frames.free_frames();
         frames
             .release_contiguous_4k(self.first, PAGE_COUNT)
             .map_err(|_| CommandError::FrameReleaseFailed)?;
         self.released = true;
         assert_eq!(
             frames.free_frames(),
-            self.free_before,
+            free_before + PAGE_COUNT,
             "DMA-обмен xHCI не вернул все физические страницы"
         );
         Ok(())

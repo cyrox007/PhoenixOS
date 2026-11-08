@@ -6,6 +6,8 @@
 
 use core::sync::atomic::{Ordering, fence};
 
+use crate::nvme_fs::{self, NvmeFsReport};
+
 use phoenix_block::{BlockDevice, BlockError, BlockGeometry, validate_transfer};
 use phoenix_dma::DmaLayout;
 use phoenix_dma::mapping::{DeviceMapping, DirectDmaAperture, PhysicalAddress, QemuDirectDma};
@@ -59,6 +61,7 @@ pub enum AdminRuntimeError {
     DataMismatch,
     Io(IoError),
     Block(BlockError),
+    Filesystem(nvme_fs::NvmeFsError),
     /// Контроллер не подтвердил остановку. DMA-страницы запрещено возвращать.
     UnsafeShutdown,
 }
@@ -72,6 +75,11 @@ pub struct AdminTestReport {
     pub returned_dma_pages: u64,
     pub io_commands: u16,
     pub verified_blocks: u16,
+    pub filesystem_generation: u64,
+    pub filesystem_verified_bytes: u16,
+    pub filesystem_io_commands: u16,
+    pub filesystem_region_start: u64,
+    pub filesystem_region_blocks: u64,
 }
 
 struct RegisterWindow {
@@ -687,7 +695,7 @@ fn exercise_blocks(
     admin: &mut AdminQueueCursor,
     blocks: u64,
     stride: u32,
-) -> Result<(u16, u16), AdminRuntimeError> {
+) -> Result<(u16, u16, u16, NvmeFsReport), AdminRuntimeError> {
     const TEST_BLOCKS: u64 = 10;
     if blocks < TEST_BLOCKS {
         return Err(AdminRuntimeError::InvalidNamespace);
@@ -701,7 +709,16 @@ fn exercise_blocks(
 
     let mut device = NvmeBlockDevice::new(regs, arena, blocks, stride)?;
     let verified = verify_block_device(&mut device, blocks - TEST_BLOCKS)?;
-    Ok((device.completed_commands(), verified))
+    let block_commands = device.completed_commands();
+
+    // После завершения проверки отдельных блоков монтируем полноценную
+    // PhoenixFS на ограниченном диапазоне того же NVMe через BlockDevice.
+    let filesystem = nvme_fs::exercise(&mut device).map_err(AdminRuntimeError::Filesystem)?;
+    let filesystem_commands = device
+        .completed_commands()
+        .checked_sub(block_commands)
+        .ok_or(AdminRuntimeError::DataMismatch)?;
+    Ok((block_commands, verified, filesystem_commands, filesystem))
 }
 
 fn exercise(
@@ -734,7 +751,8 @@ fn exercise(
     if blocks != 32_768 {
         return Err(AdminRuntimeError::UnsafeTestDevice);
     }
-    let (io_commands, verified_blocks) = exercise_blocks(regs, arena, &mut cursor, blocks, stride)?;
+    let (io_commands, verified_blocks, filesystem_io_commands, filesystem) =
+        exercise_blocks(regs, arena, &mut cursor, blocks, stride)?;
     Ok(AdminTestReport {
         queue_depth: QUEUE_DEPTH,
         completed_commands: 2,
@@ -743,6 +761,11 @@ fn exercise(
         returned_dma_pages: DMA_PAGES,
         io_commands,
         verified_blocks,
+        filesystem_generation: filesystem.generation,
+        filesystem_verified_bytes: filesystem.verified_bytes,
+        filesystem_io_commands,
+        filesystem_region_start: filesystem.region_start_lba,
+        filesystem_region_blocks: filesystem.region_blocks,
     })
 }
 

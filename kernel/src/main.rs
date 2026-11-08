@@ -15,6 +15,7 @@ mod input_service;
 mod ipc_user_memory;
 mod nvme_admin;
 mod nvme_driver;
+mod nvme_fs;
 mod nvme_mmio;
 mod pcie;
 mod process_space;
@@ -66,6 +67,11 @@ static HARDWARE_PREEMPTION_THIRD_SEEN: core::sync::atomic::AtomicBool =
 
 pub static BOOTLOADER_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
+    // Стек начальной загрузки содержит крупные фиксированные буферы
+    // PhoenixFS (не менее 6 × 4 КиБ) и две проверки суперблоков.
+    // Стандартных 80 КиБ загрузчика недостаточно: в QEMU выявлено
+    // переполнение. Выделяем 256 КиБ со штатной защитной страницей.
+    config.kernel_stack_size = 256 * 1024;
     config.mappings.physical_memory = Some(Mapping::Dynamic);
     config
 };
@@ -358,6 +364,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     assert!(nvme_admin.namespace_blocks > 0);
     assert_eq!(nvme_admin.io_commands, 17);
     assert_eq!(nvme_admin.verified_blocks, 40);
+    assert!(nvme_admin.filesystem_generation > 1);
+    assert!(nvme_admin.filesystem_verified_bytes > 0);
+    assert!(nvme_admin.filesystem_io_commands > 0);
+    assert_eq!(nvme_admin.filesystem_region_start, 1024);
+    assert_eq!(nvme_admin.filesystem_region_blocks, 2048);
     assert_eq!(nvme_admin.returned_dma_pages, 6);
     serial::line(
         &mut out,
@@ -406,6 +417,18 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         format_args!(
             "nvme block device: OK read_write_flush=17 verified_blocks={} queue_wrap=1",
             nvme_admin.verified_blocks
+        ),
+    );
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "nvme phoenixfs: OK generation={} verified_bytes={} commands={} region_start={} region_blocks={}",
+            nvme_admin.filesystem_generation,
+            nvme_admin.filesystem_verified_bytes,
+            nvme_admin.filesystem_io_commands,
+            nvme_admin.filesystem_region_start,
+            nvme_admin.filesystem_region_blocks
         ),
     );
     serial::line(

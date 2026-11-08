@@ -14,6 +14,7 @@ phoenix-block = { path = "../crates/block-storage" }
 phoenix-dma = { path = "../crates/dma" }
 phoenix-driver-registry = { path = "../crates/driver-registry" }
 phoenix-elf-loader = { path = "../crates/elf-loader" }
+phoenix-fs = { path = "../crates/phoenix-fs" }
 phoenix-framebuffer = { path = "../crates/phoenix-framebuffer" }
 phoenix-ipc = { path = "../crates/ipc-model" }
 phoenix-input = { path = "../crates/input-queue" }

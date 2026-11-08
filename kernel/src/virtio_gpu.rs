@@ -645,24 +645,26 @@ impl ActiveGpu {
         frames: &mut SystemFrameAllocator<N>,
     ) -> Result<GpuShutdownReport, GpuRuntimeError> {
         let arena = self.arena.as_ref().ok_or(GpuRuntimeError::InvalidStatus)?;
-        let operations = self.queue.submit(
-            &self.registers,
-            arena,
-            GpuRequest::scanout(IMAGE_WIDTH, IMAGE_HEIGHT, false),
-            RESP_OK_NODATA,
-        )
-        .and_then(|_| {
-            self.queue.submit(
+        let operations = self
+            .queue
+            .submit(
                 &self.registers,
                 arena,
-                GpuRequest::detach_backing(),
+                GpuRequest::scanout(IMAGE_WIDTH, IMAGE_HEIGHT, false),
                 RESP_OK_NODATA,
             )
-        })
-        .and_then(|_| {
-            self.queue
-                .submit(&self.registers, arena, GpuRequest::unref(), RESP_OK_NODATA)
-        });
+            .and_then(|_| {
+                self.queue.submit(
+                    &self.registers,
+                    arena,
+                    GpuRequest::detach_backing(),
+                    RESP_OK_NODATA,
+                )
+            })
+            .and_then(|_| {
+                self.queue
+                    .submit(&self.registers, arena, GpuRequest::unref(), RESP_OK_NODATA)
+            });
 
         let common = u64::from(self.layout.common.offset);
         self.registers.write_u8(common + 0x14, 0);

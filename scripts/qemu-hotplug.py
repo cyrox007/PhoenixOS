@@ -68,6 +68,11 @@ def main():
     image, code, vars_path, serial_log = sys.argv[1:]
     with tempfile.TemporaryDirectory(prefix="phoenixos-qmp-") as directory:
         path = str(Path(directory) / "monitor.sock")
+        # Отдельный временный разреженный накопитель: его содержимое
+        # не связано ни с образом загрузки, ни с файловой системой хоста.
+        nvme_image = Path(directory) / "nvme-test.img"
+        with nvme_image.open("wb") as disk:
+            disk.truncate(16 * 1024 * 1024)
         command = [
             "qemu-system-x86_64",
             "-machine", "q35,accel=kvm",
@@ -80,6 +85,8 @@ def main():
             "-device", "qemu-xhci,id=phoenix-xhci",
             "-device", "usb-kbd,id=phoenix-keyboard,bus=phoenix-xhci.0",
             "-device", "usb-mouse,id=phoenix-mouse,bus=phoenix-xhci.0",
+            "-drive", f"file={nvme_image},if=none,id=phoenix-nvm,format=raw",
+            "-device", "nvme,id=phoenix-nvme,serial=PhoenixNVM01,drive=phoenix-nvm",
             "-qmp", f"unix:{path},server=on,wait=off",
             "-drive", f"if=pflash,format=raw,unit=0,file={code},readonly=on",
             "-drive", f"if=pflash,format=raw,unit=1,file={vars_path}",

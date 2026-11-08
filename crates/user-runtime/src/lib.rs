@@ -7,9 +7,8 @@ use phoenix_syscall_abi::{
     FILE_READY_ERROR, FILE_READY_HANGUP, FILE_READY_READ, FILE_READY_WRITE, FILE_SEEK_CURRENT,
     FILE_SEEK_END, FILE_SEEK_START, FileIoArguments, FileOpenArguments, FilePollArguments,
     FileSeekArguments, InputEventRecord, InputReadArguments, IpcReceiveArguments,
-    IpcReceiveMetadata, IpcSendArguments,
-    PackedCapabilityHandle, PackedFileDescriptor, ProcessStartInfo,
-    SYSCALL_STATUS_ACCESS_DENIED, SYSCALL_STATUS_BAD_ARGUMENTS,
+    IpcReceiveMetadata, IpcSendArguments, PackedCapabilityHandle, PackedFileDescriptor,
+    ProcessStartInfo, SYSCALL_STATUS_ACCESS_DENIED, SYSCALL_STATUS_BAD_ARGUMENTS,
     SYSCALL_STATUS_OPERATION_NOT_READY, SYSCALL_STATUS_UNKNOWN_CALL, SyscallRequest,
 };
 
@@ -464,7 +463,10 @@ mod tests {
             errno_from_status(SYSCALL_STATUS_OPERATION_NOT_READY as u64),
             ERRNO_EAGAIN
         );
-        assert_eq!(errno_from_status(SYSCALL_STATUS_ACCESS_DENIED as u64), ERRNO_EACCES);
+        assert_eq!(
+            errno_from_status(SYSCALL_STATUS_ACCESS_DENIED as u64),
+            ERRNO_EACCES
+        );
         assert_eq!(errno_from_status(u64::MAX), ERRNO_EIO);
     }
 
@@ -612,5 +614,4 @@ mod tests {
         assert_eq!(request.number, phoenix_syscall_abi::SYSCALL_INPUT_READ);
         assert_eq!(request.arguments, [capability.raw(), ptr, 48, 0, 0, 0]);
     }
-
 }

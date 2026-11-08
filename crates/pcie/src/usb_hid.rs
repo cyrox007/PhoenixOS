@@ -140,6 +140,28 @@ impl MouseReport {
     }
 }
 
+/// Сохраняет нажатие кнопки мыши между отчётами, в том числе когда
+/// при отпускании не было перемещения.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MouseState {
+    buttons: u8,
+}
+
+impl MouseState {
+    pub const fn new() -> Self {
+        Self { buttons: 0 }
+    }
+
+    pub fn update(&mut self, report: MouseReport) -> Option<MouseReport> {
+        let changed = report.buttons != self.buttons
+            || report.delta_x != 0
+            || report.delta_y != 0
+            || report.wheel != 0;
+        self.buttons = report.buttons;
+        changed.then_some(report)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputEvent {
     Key(KeyChange),
@@ -216,4 +238,15 @@ mod tests {
         assert!(!release.entries[2].unwrap().pressed);
         assert_eq!(release.entries[2].unwrap().usage, 5);
     }
+    #[test]
+    fn mouse_button_release_without_movement_is_not_lost() {
+        let mut state = MouseState::new();
+        let pressed = MouseReport::parse(&[1, 0, 0]).unwrap();
+        assert_eq!(state.update(pressed), Some(pressed));
+        assert_eq!(state.update(pressed), None);
+        let released = MouseReport::parse(&[0, 0, 0]).unwrap();
+        assert_eq!(state.update(released), Some(released));
+        assert_eq!(state.update(released), None);
+    }
+
 }

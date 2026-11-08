@@ -67,6 +67,11 @@ static HARDWARE_PREEMPTION_THIRD_SEEN: core::sync::atomic::AtomicBool =
 
 pub static BOOTLOADER_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
+    // Стек начальной загрузки содержит крупные фиксированные буферы
+    // PhoenixFS (не менее 6 × 4 КиБ) и две проверки суперблоков.
+    // Стандартных 80 КиБ загрузчика недостаточно: в QEMU выявлено
+    // переполнение. Выделяем 256 КиБ со штатной защитной страницей.
+    config.kernel_stack_size = 256 * 1024;
     config.mappings.physical_memory = Some(Mapping::Dynamic);
     config
 };

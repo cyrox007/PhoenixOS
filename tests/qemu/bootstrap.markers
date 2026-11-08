@@ -17,6 +17,12 @@ xhci hotplug ready: OK
 xhci hotplug detached: OK
 xhci hotplug attached: OK
 xhci hotplug service: OK
+xhci hid configured: OK
+xhci hid ready: OK
+xhci hid key pressed: OK
+xhci hid key released: OK
+xhci hid mouse moved: OK
+xhci hid reports: OK
 xhci resident shutdown: OK
 xhci usb interfaces: OK
 dma kernel mapping self-test: OK

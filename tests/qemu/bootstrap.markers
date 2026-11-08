@@ -8,6 +8,10 @@ nvme pcie discovery: OK
 nvme driver registry probe: OK
 nvme mmio capabilities: OK
 nvme read-only probe: OK
+nvme admin queues: OK
+nvme identify controller: OK
+nvme identify namespace: OK
+nvme admin shutdown: OK
 xhci driver registry start: OK
 xhci mmio capabilities: OK
 xhci controller reset: OK

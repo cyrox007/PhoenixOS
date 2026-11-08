@@ -135,7 +135,10 @@ fn run_driver<P: DmaBufferPlatform>(
     let region = buffer.region()?;
     assert_eq!(region.cpu_address().value(), CPU);
     assert_eq!(region.device_address().value(), expected_device_address);
-    assert_eq!(region.device_offset(128, 16).unwrap().value(), expected_device_address + 128);
+    assert_eq!(
+        region.device_offset(128, 16).unwrap().value(),
+        expected_device_address + 128
+    );
     buffer.begin_device_access()?;
     assert_eq!(buffer.close(platform), Err(DmaBufferError::DeviceActive));
     buffer.finish_device_access()?;

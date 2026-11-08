@@ -1,0 +1,13 @@
+[package]
+name = "phoenix-reference-edu"
+version = "0.3.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+phoenix-driver-registry = { path = "../../crates/driver-registry" }
+phoenix-dma = { path = "../../crates/dma" }
+phoenix-pcie = { path = "../../crates/pcie" }
+
+[lib]
+path = "src/lib.rs"

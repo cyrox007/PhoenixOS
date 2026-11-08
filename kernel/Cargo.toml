@@ -13,6 +13,7 @@ phoenix-capability = { path = "../crates/capability-model" }
 phoenix-block = { path = "../crates/block-storage" }
 phoenix-dma = { path = "../crates/dma" }
 phoenix-driver-registry = { path = "../crates/driver-registry" }
+phoenix-reference-edu = { path = "../drivers/reference-edu" }
 phoenix-elf-loader = { path = "../crates/elf-loader" }
 phoenix-fs = { path = "../crates/phoenix-fs" }
 phoenix-framebuffer = { path = "../crates/phoenix-framebuffer" }

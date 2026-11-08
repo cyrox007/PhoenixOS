@@ -280,5 +280,4 @@ mod tests {
             b"input mouse source=2 buttons=1 dx=12 dy=-6 wheel=0 seq=8 lost=2\n"
         );
     }
-
 }

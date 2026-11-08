@@ -34,7 +34,8 @@ use alloc::vec::Vec;
 use bootloader_api::config::{BootloaderConfig, Mapping};
 use bootloader_api::{BootInfo, entry_point};
 use core::alloc::Layout;
-use phoenix_framebuffer::draw_boot_banner;
+use phoenix_framebuffer::{draw_boot_banner, draw_emergency_banner};
+use phoenix_pcie::graphics::{GraphicsOutputHandoff, GraphicsOutputPhase};
 use phoenix_memory::{MemorySummary, SystemFrameAllocator};
 use phoenix_vm::{ActivePageTable, InactivePageTable};
 use qemu::ExitCode;
@@ -86,6 +87,14 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     arch::x86_64::init();
     serial::line(&mut out, "INFO", format_args!("interrupt tables: OK"));
+
+    // GOP допускается только в фазе ранней загрузки. После начала
+    // передачи экраном владеет штатный драйвер; повторная запись в
+    // сохранённый буфер GOP разрешена лишь при явной аварийной фазе.
+    let mut graphics_handoff = GraphicsOutputHandoff::new();
+    assert!(graphics_handoff.firmware_boot_allowed());
+    render_boot_banner(boot_info, &mut out);
+    serial::line(&mut out, "INFO", format_args!("graphics gop early: OK"));
 
     if !arch::x86_64::exceptions::prepared_kernel_timer_frame_self_test() {
         panic!("заранее подготовленный кадр таймера не совпадает с ассемблерным входом");
@@ -479,15 +488,37 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         .graphics
         .virtio_gpu
         .expect("в проверочном профиле QEMU требуется VirtIO-GPU");
-    let (gpu_launch, gpu_report, mut active_gpu) = unsafe {
+    graphics_handoff
+        .begin(gpu_controller.profile)
+        .expect("передача GOP неподдерживаемому профилю запрещена");
+    let (gpu_launch, gpu_report, mut active_gpu) = match unsafe {
         virtio_gpu::start(
             gpu_controller,
             &mut page_table,
             &mut frames,
             physical_memory_offset,
         )
-    }
-    .expect("VirtIO-GPU не выполнил двухмерное обновление экрана");
+    } {
+        Ok(session) => session,
+        Err(error) => {
+            graphics_handoff
+                .emergency()
+                .expect("не удалось перейти к аварийному выводу");
+            render_emergency_banner(boot_info, &mut out, graphics_handoff);
+            panic!("не удалось запустить штатный графический драйвер: {error:?}");
+        }
+    };
+    graphics_handoff
+        .activate(active_gpu.is_running())
+        .expect("штатный драйвер не подтвердил владение экраном");
+    assert!(!graphics_handoff.firmware_boot_allowed());
+    assert!(!graphics_handoff.firmware_emergency_allowed());
+    assert!(graphics_handoff.native_output_allowed());
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("graphics handoff: OK owner=virtio-gpu gop=early-only"),
+    );
     assert_eq!(gpu_launch.name, "virtio-gpu-2d");
     assert_eq!(gpu_report.width, 128);
     assert_eq!(gpu_report.height, 128);
@@ -801,7 +832,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     init_apic_timer(&mut out);
 
-    render_boot_banner(boot_info, &mut out);
+    assert!(graphics_handoff.native_output_allowed());
 
     // Контроллер пережил остальные самопроверки ядра. Эмулируемый USB
     // отключается и подключается во время работы службы через монитор QEMU.
@@ -1041,9 +1072,27 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // После проверки реального экрана монитором QEMU завершаем сессию
     // GPU. В отличие от обычного объекта драйвер обязан подтвердить сброс
     // до возврата страниц памяти устройства в системный распределитель.
-    let gpu_shutdown = active_gpu
-        .shutdown(&mut page_table, &mut frames)
-        .expect("VirtIO-GPU не смог безопасно остановить графический сеанс");
+    let gpu_shutdown = match active_gpu.shutdown(&mut page_table, &mut frames) {
+        Ok(report) => report,
+        Err(error) => {
+            graphics_handoff
+                .emergency()
+                .expect("аварийный вывод должен быть доступен при сбое GPU");
+            render_emergency_banner(boot_info, &mut out, graphics_handoff);
+            panic!("VirtIO-GPU не смог безопасно остановить графический сеанс: {error:?}");
+        }
+    };
+    graphics_handoff
+        .stop(!active_gpu.is_running())
+        .expect("драйвер не подтвердил завершение владения экраном");
+    assert_eq!(graphics_handoff.phase(), GraphicsOutputPhase::DriverStopped);
+    assert!(!graphics_handoff.firmware_boot_allowed());
+    assert!(!graphics_handoff.native_output_allowed());
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!("graphics handoff shutdown: OK gop=emergency-only"),
+    );
     assert_eq!(gpu_shutdown.completed_commands, 9);
     assert_eq!(gpu_shutdown.returned_dma_pages, 20);
     serial::line(
@@ -3174,7 +3223,7 @@ fn heap_self_test() {
     }
 }
 
-fn render_boot_banner(boot_info: &'static mut BootInfo, out: &mut serial::Com1) {
+fn render_boot_banner(boot_info: &mut BootInfo, out: &mut serial::Com1) {
     let Some(framebuffer) = boot_info.framebuffer.as_mut() else {
         serial::line(out, "WARN", format_args!("framebuffer: unavailable"));
         return;
@@ -3193,6 +3242,28 @@ fn render_boot_banner(boot_info: &'static mut BootInfo, out: &mut serial::Com1) 
             info.width, info.height, info.bytes_per_pixel
         ),
     );
+}
+
+/// Только после явного отказа штатного драйвера. Не открывает GOP
+/// для обычной работы и не пытается сбрасывать физическую видеокарту.
+fn render_emergency_banner(
+    boot_info: &mut BootInfo,
+    out: &mut serial::Com1,
+    handoff: GraphicsOutputHandoff,
+) {
+    if !handoff.firmware_emergency_allowed() {
+        serial::line(out, "ERROR", format_args!("graphics emergency: denied"));
+        return;
+    }
+    let Some(framebuffer) = boot_info.framebuffer.as_mut() else {
+        serial::line(out, "ERROR", format_args!("graphics emergency: serial-only"));
+        return;
+    };
+    if draw_emergency_banner(framebuffer).is_err() {
+        serial::line(out, "ERROR", format_args!("graphics emergency: serial-only"));
+        return;
+    }
+    serial::line(out, "ERROR", format_args!("graphics emergency: GOP fallback"));
 }
 
 #[alloc_error_handler]

@@ -1,5 +1,6 @@
 use bootloader_api::info::MemoryRegion;
 use phoenix_acpi::McfgInfo;
+use phoenix_pcie::graphics::GraphicsInventory;
 use phoenix_pcie::nvme::{self, NvmePciController, NvmePciError};
 use phoenix_pcie::xhci::{self, XhciPciController, XhciPciError};
 use phoenix_pcie::{ConfigAccess, EcamSegment, EnumerationSummary, PcieError};
@@ -32,6 +33,7 @@ pub struct PlatformPcieSummary {
     pub first_xhci: Option<XhciPciController>,
     pub nvme_controller_count: u32,
     pub first_nvme: Option<NvmePciController>,
+    pub graphics: GraphicsInventory,
 }
 
 impl PlatformPcieSummary {
@@ -45,6 +47,7 @@ impl PlatformPcieSummary {
             first_xhci: None,
             nvme_controller_count: 0,
             first_nvme: None,
+            graphics: GraphicsInventory::empty(),
         }
     }
 
@@ -100,6 +103,7 @@ pub fn enumerate(
         let mut xhci_count = 0_u32;
         let mut nvme_count = 0_u32;
         let segment_summary = phoenix_pcie::enumerate_segment(&access, segment, |function| {
+            summary.graphics.observe(&access, function);
             if xhci::is_xhci(function) {
                 xhci_count = xhci_count.saturating_add(1);
                 if summary.first_xhci.is_none() && first_xhci_probe.is_none() {

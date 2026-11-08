@@ -140,7 +140,14 @@ pub struct InputReadArguments {
 
 impl InputReadArguments {
     pub const fn registers(self) -> [u64; SYSCALL_ARGUMENT_COUNT] {
-        [self.capability.raw(), self.event_address, self.event_capacity, 0, 0, 0]
+        [
+            self.capability.raw(),
+            self.event_address,
+            self.event_capacity,
+            0,
+            0,
+            0,
+        ]
     }
 }
 
@@ -814,7 +821,10 @@ mod tests {
         assert_eq!(core::mem::size_of::<InputEventRecord>(), 48);
         assert_eq!(core::mem::align_of::<InputEventRecord>(), 8);
         let key = InputEventRecord::key(7, 4, true, 2);
-        assert_eq!((key.kind, key.source, key.code, key.flags, key.value), (1, 7, 4, 2, 1));
+        assert_eq!(
+            (key.kind, key.source, key.code, key.flags, key.value),
+            (1, 7, 4, 2, 1)
+        );
         let mouse = InputEventRecord::mouse(2, 1, 12, -6, 0);
         assert_eq!((mouse.kind, mouse.flags, mouse.x, mouse.y), (2, 1, 12, -6));
         let removed = InputEventRecord::device(7, false);
@@ -838,7 +848,9 @@ mod tests {
         let handle = PackedCapabilityHandle::parse_hex(b"0000000900000003").unwrap();
         assert_eq!((handle.slot(), handle.generation()), (3, 9));
         assert_eq!(PackedCapabilityHandle::parse_hex(b"000000000000000"), None);
-        assert_eq!(PackedCapabilityHandle::parse_hex(b"invalid0000000000"), None);
+        assert_eq!(
+            PackedCapabilityHandle::parse_hex(b"invalid0000000000"),
+            None
+        );
     }
-
 }

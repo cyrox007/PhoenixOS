@@ -708,7 +708,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         }
         core::hint::spin_loop();
     }
-    assert!(pressed && released && mouse_move, "не получены отчёты клавиатуры и мыши");
+    assert!(
+        pressed && released && mouse_move,
+        "не получены отчёты клавиатуры и мыши"
+    );
     serial::line(&mut out, "INFO", format_args!("xhci hid reports: OK"));
 
     let free_before_shutdown = frames.free_frames();

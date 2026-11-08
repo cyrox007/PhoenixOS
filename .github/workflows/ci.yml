@@ -32,6 +32,9 @@ jobs:
       - name: Проверить только современную загрузку и контроллеры
         run: python3 tests/platform/test-modern-profile.py
 
+      - name: Сверить результаты приёмки этапа 0.3
+        run: python3 tests/platform/test-audit-0.3.py
+
       - name: Проверить форматирование
         run: cargo fmt --all -- --check
 

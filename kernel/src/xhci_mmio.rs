@@ -10,7 +10,9 @@ use crate::xhci_command::{
 };
 use phoenix_memory::SystemFrameAllocator;
 use phoenix_pcie::usb_descriptors::HidConfiguration;
-use phoenix_pcie::usb_hid::{HidError, InputEvent, KeyboardReport, KeyboardState, MouseReport};
+use phoenix_pcie::usb_hid::{
+    HidError, InputEvent, KeyChange, KeyboardReport, KeyboardState, MAX_KEY_CHANGES, MouseReport,
+};
 use phoenix_pcie::xhci::XhciPciController;
 use phoenix_pcie::xhci_capabilities::{CapabilityError, RegisterAccess, XhciCapabilities};
 use phoenix_pcie::xhci_control::{self, OperationalRegisters, ResetError, ResetResult};
@@ -57,6 +59,8 @@ pub struct ActiveXhci {
     dma: ActiveDma,
     service: UsbService,
     keyboard: KeyboardState,
+    pending_keys: [Option<KeyChange>; MAX_KEY_CHANGES],
+    mouse_buttons: u8,
     closed: bool,
 }
 
@@ -116,6 +120,15 @@ impl ActiveXhci {
             .map_err(XhciMmioError::Command)
     }
 
+    fn take_pending_key(&mut self) -> Option<InputEvent> {
+        for entry in &mut self.pending_keys {
+            if let Some(key) = entry.take() {
+                return Some(InputEvent::Key(key));
+            }
+        }
+        None
+    }
+
     fn handle_hid(
         &mut self,
         report: xhci_command::HidRawReport,
@@ -123,15 +136,19 @@ impl ActiveXhci {
         if report.protocol == 1 {
             let parsed = KeyboardReport::parse(&report.bytes[..usize::from(report.length)])
                 .map_err(XhciMmioError::HidReport)?;
-            return Ok(match self.keyboard.update(parsed) {
-                Some(change) => ServiceResult::Hid(InputEvent::Key(change)),
+            let changes = self.keyboard.update_all(parsed);
+            self.pending_keys = changes.entries;
+            return Ok(match self.take_pending_key() {
+                Some(event) => ServiceResult::Hid(event),
                 None => ServiceResult::Idle,
             });
         }
         if report.protocol == 2 {
             let parsed = MouseReport::parse(&report.bytes[..usize::from(report.length)])
                 .map_err(XhciMmioError::HidReport)?;
-            if parsed.buttons == 0
+            let buttons_changed = parsed.buttons != self.mouse_buttons;
+            self.mouse_buttons = parsed.buttons;
+            if !buttons_changed
                 && parsed.delta_x == 0
                 && parsed.delta_y == 0
                 && parsed.wheel == 0
@@ -149,6 +166,9 @@ impl ActiveXhci {
     pub fn service_once(&mut self) -> Result<ServiceResult, XhciMmioError> {
         if !self.is_running() {
             return Err(XhciMmioError::ControllerNotRunning);
+        }
+        if let Some(event) = self.take_pending_key() {
+            return Ok(ServiceResult::Hid(event));
         }
         let next = self
             .dma
@@ -183,6 +203,10 @@ impl ActiveXhci {
             self.service.detach(event.port);
             if binding.protocol == 1 {
                 self.keyboard = KeyboardState::new();
+                self.pending_keys = [None; MAX_KEY_CHANGES];
+            }
+            if binding.protocol == 2 {
+                self.mouse_buttons = 0;
             }
             return Ok(ServiceResult::Detached(binding));
         }
@@ -393,6 +417,8 @@ pub unsafe fn probe<const N: usize>(
                 dma,
                 service,
                 keyboard: KeyboardState::new(),
+                pending_keys: [None; MAX_KEY_CHANGES],
+                mouse_buttons: 0,
                 closed: false,
             },
         ))

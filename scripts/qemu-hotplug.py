@@ -144,6 +144,9 @@ def main():
         command = [
             "qemu-system-x86_64",
             "-machine", "q35,accel=kvm",
+            # Не создавать старые устройства по умолчанию: дисковый путь
+            # задаётся явно через виртуальную PCI-шину VirtIO.
+            "-nodefaults",
             "-cpu", "host",
             "-m", "512M",
             "-display", "none",
@@ -164,7 +167,8 @@ def main():
             "-qmp", f"unix:{path},server=on,wait=off",
             "-drive", f"if=pflash,format=raw,unit=0,file={code},readonly=on",
             "-drive", f"if=pflash,format=raw,unit=1,file={vars_path}",
-            "-drive", f"format=raw,file={image}",
+            "-drive", f"if=none,id=phoenix-boot,format=raw,file={image},readonly=on",
+            "-device", "virtio-blk-pci,id=phoenix-boot-disk,drive=phoenix-boot,bootindex=1",
         ]
         process = subprocess.Popen(
             command,

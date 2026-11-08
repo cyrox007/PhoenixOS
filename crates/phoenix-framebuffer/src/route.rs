@@ -55,10 +55,7 @@ impl DisplayRoute {
         self.owner
     }
 
-    pub const fn firmware_access(
-        self,
-        purpose: FirmwarePurpose,
-    ) -> Result<(), DisplayRouteError> {
+    pub const fn firmware_access(self, purpose: FirmwarePurpose) -> Result<(), DisplayRouteError> {
         match (self.owner, purpose) {
             (DisplayOwner::FirmwareBoot, FirmwarePurpose::Boot)
             | (DisplayOwner::FirmwareRecovery, FirmwarePurpose::Emergency) => Ok(()),

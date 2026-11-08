@@ -123,7 +123,6 @@ impl LegacyPciAudit {
             .saturating_add(self.ohci)
             .saturating_add(self.ehci)
     }
-
 }
 
 impl Default for LegacyPciAudit {
@@ -188,7 +187,10 @@ mod tests {
             Some(WorkingController::Xhci)
         );
         audit.observe(xhci_controller);
-        assert_eq!((audit.uhci, audit.ohci, audit.ehci, audit.xhci), (1, 1, 1, 1));
+        assert_eq!(
+            (audit.uhci, audit.ohci, audit.ehci, audit.xhci),
+            (1, 1, 1, 1)
+        );
         assert_eq!(audit.excluded_legacy_total(), 3);
     }
 
@@ -196,7 +198,10 @@ mod tests {
     fn nvme_remains_supported_and_sata_is_not_claimed_as_nvme() {
         let modern = pci(0x01, 0x08, 0x02);
         let sata = pci(0x01, 0x06, 0x01);
-        assert_eq!(supported_storage_or_usb(modern), Some(WorkingController::Nvme));
+        assert_eq!(
+            supported_storage_or_usb(modern),
+            Some(WorkingController::Nvme)
+        );
         assert_eq!(supported_storage_or_usb(sata), None);
         let mut audit = LegacyPciAudit::new();
         audit.observe(modern);

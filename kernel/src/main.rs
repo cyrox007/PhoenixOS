@@ -12,9 +12,9 @@ mod elf_user_loader;
 mod file_user_memory;
 mod heap;
 mod input_service;
+mod ipc_user_memory;
 mod nvme_driver;
 mod nvme_mmio;
-mod ipc_user_memory;
 mod pcie;
 mod process_space;
 mod qemu;
@@ -283,7 +283,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let nvme = pcie
         .first_nvme
         .expect("QEMU-профиль обязан содержать контроллер NVMe");
-    assert_eq!(pcie.nvme_controller_count, 1, "ожидался один NVMe-контроллер");
+    assert_eq!(
+        pcie.nvme_controller_count, 1,
+        "ожидался один NVMe-контроллер"
+    );
     assert!(
         nvme.mmio_base != xhci.mmio_base,
         "NVMe и xHCI не могут совместно владеть одним BAR"
@@ -306,10 +309,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     );
 
     let mut page_table = unsafe { ActivePageTable::from_current(physical_memory_offset) };
-    let (nvme_launch, nvme_cap) = unsafe {
-        nvme_driver::probe(nvme, &mut page_table, &mut frames)
-    }
-    .expect("NVMe не прошёл выбор драйвера и проверку аппаратных регистров");
+    let (nvme_launch, nvme_cap) = unsafe { nvme_driver::probe(nvme, &mut page_table, &mut frames) }
+        .expect("NVMe не прошёл выбор драйвера и проверку аппаратных регистров");
     assert_eq!(nvme_launch.name, "nvme");
     serial::line(
         &mut out,
@@ -338,11 +339,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             nvme_cap.controller_ready
         ),
     );
-    serial::line(
-        &mut out,
-        "INFO",
-        format_args!("nvme read-only probe: OK"),
-    );
+    serial::line(&mut out, "INFO", format_args!("nvme read-only probe: OK"));
 
     // Реальный запуск выбранного драйвера с ресурсами ядра.
     let (launch, (capabilities, reset, command, second, ports, retained), mut active_xhci) =

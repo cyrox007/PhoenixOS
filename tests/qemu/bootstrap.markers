@@ -13,6 +13,7 @@ nvme identify controller: OK
 nvme identify namespace: OK
 nvme io queues: OK
 nvme block read write restore: OK
+nvme block device: OK
 nvme admin shutdown: OK
 xhci driver registry start: OK
 xhci mmio capabilities: OK

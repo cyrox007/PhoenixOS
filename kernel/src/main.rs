@@ -482,7 +482,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial::line(
         &mut out,
         "INFO",
-        format_args!("graphics firmware boot: OK owner={}", display_route.owner().name()),
+        format_args!(
+            "graphics firmware boot: OK owner={}",
+            display_route.owner().name()
+        ),
     );
 
     // Действительное обновление виртуального экрана, выполненное собственным
@@ -3292,11 +3295,7 @@ fn heap_self_test() {
     }
 }
 
-fn render_boot_banner(
-    boot_info: &mut BootInfo,
-    out: &mut serial::Com1,
-    route: &DisplayRoute,
-) {
+fn render_boot_banner(boot_info: &mut BootInfo, out: &mut serial::Com1, route: &DisplayRoute) {
     route
         .firmware_access(FirmwarePurpose::Boot)
         .expect("буфер GOP недоступен для штатного вывода");
@@ -3330,12 +3329,16 @@ fn render_firmware_emergency(
         .expect("аварийный вывод GOP не разрешён");
 
     let Some(framebuffer) = boot_info.framebuffer.as_mut() else {
-        serial::line(out, "WARN", format_args!("graphics gop emergency: unavailable"));
+        serial::line(
+            out,
+            "WARN",
+            format_args!("graphics gop emergency: unavailable"),
+        );
         return;
     };
 
-    let info = draw_emergency_banner(framebuffer)
-        .expect("сохранённый буфер GOP имеет неверный формат");
+    let info =
+        draw_emergency_banner(framebuffer).expect("сохранённый буфер GOP имеет неверный формат");
     serial::line(
         out,
         "INFO",

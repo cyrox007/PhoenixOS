@@ -64,3 +64,61 @@ mod tests {
         assert!(RECHECK_TRANSFER_TRB + 3 < RING_ITEMS - 1);
     }
 }
+
+
+/// Позиция чтения кольца событий. Управление битом цикла необходимо
+/// после оборота кольца, иначе старые события читаются повторно.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EventCursor {
+    pub index: usize,
+    pub cycle: u32,
+}
+
+impl EventCursor {
+    pub const fn after_enumeration() -> Self {
+        Self {
+            index: RECHECK_EVENT_INDEX + 1,
+            cycle: 1,
+        }
+    }
+
+    pub fn available(&self, control: u32) -> bool {
+        control & 1 == self.cycle
+    }
+
+    pub fn advance(&mut self) {
+        self.index += 1;
+        if self.index == RING_ITEMS {
+            self.index = 0;
+            self.cycle ^= 1;
+        }
+    }
+}
+
+#[cfg(test)]
+mod resident_tests {
+    use super::*;
+
+    #[test]
+    fn starts_after_last_consumed_enumeration_event() {
+        let mut cursor = EventCursor::after_enumeration();
+        assert_eq!(cursor.index, 12);
+        assert!(cursor.available(1 | (34 << 10)));
+        assert!(!cursor.available(0));
+        cursor.advance();
+        assert_eq!(cursor.index, 13);
+    }
+
+    #[test]
+    fn toggles_cycle_only_at_ring_boundary() {
+        let mut cursor = EventCursor {
+            index: RING_ITEMS - 1,
+            cycle: 1,
+        };
+        cursor.advance();
+        assert_eq!(cursor.index, 0);
+        assert_eq!(cursor.cycle, 0);
+        assert!(cursor.available(34 << 10));
+        assert!(!cursor.available((34 << 10) | 1));
+    }
+}

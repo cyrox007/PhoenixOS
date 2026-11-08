@@ -3,7 +3,7 @@
 //! Контроллер определяется по классу PCIe. Физические страницы и таблицы
 //! отображений остаются собственностью ядра и передаются обработчику явно.
 
-use crate::xhci_mmio::{self, XhciMmioError};
+use crate::xhci_mmio::{self, ActiveXhci, XhciMmioError};
 use phoenix_driver_registry::{
     ContextRegisteredDriver, DriverDescriptor, DriverLaunch, DriverRegistry, DriverRegistryError,
     DriverStartError, DriverVersion, PcieMatchRule,
@@ -41,6 +41,7 @@ struct XhciDriverContext<'a, const N: usize> {
     frames: &'a mut SystemFrameAllocator<N>,
     physical_memory_offset: VirtAddr,
     report: Option<ProbeReport>,
+    active: Option<ActiveXhci>,
     hardware_error: Option<XhciMmioError>,
 }
 
@@ -66,8 +67,9 @@ fn start_xhci<const N: usize>(
         )
     };
     match result {
-        Ok(report) => {
-            context.report = Some(report);
+        Ok((capabilities, reset, first, second, ports, retained, active)) => {
+            context.report = Some((capabilities, reset, first, second, ports, retained));
+            context.active = Some(active);
             Ok(())
         }
         Err(error) => {
@@ -91,7 +93,7 @@ pub unsafe fn start<const N: usize>(
     table: &mut ActivePageTable,
     frames: &mut SystemFrameAllocator<N>,
     physical_memory_offset: VirtAddr,
-) -> Result<(DriverLaunch, ProbeReport), XhciStartError> {
+) -> Result<(DriverLaunch, ProbeReport, ActiveXhci), XhciStartError> {
     let mut registry =
         DriverRegistry::<1, ContextRegisteredDriver<XhciDriverContext<'_, N>>>::new();
     registry
@@ -117,6 +119,7 @@ pub unsafe fn start<const N: usize>(
         frames,
         physical_memory_offset,
         report: None,
+        active: None,
         hardware_error: None,
     };
     let launch = registry.start_best_with_context(controller.function, &mut context);
@@ -125,5 +128,6 @@ pub unsafe fn start<const N: usize>(
     }
     let launch = launch.map_err(XhciStartError::Registry)?;
     let report = context.report.take().ok_or(XhciStartError::MissingReport)?;
-    Ok((launch, report))
+    let active = context.active.take().ok_or(XhciStartError::MissingReport)?;
+    Ok((launch, report, active))
 }

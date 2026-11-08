@@ -35,6 +35,9 @@ jobs:
       - name: Сверить результаты приёмки этапа 0.3
         run: python3 tests/platform/test-audit-0.3.py
 
+      - name: Проверить пределы ожидания QEMU
+        run: python3 tests/platform/test-qemu-watchdog.py
+
       - name: Проверить форматирование
         run: cargo fmt --all -- --check
 
@@ -87,6 +90,14 @@ jobs:
         env:
           PHOENIXOS_MARKERS_FILE: tests/qemu/bootstrap.markers
         run: bash scripts/run-qemu-ci.sh artifacts/phoenixos-uefi.img
+
+      - name: Сохранить журнал QEMU при ошибке
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phoenixos-qemu-diagnostics
+          path: artifacts/qemu-serial.log
+          if-no-files-found: warn
 
       - name: Сохранить UEFI-образ
         uses: actions/upload-artifact@v4

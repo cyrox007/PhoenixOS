@@ -12,6 +12,9 @@ use phoenix_driver_registry::{
     ContextRegisteredDriver, DriverDescriptor, DriverLaunch, DriverRegistry, DriverRegistryError,
     DriverStartError, DriverVersion, PcieMatchRule,
 };
+use phoenix_framebuffer::surface::{
+    SurfaceError, SurfaceFormat, SurfacePosition, SurfaceSize, SurfaceTarget, SurfaceView,
+};
 use phoenix_memory::SystemFrameAllocator;
 use phoenix_pcie::graphics::{
     GraphicsController, GraphicsProfile, VIRTIO_GPU_DEVICE_ID, VIRTIO_VENDOR_ID,
@@ -71,6 +74,7 @@ pub enum GpuRuntimeError {
     DeviceCommand(GpuProtocolError),
     InvalidDisplayMode,
     InvalidPixels,
+    Surface(SurfaceError),
     UnsafeShutdown,
 }
 
@@ -656,27 +660,42 @@ pub struct ActiveGpu {
     faulted: bool,
 }
 
-impl ActiveGpu {
-    pub const fn is_running(&self) -> bool {
-        self.arena.is_some() && !self.faulted
+impl SurfaceTarget for ActiveGpu {
+    type Error = GpuRuntimeError;
+
+    fn screen_size(&self) -> SurfaceSize {
+        SurfaceSize {
+            width: IMAGE_WIDTH,
+            height: IMAGE_HEIGHT,
+        }
     }
 
-    /// Подтверждённый штатный вывод обновлённой области, полностью
-    /// независимый от раннего буфера GOP. Неисправная очередь изолируется.
-    pub fn present_scene(&mut self, scene: NativeScene) -> Result<u16, GpuRuntimeError> {
+    fn present(
+        &mut self,
+        view: &SurfaceView<'_>,
+        position: SurfacePosition,
+    ) -> Result<(), Self::Error> {
         if self.faulted {
             return Err(GpuRuntimeError::InvalidStatus);
         }
+        if view.format() != SurfaceFormat::X8R8G8B8 {
+            return Err(GpuRuntimeError::Surface(SurfaceError::UnsupportedFormat));
+        }
+        view.fits(position, self.screen_size())
+            .map_err(GpuRuntimeError::Surface)?;
         let arena = self.arena.as_ref().ok_or(GpuRuntimeError::InvalidStatus)?;
 
-        for y in 8_usize..40 {
-            for x in 80_usize..112 {
-                let byte_offset = IMAGE_OFFSET + (y * IMAGE_WIDTH as usize + x) * 4;
-                arena.write_u32(byte_offset, scene.color());
+        // Пиксели копируются в закреплённую память до возврата вызова.
+        // Заимствованная память компоновщика никогда не передаётся в DMA.
+        let size = view.size();
+        for y in 0..size.height as usize {
+            for x in 0..size.width as usize {
+                let destination =
+                    (position.y as usize + y) * IMAGE_WIDTH as usize + position.x as usize + x;
+                arena.write_u32(IMAGE_OFFSET + destination * 4, view.pixel(x, y));
             }
         }
         fence(Ordering::SeqCst);
-
         let result = self
             .queue
             .submit(
@@ -696,7 +715,31 @@ impl ActiveGpu {
         if result.is_err() {
             self.faulted = true;
         }
-        result?;
+        result.map(|_| ())
+    }
+}
+
+impl ActiveGpu {
+    pub const fn is_running(&self) -> bool {
+        self.arena.is_some() && !self.faulted
+    }
+
+    /// Обычный клиент создаёт кадр без знания DMA или регистров GPU.
+    /// Встроенные испытания используют тот же интерфейс, что будущий
+    /// компоновщик окон.
+    pub fn present_scene(&mut self, scene: NativeScene) -> Result<u16, GpuRuntimeError> {
+        let pixels = [scene.color(); 32 * 32];
+        let view = SurfaceView::new(
+            &pixels,
+            SurfaceSize {
+                width: 32,
+                height: 32,
+            },
+            32,
+            SurfaceFormat::X8R8G8B8,
+        )
+        .map_err(GpuRuntimeError::Surface)?;
+        self.present(&view, SurfacePosition { x: 80, y: 8 })?;
         Ok(self.queue.submitted)
     }
 

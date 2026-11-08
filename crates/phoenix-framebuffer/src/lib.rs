@@ -1,6 +1,7 @@
 #![no_std]
 
 pub mod route;
+pub mod surface;
 
 use bootloader_api::info::{FrameBuffer, FrameBufferInfo, PixelFormat};
 use noto_sans_mono_bitmap::{FontWeight, RasterHeight, get_raster};

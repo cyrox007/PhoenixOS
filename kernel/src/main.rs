@@ -511,7 +511,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial::line(
         &mut out,
         "INFO",
-        format_args!("virtio gpu active: OK dma_pages={}", gpu_report.reserved_dma_pages),
+        format_args!(
+            "virtio gpu active: OK dma_pages={}",
+            gpu_report.reserved_dma_pages
+        ),
     );
 
     // Реальный запуск выбранного драйвера с ресурсами ядра.
@@ -1048,8 +1051,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         "INFO",
         format_args!(
             "virtio gpu shutdown: OK pages={} commands={}",
-            gpu_shutdown.returned_dma_pages,
-            gpu_shutdown.completed_commands
+            gpu_shutdown.returned_dma_pages, gpu_shutdown.completed_commands
         ),
     );
 

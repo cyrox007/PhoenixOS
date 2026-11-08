@@ -368,6 +368,24 @@ impl PackedCapabilityHandle {
     pub const fn generation(self) -> u32 {
         (self.0 >> 32) as u32
     }
+
+    /// Извлекает дескриптор возможности из ровно 16 шестнадцатеричных байт.
+    pub fn parse_hex(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != 16 {
+            return None;
+        }
+        let mut raw = 0_u64;
+        for &digit in bytes {
+            let nibble = match digit {
+                b'0'..=b'9' => u64::from(digit - b'0'),
+                b'a'..=b'f' => u64::from(digit - b'a' + 10),
+                b'A'..=b'F' => u64::from(digit - b'A' + 10),
+                _ => return None,
+            };
+            raw = (raw << 4) | nibble;
+        }
+        Some(Self(raw))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -813,6 +831,14 @@ mod tests {
         });
         assert_eq!(request.number, SYSCALL_INPUT_READ);
         assert_eq!(request.arguments, [capability.raw(), 0x4000, 48, 0, 0, 0]);
+    }
+
+    #[test]
+    fn capability_text_requires_exact_hex_length() {
+        let handle = PackedCapabilityHandle::parse_hex(b"0000000900000003").unwrap();
+        assert_eq!((handle.slot(), handle.generation()), (3, 9));
+        assert_eq!(PackedCapabilityHandle::parse_hex(b"000000000000000"), None);
+        assert_eq!(PackedCapabilityHandle::parse_hex(b"invalid0000000000"), None);
     }
 
 }

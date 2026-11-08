@@ -1,10 +1,12 @@
-//! Управление xHCI через MMIO и общий сеанс двух USB-устройств в QEMU.
+//! Управление регистровым окном живого контроллера xHCI (QEMU).
 //!
-//! Контроллер запускается после настройки DMA-колец, сохраняет оба слота
-//! между передачами и сбрасывается один раз перед возвратом всей памяти.
-//! Область регистров зарезервирована только для проверочного профиля QEMU.
+//! MMIO-отображение и DMA-страницы остаются закреплёнными до явного
+//! завершения работы драйвера. После запуска можно проверять состояние
+//! контроллера и опрашивать кольцо событий без повторного сброса.
 
-use crate::xhci_command::{self, CommandError, CommandReport, RetainedSlotsReport};
+use crate::xhci_command::{
+    self, ActiveDma, CommandError, CommandReport, RetainedSlotsReport, RuntimePortEvent,
+};
 use phoenix_memory::SystemFrameAllocator;
 use phoenix_pcie::xhci::XhciPciController;
 use phoenix_pcie::xhci_capabilities::{CapabilityError, RegisterAccess, XhciCapabilities};
@@ -33,10 +35,59 @@ pub enum XhciMmioError {
     Command(CommandError),
     Ports(PortError),
     MissingTestDevices,
+    ControllerNotRunning,
 }
 
 struct MappedRegisters {
     base: VirtAddr,
+}
+
+/// Контекст работающего контроллера. Владеет действующим DMA-отображением
+/// и зарезервированным окном MMIO; освободить их можно только через shutdown.
+pub struct ActiveXhci {
+    registers: MappedRegisters,
+    capabilities: XhciCapabilities,
+    dma: ActiveDma,
+    closed: bool,
+}
+
+impl ActiveXhci {
+    pub fn is_running(&self) -> bool {
+        !self.closed
+            && OperationalRegisters::read_u32(
+                &self.registers,
+                self.capabilities.operational_offset + 4,
+            ) & 1
+                == 0
+            && self.dma.is_mapped()
+    }
+
+    pub fn poll_port_event(&mut self) -> Result<Option<RuntimePortEvent>, XhciMmioError> {
+        if !self.is_running() {
+            return Err(XhciMmioError::ControllerNotRunning);
+        }
+        self.dma
+            .poll_port_event(&self.registers, self.capabilities)
+            .map_err(XhciMmioError::Command)
+    }
+
+    /// Снятие DMA всегда выполняется после аппаратной остановки xHCI.
+    /// Ошибка остановки сохраняет и MMIO, и DMA для повторной попытки.
+    pub fn shutdown<const N: usize>(
+        &mut self,
+        table: &mut ActivePageTable,
+        frames: &mut SystemFrameAllocator<N>,
+    ) -> Result<(), XhciMmioError> {
+        if self.closed {
+            return Err(XhciMmioError::ControllerNotRunning);
+        }
+        self.dma
+            .shutdown(&self.registers, self.capabilities, frames)
+            .map_err(XhciMmioError::Command)?;
+        unmap_pages(table, XHCI_MMIO_PAGE_COUNT)?;
+        self.closed = true;
+        Ok(())
+    }
 }
 
 impl RegisterAccess for MappedRegisters {
@@ -82,6 +133,7 @@ pub unsafe fn probe<const N: usize>(
         CommandReport,
         PortSummary,
         RetainedSlotsReport,
+        ActiveXhci,
     ),
     XhciMmioError,
 > {
@@ -147,10 +199,10 @@ pub unsafe fn probe<const N: usize>(
         if ports.connected < 2 || ports.enabled < 2 {
             return Err(XhciMmioError::MissingTestDevices);
         }
-        // Единый сеанс: два отдельных слота, два комплекта контекстов,
-        // повторное чтение первой конфигурации после адресации второй.
-        let (report, second, retained) = unsafe {
-            xhci_command::enumerate_pair(
+        // Один живой сеанс: два слота сохраняются за пределами загрузочных
+        // проверок; DMA принадлежит ActiveXhci до безопасного завершения.
+        let (report, second, retained, dma) = unsafe {
+            xhci_command::start_pair(
                 &registers,
                 capabilities,
                 frames,
@@ -162,9 +214,28 @@ pub unsafe fn probe<const N: usize>(
             )
         }
         .map_err(XhciMmioError::Command)?;
-        Ok((capabilities, reset, report, second, ports, retained))
+        Ok((
+            capabilities,
+            reset,
+            report,
+            second,
+            ports,
+            retained,
+            ActiveXhci {
+                registers,
+                capabilities,
+                dma,
+                closed: false,
+            },
+        ))
     })();
-    unmap_pages(table, mapped)?;
+
+    // При успешном запуске окно остаётся отображённым: теперь им
+    // владеет ActiveXhci. При отказе инициализации старый путь
+    // восстановления уже остановил DMA, можно убрать MMIO.
+    if result.is_err() {
+        unmap_pages(table, mapped)?;
+    }
     result
 }
 

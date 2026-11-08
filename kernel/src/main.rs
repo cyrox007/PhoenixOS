@@ -270,6 +270,25 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         ),
     );
 
+    // PCI-функции старых IDE/PATA и USB-контроллеров можно перечислять,
+    // но они не проходят общий выбор рабочих драйверов NVMe/xHCI.
+    assert_eq!(pcie.legacy.xhci, pcie.xhci_controller_count);
+    assert_eq!(pcie.legacy.nvme, pcie.nvme_controller_count);
+    serial::line(
+        &mut out,
+        "INFO",
+        format_args!(
+            "modern pci policy: OK nvme={} xhci={} ide_pata={} uhci={} ohci={} ehci={} legacy_excluded={}",
+            pcie.legacy.nvme,
+            pcie.legacy.xhci,
+            pcie.legacy.ide_pata,
+            pcie.legacy.uhci,
+            pcie.legacy.ohci,
+            pcie.legacy.ehci,
+            pcie.legacy.excluded_legacy_total()
+        ),
+    );
+
     // Выбор графического профиля основан на действительных идентификаторах
     // PCIe. Драйвер не запускается: экран остаётся за ранним UEFI GOP.
     if let Some(graphics) = pcie.graphics.preferred_target() {

@@ -9,9 +9,9 @@ use crate::xhci_command::{
     RuntimePortEvent,
 };
 use phoenix_memory::SystemFrameAllocator;
-use phoenix_pcie::xhci::XhciPciController;
 use phoenix_pcie::usb_descriptors::HidConfiguration;
 use phoenix_pcie::usb_hid::{HidError, InputEvent, KeyboardReport, KeyboardState, MouseReport};
+use phoenix_pcie::xhci::XhciPciController;
 use phoenix_pcie::xhci_capabilities::{CapabilityError, RegisterAccess, XhciCapabilities};
 use phoenix_pcie::xhci_control::{self, OperationalRegisters, ResetError, ResetResult};
 use phoenix_pcie::xhci_ports::{self, PortError, PortSummary};
@@ -100,10 +100,7 @@ impl ActiveXhci {
 
     /// Подготавливает USB HID для ранее адресованного устройства.
     /// Не меняет учёт слотов до подтверждения команд контроллера.
-    pub fn configure_hid_for_port(
-        &mut self,
-        port: u8,
-    ) -> Result<HidConfiguration, XhciMmioError> {
+    pub fn configure_hid_for_port(&mut self, port: u8) -> Result<HidConfiguration, XhciMmioError> {
         if !self.is_running() {
             return Err(XhciMmioError::ControllerNotRunning);
         }

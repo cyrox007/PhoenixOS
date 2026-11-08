@@ -12,6 +12,7 @@ use phoenix_memory::SystemFrameAllocator;
 use phoenix_pcie::usb_descriptors::HidConfiguration;
 use phoenix_pcie::usb_hid::{
     HidError, InputEvent, KeyChange, KeyboardReport, KeyboardState, MAX_KEY_CHANGES, MouseReport,
+    MouseState,
 };
 use phoenix_pcie::xhci::XhciPciController;
 use phoenix_pcie::xhci_capabilities::{CapabilityError, RegisterAccess, XhciCapabilities};
@@ -60,7 +61,7 @@ pub struct ActiveXhci {
     service: UsbService,
     keyboard: KeyboardState,
     pending_keys: [Option<KeyChange>; MAX_KEY_CHANGES],
-    mouse_buttons: u8,
+    mouse: MouseState,
     closed: bool,
 }
 
@@ -146,12 +147,10 @@ impl ActiveXhci {
         if report.protocol == 2 {
             let parsed = MouseReport::parse(&report.bytes[..usize::from(report.length)])
                 .map_err(XhciMmioError::HidReport)?;
-            let buttons_changed = parsed.buttons != self.mouse_buttons;
-            self.mouse_buttons = parsed.buttons;
-            if !buttons_changed && parsed.delta_x == 0 && parsed.delta_y == 0 && parsed.wheel == 0 {
-                return Ok(ServiceResult::Idle);
-            }
-            return Ok(ServiceResult::Hid(InputEvent::Mouse(parsed)));
+            return Ok(match self.mouse.update(parsed) {
+                Some(change) => ServiceResult::Hid(InputEvent::Mouse(change)),
+                None => ServiceResult::Idle,
+            });
         }
         Ok(ServiceResult::Idle)
     }
@@ -202,7 +201,7 @@ impl ActiveXhci {
                 self.pending_keys = [None; MAX_KEY_CHANGES];
             }
             if binding.protocol == 2 {
-                self.mouse_buttons = 0;
+                self.mouse = MouseState::new();
             }
             return Ok(ServiceResult::Detached(binding));
         }
@@ -414,7 +413,7 @@ pub unsafe fn probe<const N: usize>(
                 service,
                 keyboard: KeyboardState::new(),
                 pending_keys: [None; MAX_KEY_CHANGES],
-                mouse_buttons: 0,
+                mouse: MouseState::new(),
                 closed: false,
             },
         ))

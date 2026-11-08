@@ -597,13 +597,13 @@ fn paint_image(arena: &DmaArena) -> u64 {
                 x < 4 || y < 4 || x >= IMAGE_WIDTH as usize - 4 || y >= IMAGE_HEIGHT as usize - 4;
             let diagonal = x.abs_diff(y) < 3;
             let color = if border || diagonal {
-                0x00ff_ffff
+                gpu::pixel_x8r8g8b8(255, 255, 255)
             } else if y < IMAGE_HEIGHT as usize / 3 {
-                0x0018_1f2e
+                gpu::pixel_x8r8g8b8(24, 31, 46)
             } else if y < IMAGE_HEIGHT as usize * 2 / 3 {
-                0x00e5_5e36
+                gpu::pixel_x8r8g8b8(229, 94, 54)
             } else {
-                0x002c_ae98
+                gpu::pixel_x8r8g8b8(44, 174, 152)
             };
             arena.write_u32(IMAGE_OFFSET + (y * IMAGE_WIDTH as usize + x) * 4, color);
             checksum = checksum.wrapping_add(u64::from(color));

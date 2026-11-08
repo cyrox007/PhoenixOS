@@ -6,14 +6,14 @@
 
 use core::sync::atomic::{Ordering, fence};
 
-use phoenix_framebuffer::surface::{
-    SurfaceError, SurfaceFormat, SurfacePosition, SurfaceSize, SurfaceTarget, SurfaceView,
-};
 use phoenix_dma::DmaLayout;
 use phoenix_dma::mapping::{DeviceMapping, DirectDmaAperture, PhysicalAddress, QemuDirectDma};
 use phoenix_driver_registry::{
     ContextRegisteredDriver, DriverDescriptor, DriverLaunch, DriverRegistry, DriverRegistryError,
     DriverStartError, DriverVersion, PcieMatchRule,
+};
+use phoenix_framebuffer::surface::{
+    SurfaceError, SurfaceFormat, SurfacePosition, SurfaceSize, SurfaceTarget, SurfaceView,
 };
 use phoenix_memory::SystemFrameAllocator;
 use phoenix_pcie::graphics::{
@@ -690,8 +690,8 @@ impl SurfaceTarget for ActiveGpu {
         let size = view.size();
         for y in 0..size.height as usize {
             for x in 0..size.width as usize {
-                let destination = (position.y as usize + y) * IMAGE_WIDTH as usize
-                    + position.x as usize + x;
+                let destination =
+                    (position.y as usize + y) * IMAGE_WIDTH as usize + position.x as usize + x;
                 arena.write_u32(IMAGE_OFFSET + destination * 4, view.pixel(x, y));
             }
         }

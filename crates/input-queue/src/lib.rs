@@ -101,7 +101,9 @@ mod tests {
         let mut queue = InputQueue::<3>::new();
         queue.push(InputEventRecord::key(1, 4, true, 0)).unwrap();
         queue.push(InputEventRecord::key(1, 4, false, 0)).unwrap();
-        queue.push(InputEventRecord::mouse(2, 1, 12, -6, 0)).unwrap();
+        queue
+            .push(InputEventRecord::mouse(2, 1, 12, -6, 0))
+            .unwrap();
         assert_eq!(queue.len(), 3);
         assert_eq!(queue.pop().unwrap().sequence, 1);
         assert_eq!(queue.pop().unwrap().value, 0);
@@ -114,7 +116,9 @@ mod tests {
     fn overflow_replaces_oldest_and_signals_all_losses() {
         let mut queue = InputQueue::<2>::new();
         for usage in 4..7 {
-            queue.push(InputEventRecord::key(1, usage, true, 0)).unwrap();
+            queue
+                .push(InputEventRecord::key(1, usage, true, 0))
+                .unwrap();
         }
         assert_eq!(queue.len(), 2);
         assert_eq!(queue.lost(), 1);
@@ -123,7 +127,10 @@ mod tests {
         queue.push(InputEventRecord::key(1, 7, true, 0)).unwrap();
         queue.push(InputEventRecord::key(1, 8, true, 0)).unwrap();
         assert_eq!(queue.lost(), 2);
-        assert_eq!((queue.pop().unwrap().code, queue.pop().unwrap().code), (7, 8));
+        assert_eq!(
+            (queue.pop().unwrap().code, queue.pop().unwrap().code),
+            (7, 8)
+        );
     }
 
     #[test]
@@ -151,7 +158,9 @@ mod tests {
     fn wraps_ring_and_keeps_monotonic_sequences() {
         let mut queue = InputQueue::<2>::new();
         for usage in 1..=20 {
-            queue.push(InputEventRecord::key(1, usage, true, 0)).unwrap();
+            queue
+                .push(InputEventRecord::key(1, usage, true, 0))
+                .unwrap();
             let event = queue.pop().unwrap();
             assert_eq!(event.code, usage);
             assert_eq!(event.sequence, u64::from(usage));

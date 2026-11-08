@@ -1,5 +1,6 @@
 #![no_std]
 
+pub mod nvme;
 pub mod xhci;
 pub mod xhci_capabilities;
 pub mod xhci_control;

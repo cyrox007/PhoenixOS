@@ -162,8 +162,7 @@ impl EduMmio {
             | PageTableFlags::NO_EXECUTE
             | PageTableFlags::NO_CACHE
             | PageTableFlags::WRITE_THROUGH;
-        unsafe { table.map_4k(page, frame, flags, frames) }
-            .map_err(|_| ReferenceError::Mapping)?;
+        unsafe { table.map_4k(page, frame, flags, frames) }.map_err(|_| ReferenceError::Mapping)?;
         Ok(Self { base, mapped: true })
     }
 
@@ -172,7 +171,11 @@ impl EduMmio {
     }
 
     fn write32(&self, offset: usize, value: u32) {
-        unsafe { (self.base + offset as u64).as_mut_ptr::<u32>().write_volatile(value) };
+        unsafe {
+            (self.base + offset as u64)
+                .as_mut_ptr::<u32>()
+                .write_volatile(value)
+        };
     }
 
     fn read64(&self, offset: usize) -> u64 {
@@ -180,7 +183,11 @@ impl EduMmio {
     }
 
     fn write64(&self, offset: usize, value: u64) {
-        unsafe { (self.base + offset as u64).as_mut_ptr::<u64>().write_volatile(value) };
+        unsafe {
+            (self.base + offset as u64)
+                .as_mut_ptr::<u64>()
+                .write_volatile(value)
+        };
     }
 
     fn unmap(&mut self, table: &mut ActivePageTable) -> Result<(), ReferenceError> {
@@ -301,8 +308,8 @@ struct EduDmaPlatform<'a, const N: usize> {
 
 impl<'a, const N: usize> EduDmaPlatform<'a, N> {
     fn new(frames: &'a mut SystemFrameAllocator<N>, offset: VirtAddr) -> Self {
-        let aperture = DirectDmaAperture::new(0, edu::EDU_DMA_LIMIT)
-            .expect("допустимый диапазон прямого DMA");
+        let aperture =
+            DirectDmaAperture::new(0, edu::EDU_DMA_LIMIT).expect("допустимый диапазон прямого DMA");
         Self {
             frames,
             physical_memory_offset: offset,
@@ -313,7 +320,11 @@ impl<'a, const N: usize> EduDmaPlatform<'a, N> {
 }
 
 impl<const N: usize> DmaMappingBackend for EduDmaPlatform<'_, N> {
-    fn map(&mut self, address: PhysicalAddress, layout: DmaLayout) -> Result<DeviceAddress, DmaError> {
+    fn map(
+        &mut self,
+        address: PhysicalAddress,
+        layout: DmaLayout,
+    ) -> Result<DeviceAddress, DmaError> {
         self.backend.map(address, layout)
     }
 
@@ -347,18 +358,16 @@ impl<const N: usize> DmaBufferPlatform for EduDmaPlatform<'_, N> {
         if self.first_frame.map(|frame| frame.start_address().as_u64()) != Some(physical.value()) {
             return Err(DmaError::InvalidRange);
         }
-        let virtual_address = self.physical_memory_offset.as_u64()
+        let virtual_address = self
+            .physical_memory_offset
+            .as_u64()
             .checked_add(physical.value())
             .ok_or(DmaError::AddressOverflow)?;
         // Линейное отображение RAM уже создано загрузчиком UEFI.
         Ok(CpuVirtualAddress::new(virtual_address as usize))
     }
 
-    fn unmap_cpu(
-        &mut self,
-        _cpu: CpuVirtualAddress,
-        _layout: DmaLayout,
-    ) -> Result<(), DmaError> {
+    fn unmap_cpu(&mut self, _cpu: CpuVirtualAddress, _layout: DmaLayout) -> Result<(), DmaError> {
         // Переиспользуем существующее линейное отображение загрузчика:
         // оно остаётся у ядра, физическую страницу возвращаем отдельно.
         Ok(())
@@ -417,7 +426,11 @@ fn exercise_dma<const N: usize>(
         .map_err(|_| ReferenceError::DmaAddress)?;
     let pointer = region.cpu_address().value() as *mut u8;
     for index in 0..edu::EDU_TRANSFER_BYTES {
-        unsafe { pointer.add(index).write_volatile((index as u8).wrapping_mul(7).wrapping_add(11)) };
+        unsafe {
+            pointer
+                .add(index)
+                .write_volatile((index as u8).wrapping_mul(7).wrapping_add(11))
+        };
     }
     fence(Ordering::SeqCst);
 
@@ -471,7 +484,8 @@ pub unsafe fn self_test<const N: usize>(
     physical_memory_offset: VirtAddr,
 ) -> Result<ReferenceReport, ReferenceError> {
     let mut context = ProbeContext::default();
-    let launch = edu::start_reference(function, &mut context).map_err(|_| ReferenceError::Registry)?;
+    let launch =
+        edu::start_reference(function, &mut context).map_err(|_| ReferenceError::Registry)?;
     if context.discovered != Some(function) {
         return Err(ReferenceError::UnsupportedDevice);
     }
@@ -501,14 +515,9 @@ pub unsafe fn self_test<const N: usize>(
     mmio.write32(edu::MMIO_IRQ_RAISE, edu::EDU_IRQ_PROBE);
     wait_irq(edu::EDU_IRQ_PROBE)?;
 
-    let (verified_bytes, returned_dma_pages) = exercise_dma(
-        &mmio,
-        frames,
-        physical_memory_offset,
-    )?;
+    let (verified_bytes, returned_dma_pages) = exercise_dma(&mmio, frames, physical_memory_offset)?;
     let irq_mask = EDU_INTERRUPTS.observed();
-    if irq_mask & (edu::EDU_IRQ_PROBE | edu::EDU_IRQ_DMA)
-        != (edu::EDU_IRQ_PROBE | edu::EDU_IRQ_DMA)
+    if irq_mask & (edu::EDU_IRQ_PROBE | edu::EDU_IRQ_DMA) != (edu::EDU_IRQ_PROBE | edu::EDU_IRQ_DMA)
     {
         return Err(ReferenceError::InterruptTimeout);
     }

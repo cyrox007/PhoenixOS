@@ -26,6 +26,10 @@ const MAX_POLLS: usize = 5_000_000;
 const LINK_TRB: u32 = (6 << 10) | 2 | 1;
 const COMMAND_COMPLETION_EVENT: u32 = 33;
 const SUCCESS_COMPLETION: u32 = 1;
+const HID_RING_START: usize = 1024;
+const HID_RING_ITEMS: usize = (PAGE_BYTES as usize - HID_RING_START) / 16;
+const HID_REPORT_OFFSET: usize = 896;
+const HID_ENDPOINT_TYPE: u32 = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandError {
@@ -136,11 +140,40 @@ struct Completion {
     pointer: u64,
 }
 
+/// Действующая передача по USB-точке прерываний.
+/// Кольцо размещается в свободной части страницы дескриптора.
+#[derive(Clone, Copy)]
+struct HidChannel {
+    pages: DevicePages,
+    slot: u8,
+    descriptor: HidConfiguration,
+    index: usize,
+    cycle: u32,
+    outstanding: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HidRawReport {
+    pub slot: u8,
+    pub protocol: u8,
+    pub length: u8,
+    pub bytes: [u8; 8],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeEvent {
+    Port(RuntimePortEvent),
+    Hid(HidRawReport),
+}
+
 /// Состояние двух колец и отложенных извещений портов.
 struct IoState {
     commands: CommandCursor,
     events: EventCursor,
     pending_ports: [Option<RuntimePortEvent>; 256],
+    hid: [Option<HidChannel>; 2],
+    pending_hid: [Option<Completion>; 2],
+    control_next: [usize; 2],
 }
 
 impl IoState {
@@ -149,6 +182,9 @@ impl IoState {
             commands: CommandCursor::new(),
             events: EventCursor::new(),
             pending_ports: [None; 256],
+            hid: [None; 2],
+            pending_hid: [None; 2],
+            control_next: [12, 9],
         }
     }
 
@@ -160,6 +196,17 @@ impl IoState {
         }
         None
     }
+}
+
+fn hid_transfer_index(io: &IoState, event: Completion) -> Option<usize> {
+    if event.kind != 32 {
+        return None;
+    }
+    io.hid.iter().position(|channel| {
+        channel.is_some_and(|hid| {
+            hid.slot == event.slot && hid.outstanding == event.pointer
+        })
+    })
 }
 
 fn poll_event<R: OperationalRegisters>(
@@ -210,6 +257,10 @@ fn await_completion<R: OperationalRegisters>(
                 port,
                 completion_code: event.code,
             });
+            continue;
+        }
+        if let Some(index) = hid_transfer_index(io, event) {
+            io.pending_hid[index] = Some(event);
             continue;
         }
         return Ok(event);
@@ -803,6 +854,12 @@ impl ActiveDma {
             }
         };
         debug_assert_eq!(event.slot, slot);
+        for index in 0..self.io.hid.len() {
+            if self.io.hid[index].is_some_and(|channel| channel.slot == slot) {
+                self.io.hid[index] = None;
+                self.io.pending_hid[index] = None;
+            }
+        }
         // Аппаратное подтверждение Disable Slot означает отсутствие
         // дальнейшего доступа xHCI к выходному контексту этого слота.
         self.memory.write(0, usize::from(slot) * 8, 0);
@@ -848,6 +905,9 @@ impl ActiveDma {
             speed,
             &mut self.io,
         );
+        if result.is_ok() {
+            self.io.control_next[device_index] = 9;
+        }
         if result.is_err() {
             // Ошибка после Enable Slot может оставить в устройстве
             // незавершённые аппаратные обращения. До общего shutdown

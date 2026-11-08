@@ -12,10 +12,12 @@ pub const SYSCALL_FILE_SEEK: u64 = 0x113;
 pub const SYSCALL_FILE_CLOSE: u64 = 0x114;
 pub const SYSCALL_FILE_POLL: u64 = 0x115;
 pub const SYSCALL_CONSOLE_WRITE: u64 = 0x120;
+pub const SYSCALL_INPUT_READ: u64 = 0x130;
 
 pub const SYSCALL_STATUS_UNKNOWN_CALL: u32 = 1;
 pub const SYSCALL_STATUS_BAD_ARGUMENTS: u32 = 2;
 pub const SYSCALL_STATUS_OPERATION_NOT_READY: u32 = 3;
+pub const SYSCALL_STATUS_ACCESS_DENIED: u32 = 4;
 
 pub const FILE_OPEN_READ: u64 = 1 << 0;
 pub const FILE_OPEN_WRITE: u64 = 1 << 1;
@@ -45,6 +47,101 @@ pub enum ProcessStartInfoError {
     MissingEnvironmentVector,
     UnalignedArgumentVector,
     UnalignedEnvironmentVector,
+}
+
+pub const INPUT_EVENT_KEY: u32 = 1;
+pub const INPUT_EVENT_MOUSE: u32 = 2;
+pub const INPUT_EVENT_DEVICE: u32 = 3;
+pub const INPUT_DEVICE_CONNECTED: u32 = 1;
+pub const INPUT_DEVICE_DISCONNECTED: u32 = 2;
+
+/// Одна запись системной очереди ввода. Размер и порядок полей — часть ABI.
+///
+/// `sequence` показывает последовательность с момента запуска, `lost` —
+/// сколько записей вытеснено из ограниченной очереди суммарно. При увеличении
+/// `lost` пользовательский обработчик должен пересинхронизировать нажатия.
+///
+/// Для клавиши: `code` — USB HID usage, `value` = 1/0 (нажата/отпущена),
+/// `flags` — состояние модификаторов. Для мыши `flags` — кнопки,
+/// `x`, `y`, `wheel` — относительные знаковые смещения.
+/// `source` — временный идентификатор слота контроллера.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputEventRecord {
+    pub sequence: u64,
+    pub lost: u64,
+    pub kind: u32,
+    pub source: u32,
+    pub code: u32,
+    pub flags: u32,
+    pub value: i32,
+    pub x: i32,
+    pub y: i32,
+    pub wheel: i32,
+}
+
+impl InputEventRecord {
+    pub const EMPTY: Self = Self {
+        sequence: 0,
+        lost: 0,
+        kind: 0,
+        source: 0,
+        code: 0,
+        flags: 0,
+        value: 0,
+        x: 0,
+        y: 0,
+        wheel: 0,
+    };
+
+    pub const fn key(source: u32, code: u32, pressed: bool, modifiers: u32) -> Self {
+        Self {
+            kind: INPUT_EVENT_KEY,
+            source,
+            code,
+            value: if pressed { 1 } else { 0 },
+            flags: modifiers,
+            ..Self::EMPTY
+        }
+    }
+
+    pub const fn mouse(source: u32, buttons: u32, x: i32, y: i32, wheel: i32) -> Self {
+        Self {
+            kind: INPUT_EVENT_MOUSE,
+            source,
+            flags: buttons,
+            x,
+            y,
+            wheel,
+            ..Self::EMPTY
+        }
+    }
+
+    pub const fn device(source: u32, connected: bool) -> Self {
+        Self {
+            kind: INPUT_EVENT_DEVICE,
+            source,
+            code: if connected {
+                INPUT_DEVICE_CONNECTED
+            } else {
+                INPUT_DEVICE_DISCONNECTED
+            },
+            ..Self::EMPTY
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputReadArguments {
+    pub capability: PackedCapabilityHandle,
+    pub event_address: u64,
+    pub event_capacity: u64,
+}
+
+impl InputReadArguments {
+    pub const fn registers(self) -> [u64; SYSCALL_ARGUMENT_COUNT] {
+        [self.capability.raw(), self.event_address, self.event_capacity, 0, 0, 0]
+    }
 }
 
 #[repr(C)]
@@ -413,6 +510,10 @@ impl SyscallRequest {
         Self::new(SYSCALL_CONSOLE_WRITE, arguments.registers())
     }
 
+    pub const fn input_read(arguments: InputReadArguments) -> Self {
+        Self::new(SYSCALL_INPUT_READ, arguments.registers())
+    }
+
     pub const fn argument(&self, index: usize) -> Option<u64> {
         if index < SYSCALL_ARGUMENT_COUNT {
             Some(self.arguments[index])
@@ -499,6 +600,7 @@ mod tests {
         assert_eq!(SYSCALL_STATUS_UNKNOWN_CALL, 1);
         assert_eq!(SYSCALL_STATUS_BAD_ARGUMENTS, 2);
         assert_eq!(SYSCALL_STATUS_OPERATION_NOT_READY, 3);
+        assert_eq!(SYSCALL_STATUS_ACCESS_DENIED, 4);
     }
 
     #[test]
@@ -689,4 +791,28 @@ mod tests {
         assert_eq!(result.status.raw(), 7);
         assert_eq!(SyscallStatus::from_error_code(0), None);
     }
+    #[test]
+    fn input_record_has_stable_layout_and_loss_signalling() {
+        assert_eq!(core::mem::size_of::<InputEventRecord>(), 48);
+        assert_eq!(core::mem::align_of::<InputEventRecord>(), 8);
+        let key = InputEventRecord::key(7, 4, true, 2);
+        assert_eq!((key.kind, key.source, key.code, key.flags, key.value), (1, 7, 4, 2, 1));
+        let mouse = InputEventRecord::mouse(2, 1, 12, -6, 0);
+        assert_eq!((mouse.kind, mouse.flags, mouse.x, mouse.y), (2, 1, 12, -6));
+        let removed = InputEventRecord::device(7, false);
+        assert_eq!((removed.kind, removed.code), (3, INPUT_DEVICE_DISCONNECTED));
+    }
+
+    #[test]
+    fn input_read_contract_preserves_capability_and_exact_buffer() {
+        let capability = PackedCapabilityHandle::new(9, 5);
+        let request = SyscallRequest::input_read(InputReadArguments {
+            capability,
+            event_address: 0x4000,
+            event_capacity: 48,
+        });
+        assert_eq!(request.number, SYSCALL_INPUT_READ);
+        assert_eq!(request.arguments, [capability.raw(), 0x4000, 48, 0, 0, 0]);
+    }
+
 }

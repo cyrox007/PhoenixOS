@@ -4,6 +4,7 @@ pub mod xhci;
 pub mod xhci_capabilities;
 pub mod xhci_control;
 pub mod xhci_ports;
+pub mod xhci_runtime;
 pub mod xhci_session;
 pub mod xhci_usb_service;
 

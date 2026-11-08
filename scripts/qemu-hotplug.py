@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Аппаратная проверка USB-переподключения внутри работающей PhoenixOS/QEMU.
 
-После готовности службы удаляет и снова добавляет USB-клавиатуру по QMP.
-Все ответы монитора проверяются, а вывод последовательного порта сохраняется.
+Первый цикл проверяет загрузочное отключение/подключение клавиатуры и ввод.
+Второй повторяет переподключение и получение HID во время исполнения службы
+под управлением системного планировщика. Все ответы QMP проверяются;
+журнал последовательного порта сохраняется.
 """
 
 import json
@@ -98,6 +100,13 @@ def main():
         key_pressed = False
         key_released = False
         mouse_moved = False
+        scheduled_ready = False
+        scheduled_detached = False
+        scheduled_attached = False
+        scheduled_pressed = False
+        scheduled_released = False
+        scheduled_moved = False
+        scheduled_stopped = False
         try:
             with open(serial_log, "w", encoding="utf-8") as log:
                 for line in process.stdout:
@@ -150,11 +159,65 @@ def main():
                         key_released = True
                     if "xhci hid mouse moved: OK" in line:
                         mouse_moved = True
+
+                    # Вторая серия выполняется уже не загрузочным циклом, а
+                    # двумя аппаратно планируемыми потоками. Тот же QMP-клиент
+                    # обеспечивает причинный порядок отключения и ввода.
+                    if "xhci scheduled ready: OK" in line and not scheduled_ready:
+                        monitor.execute("device_del", {"id": "phoenix-keyboard"})
+                        scheduled_ready = True
+                    if "xhci scheduled detached: OK" in line and not scheduled_detached:
+                        monitor.execute(
+                            "device_add",
+                            {"driver": "usb-kbd", "id": "phoenix-keyboard", "bus": "phoenix-xhci.0"},
+                        )
+                        scheduled_detached = True
+                    if "xhci scheduled attached: OK" in line and not scheduled_attached:
+                        monitor.execute(
+                            "input-send-event",
+                            {"events": [{
+                                "type": "key",
+                                "data": {"down": True, "key": {"type": "qcode", "data": "b"}},
+                            }]},
+                        )
+                        scheduled_attached = True
+                    if "xhci scheduled key pressed: OK" in line and not scheduled_pressed:
+                        monitor.execute(
+                            "input-send-event",
+                            {"events": [{
+                                "type": "key",
+                                "data": {"down": False, "key": {"type": "qcode", "data": "b"}},
+                            }]},
+                        )
+                        scheduled_pressed = True
+                    if "xhci scheduled key released: OK" in line and not scheduled_released:
+                        monitor.execute(
+                            "input-send-event",
+                            {"events": [
+                                {"type": "rel", "data": {"axis": "x", "value": 7}},
+                                {"type": "rel", "data": {"axis": "y", "value": 5}},
+                            ]},
+                        )
+                        scheduled_released = True
+                    if "xhci scheduled mouse moved: OK" in line:
+                        scheduled_moved = True
+                    if "xhci scheduled stopped: OK" in line:
+                        scheduled_stopped = True
             result = process.wait(timeout=3)
             if not (ready and detached and attached):
                 raise RuntimeError("Отсутствует подтверждение полного переподключения USB")
             if not (hid_ready and key_pressed and key_released and mouse_moved):
                 raise RuntimeError("Отсутствуют отчёты клавиатуры или мыши")
+            if not all((
+                scheduled_ready,
+                scheduled_detached,
+                scheduled_attached,
+                scheduled_pressed,
+                scheduled_released,
+                scheduled_moved,
+                scheduled_stopped,
+            )):
+                raise RuntimeError("Постоянная USB-служба не завершила полный жизненный цикл")
             if result != 33:
                 raise RuntimeError(f"QEMU завершился с кодом {result}, ожидается 33")
         finally:

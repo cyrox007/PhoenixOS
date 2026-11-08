@@ -725,6 +725,15 @@ impl<const CAPACITY: usize> ThreadManager<CAPACITY> {
         })
     }
 
+    /// Удаляет кадры уже завершённых потоков только после отключения
+    /// аппаратного контроллера планирования и возврата в поток распорядителя.
+    /// Должно вызываться при выключенных прерываниях.
+    pub fn collect_finished_preemptive(&mut self) -> usize {
+        let before = self.threads.len();
+        self.reap_finished_preemptive();
+        before - self.threads.len()
+    }
+
     fn reap_finished_preemptive(&mut self) {
         let mut index = 0;
         while index < self.threads.len() {

@@ -18,6 +18,42 @@ pub enum IoError {
     CompletionStatus(u16),
 }
 
+/// После сомнительного завершения очередь блокируется до аппаратного
+/// сброса; одно только повторное чтение фазы не возобновляет обмен.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoQueueState {
+    Ready,
+    Quarantined,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueSubmitError<E> {
+    Quarantined,
+    Operation(E),
+}
+
+impl IoQueueState {
+    pub const fn can_submit(self) -> bool {
+        matches!(self, Self::Ready)
+    }
+
+    pub fn submit<T, E>(
+        &mut self,
+        operation: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, QueueSubmitError<E>> {
+        if !self.can_submit() {
+            return Err(QueueSubmitError::Quarantined);
+        }
+        match operation() {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                *self = Self::Quarantined;
+                Err(QueueSubmitError::Operation(error))
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IoCommand {
     pub words: [u32; 16],
@@ -151,6 +187,37 @@ mod tests {
             IoCommand::transfer(1, false, 1, 0, 0, 32768, 0x3000),
             Err(IoError::InvalidBlockRange)
         );
+    }
+
+    #[test]
+    fn uncertain_queue_cannot_be_reused_without_reinitialization() {
+        let mut state = IoQueueState::Ready;
+        let mut operations = 0;
+        assert_eq!(
+            state.submit(|| {
+                operations += 1;
+                Ok::<_, u8>(7)
+            }),
+            Ok(7),
+        );
+        assert_eq!(
+            state.submit(|| {
+                operations += 1;
+                Err::<(), _>(9_u8)
+            }),
+            Err(QueueSubmitError::Operation(9)),
+        );
+        assert!(!state.can_submit());
+        assert_eq!(
+            state.submit(|| {
+                operations += 1;
+                Ok::<_, u8>(8)
+            }),
+            Err(QueueSubmitError::Quarantined),
+        );
+        assert_eq!(operations, 2);
+        let mut new_queue = IoQueueState::Ready;
+        assert_eq!(new_queue.submit(|| Ok::<_, u8>(8)), Ok(8));
     }
 
     #[test]

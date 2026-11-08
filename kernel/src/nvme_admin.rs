@@ -14,7 +14,8 @@ use phoenix_pcie::nvme::{self, NvmePciController, RegisterAccess};
 use phoenix_pcie::nvme_admin::{
     self, AdminCompletion, AdminQueueCursor, AdminQueueError, IdentifyCommand,
 };
-use phoenix_pcie::nvme_io::{self, IoCommand, IoError};
+use phoenix_pcie::nvme_io::{self, IoCommand, IoError, IoQueueState};
+use phoenix_pcie::nvme_wait::{self, WaitError};
 use phoenix_vm::dma_window::{ActiveDmaPageAccess, DmaCachePolicy};
 use phoenix_vm::kernel_reservations::{KernelVirtualRanges, ManagedDmaHandle, ManagedDmaWindows};
 use phoenix_vm::{ActivePageTable, PAGE_SIZE};
@@ -46,6 +47,7 @@ pub enum AdminRuntimeError {
     DmaUnmapping,
     DmaRelease,
     ControllerFault,
+    ControllerNotReady,
     ControllerTimeout,
     CompletionTimeout,
     InvalidQueueParameters,
@@ -308,18 +310,25 @@ impl DmaArena {
     }
 }
 
-fn wait_ready(regs: &RegisterWindow, expected: bool) -> Result<(), AdminRuntimeError> {
-    for _ in 0..POLL_LIMIT {
-        let status = regs.read_u32(nvme_admin::REG_CSTS);
-        if status & nvme_admin::CONTROLLER_FATAL != 0 {
-            return Err(AdminRuntimeError::ControllerFault);
-        }
-        if (status & nvme_admin::CONTROLLER_READY != 0) == expected {
-            return Ok(());
-        }
-        core::hint::spin_loop();
+fn map_ready_wait(error: WaitError) -> AdminRuntimeError {
+    match error {
+        WaitError::ControllerFault => AdminRuntimeError::ControllerFault,
+        WaitError::ControllerNotReady => AdminRuntimeError::ControllerNotReady,
+        WaitError::TimedOut => AdminRuntimeError::ControllerTimeout,
     }
-    Err(AdminRuntimeError::ControllerTimeout)
+}
+
+fn map_completion_wait(error: WaitError) -> AdminRuntimeError {
+    match error {
+        WaitError::ControllerFault => AdminRuntimeError::ControllerFault,
+        WaitError::ControllerNotReady => AdminRuntimeError::ControllerNotReady,
+        WaitError::TimedOut => AdminRuntimeError::CompletionTimeout,
+    }
+}
+
+fn wait_ready(regs: &RegisterWindow, expected: bool) -> Result<(), AdminRuntimeError> {
+    nvme_wait::wait_ready(|| regs.read_u32(nvme_admin::REG_CSTS), expected, POLL_LIMIT)
+        .map_err(map_ready_wait)
 }
 
 fn disable(regs: &RegisterWindow) -> Result<(), AdminRuntimeError> {
@@ -366,22 +375,20 @@ fn submit_admin(
     );
     let complete = CQ_PAGE + usize::from(cursor.completion_head()) * 16;
     let expected_phase = cursor.completion_phase();
-    let completion = (0..POLL_LIMIT)
-        .find_map(|_| {
-            let status = arena.read(complete + 12);
-            if (status >> 16) & 1 != u32::from(expected_phase) {
-                core::hint::spin_loop();
-                return None;
-            }
-            fence(Ordering::Acquire);
-            Some([
-                arena.read(complete),
-                arena.read(complete + 4),
-                arena.read(complete + 8),
-                status,
-            ])
-        })
-        .ok_or(AdminRuntimeError::CompletionTimeout)?;
+    let status = nvme_wait::wait_completion_phase(
+        || regs.read_u32(nvme_admin::REG_CSTS),
+        || arena.read(complete + 12),
+        expected_phase,
+        POLL_LIMIT,
+    )
+    .map_err(map_completion_wait)?;
+    fence(Ordering::Acquire);
+    let completion = [
+        arena.read(complete),
+        arena.read(complete + 4),
+        arena.read(complete + 8),
+        status,
+    ];
     let result = AdminCompletion::decode(completion, command_id, expected_phase)
         .map_err(AdminRuntimeError::Protocol)?;
     if result.submission_head != cursor.submission_tail() {
@@ -445,22 +452,20 @@ fn submit_io(
     );
     let complete = IO_CQ_PAGE + usize::from(cursor.completion_head()) * 16;
     let expected_phase = cursor.completion_phase();
-    let completion = (0..POLL_LIMIT)
-        .find_map(|_| {
-            let status = arena.read(complete + 12);
-            if (status >> 16) & 1 != u32::from(expected_phase) {
-                core::hint::spin_loop();
-                return None;
-            }
-            fence(Ordering::Acquire);
-            Some([
-                arena.read(complete),
-                arena.read(complete + 4),
-                arena.read(complete + 8),
-                status,
-            ])
-        })
-        .ok_or(AdminRuntimeError::CompletionTimeout)?;
+    let status = nvme_wait::wait_completion_phase(
+        || regs.read_u32(nvme_admin::REG_CSTS),
+        || arena.read(complete + 12),
+        expected_phase,
+        POLL_LIMIT,
+    )
+    .map_err(map_completion_wait)?;
+    fence(Ordering::Acquire);
+    let completion = [
+        arena.read(complete),
+        arena.read(complete + 4),
+        arena.read(complete + 8),
+        status,
+    ];
     let head = nvme_io::check_completion(completion, cursor.command_id(), expected_phase)
         .map_err(AdminRuntimeError::Io)?;
     if head != cursor.submission_tail() {
@@ -483,7 +488,7 @@ struct NvmeBlockDevice<'a> {
     cursor: AdminQueueCursor,
     geometry: BlockGeometry,
     doorbell_stride: u32,
-    faulted: bool,
+    queue_state: IoQueueState,
     completed_commands: u16,
 }
 
@@ -507,28 +512,25 @@ impl<'a> NvmeBlockDevice<'a> {
                 block_count,
             },
             doorbell_stride,
-            faulted: false,
+            queue_state: IoQueueState::Ready,
             completed_commands: 0,
         })
     }
 
     fn issue(&mut self, command: IoCommand) -> Result<(), BlockError> {
-        if self.faulted {
-            return Err(BlockError::BackendFailure);
-        }
-        if submit_io(
-            self.registers,
-            self.dma,
-            &mut self.cursor,
-            self.doorbell_stride,
-            command,
-        )
-        .is_err()
-        {
-            // Не продолжаем обращаться к очереди с неподтверждённой командой.
-            self.faulted = true;
-            return Err(BlockError::BackendFailure);
-        }
+        // Отказ от повторной команды выполняется самим охранным состоянием:
+        // даже при ошибке проверки завершения очередь остаётся изолированной.
+        self.queue_state
+            .submit(|| {
+                submit_io(
+                    self.registers,
+                    self.dma,
+                    &mut self.cursor,
+                    self.doorbell_stride,
+                    command,
+                )
+            })
+            .map_err(|_| BlockError::BackendFailure)?;
         self.completed_commands = self.completed_commands.wrapping_add(1);
         Ok(())
     }
@@ -559,7 +561,7 @@ impl BlockDevice for NvmeBlockDevice<'_> {
 
     fn read_blocks(&mut self, first_block: u64, destination: &mut [u8]) -> Result<(), BlockError> {
         validate_transfer(self.geometry, first_block, destination.len())?;
-        if self.faulted {
+        if !self.queue_state.can_submit() {
             return Err(BlockError::BackendFailure);
         }
         for (offset, chunk) in destination.chunks_mut(MAX_IO_BYTES).enumerate() {
@@ -576,7 +578,7 @@ impl BlockDevice for NvmeBlockDevice<'_> {
 
     fn write_blocks(&mut self, first_block: u64, source: &[u8]) -> Result<(), BlockError> {
         validate_transfer(self.geometry, first_block, source.len())?;
-        if self.faulted {
+        if !self.queue_state.can_submit() {
             return Err(BlockError::BackendFailure);
         }
         for (offset, chunk) in source.chunks(MAX_IO_BYTES).enumerate() {

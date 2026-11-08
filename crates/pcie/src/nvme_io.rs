@@ -135,19 +135,19 @@ mod tests {
     #[test]
     fn validates_completion_identity_phase_and_status() {
         assert_eq!(
-            check_completion([0, 0, 0x0001_0001, 0x0007_0001], 7, true),
+            check_completion([0, 0, 0x0001_0001, 0x0001_0007], 7, true),
             Ok(1)
         );
         assert_eq!(
-            check_completion([0, 0, 0x0001_0001, 0x0007_0001], 7, false),
+            check_completion([0, 0, 0x0001_0001, 0x0001_0007], 7, false),
             Err(IoError::InvalidCompletion)
         );
         assert_eq!(
-            check_completion([0, 0, 0x0000_0001, 0x0007_0001], 7, true),
+            check_completion([0, 0, 0x0000_0001, 0x0001_0007], 7, true),
             Err(IoError::InvalidCompletion)
         );
         assert_eq!(
-            check_completion([0, 0, 0x0001_0001, 0x0007_0003], 7, true),
+            check_completion([0, 0, 0x0001_0001, 0x0003_0007], 7, true),
             Err(IoError::CompletionStatus(1))
         );
     }

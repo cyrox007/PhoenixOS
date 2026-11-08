@@ -247,6 +247,4 @@ mod tests {
         let released = MouseReport::parse(&[0, 0, 0]).unwrap();
         assert_eq!(state.update(released), Some(released));
         assert_eq!(state.update(released), None);
-    }
-
-}
+    }}

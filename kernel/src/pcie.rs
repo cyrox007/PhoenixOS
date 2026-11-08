@@ -1,11 +1,11 @@
 use bootloader_api::info::MemoryRegion;
 use phoenix_acpi::McfgInfo;
-use phoenix_pcie::graphics::GraphicsInventory;
 use phoenix_pcie::PcieFunction;
-use phoenix_reference_edu::{EDU_DEVICE_ID, EDU_VENDOR_ID};
+use phoenix_pcie::graphics::GraphicsInventory;
 use phoenix_pcie::nvme::{self, NvmePciController, NvmePciError};
 use phoenix_pcie::xhci::{self, XhciPciController, XhciPciError};
 use phoenix_pcie::{ConfigAccess, EcamSegment, EnumerationSummary, PcieError};
+use phoenix_reference_edu::{EDU_DEVICE_ID, EDU_VENDOR_ID};
 use x86_64::VirtAddr;
 
 const MINIMUM_BOOTLOADER_PHYSICAL_MAPPING: u64 = 0x1_0000_0000;

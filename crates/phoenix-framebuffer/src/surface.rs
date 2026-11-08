@@ -94,8 +94,14 @@ impl<'a> SurfaceView<'a> {
     }
 
     pub fn fits(&self, position: SurfacePosition, screen: SurfaceSize) -> Result<(), SurfaceError> {
-        let right = position.x.checked_add(self.size.width).ok_or(SurfaceError::Overflow)?;
-        let bottom = position.y.checked_add(self.size.height).ok_or(SurfaceError::Overflow)?;
+        let right = position
+            .x
+            .checked_add(self.size.width)
+            .ok_or(SurfaceError::Overflow)?;
+        let bottom = position
+            .y
+            .checked_add(self.size.height)
+            .ok_or(SurfaceError::Overflow)?;
         if right > screen.width || bottom > screen.height {
             return Err(SurfaceError::OutsideScreen);
         }
@@ -159,7 +165,10 @@ mod tests {
     #[test]
     fn validates_stride_and_buffer_before_access() {
         let pixels = [0_u32; 16];
-        let size = SurfaceSize { width: 4, height: 4 };
+        let size = SurfaceSize {
+            width: 4,
+            height: 4,
+        };
         assert!(SurfaceView::new(&pixels, size, 4, SurfaceFormat::X8R8G8B8).is_ok());
         assert!(matches!(
             SurfaceView::new(&pixels, size, 3, SurfaceFormat::X8R8G8B8),
@@ -170,7 +179,15 @@ mod tests {
             Err(SurfaceError::BufferTooSmall)
         ));
         assert!(matches!(
-            SurfaceView::new(&pixels, SurfaceSize { width: 0, height: 4 }, 4, SurfaceFormat::X8R8G8B8),
+            SurfaceView::new(
+                &pixels,
+                SurfaceSize {
+                    width: 0,
+                    height: 4
+                },
+                4,
+                SurfaceFormat::X8R8G8B8
+            ),
             Err(SurfaceError::EmptyDimensions)
         ));
     }
@@ -180,12 +197,22 @@ mod tests {
         let pixels = [0_u32; 16];
         let view = SurfaceView::new(
             &pixels,
-            SurfaceSize { width: 4, height: 4 },
+            SurfaceSize {
+                width: 4,
+                height: 4,
+            },
             4,
             SurfaceFormat::X8R8G8B8,
-        ).unwrap();
-        let screen = SurfaceSize { width: 128, height: 128 };
-        assert_eq!(view.fits(SurfacePosition { x: 124, y: 124 }, screen), Ok(()));
+        )
+        .unwrap();
+        let screen = SurfaceSize {
+            width: 128,
+            height: 128,
+        };
+        assert_eq!(
+            view.fits(SurfacePosition { x: 124, y: 124 }, screen),
+            Ok(())
+        );
         assert_eq!(
             view.fits(SurfacePosition { x: 125, y: 124 }, screen),
             Err(SurfaceError::OutsideScreen)
@@ -201,12 +228,23 @@ mod tests {
         let pixels = [x8r8g8b8(58, 108, 242); 16];
         let view = SurfaceView::new(
             &pixels,
-            SurfaceSize { width: 4, height: 4 },
+            SurfaceSize {
+                width: 4,
+                height: 4,
+            },
             4,
             SurfaceFormat::X8R8G8B8,
-        ).unwrap();
-        let mut display = MockDisplay { width: 128, height: 128, presented: 0, last: 0 };
-        display.present(&view, SurfacePosition { x: 80, y: 8 }).unwrap();
+        )
+        .unwrap();
+        let mut display = MockDisplay {
+            width: 128,
+            height: 128,
+            presented: 0,
+            last: 0,
+        };
+        display
+            .present(&view, SurfacePosition { x: 80, y: 8 })
+            .unwrap();
         assert_eq!(display.presented, 1);
         assert_eq!(display.last.to_le_bytes(), [0, 58, 108, 242]);
         assert_eq!(display.screen_size().width, 128);

@@ -266,6 +266,7 @@ mod tests {
         );
     }
 
+    #[derive(Clone, Copy)]
     struct FakeRegisters {
         cap: u64,
         version: u32,

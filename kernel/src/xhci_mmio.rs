@@ -57,7 +57,8 @@ impl ActiveXhci {
             && OperationalRegisters::read_u32(
                 &self.registers,
                 self.capabilities.operational_offset + 4,
-            ) & 1 == 0
+            ) & 1
+                == 0
             && self.dma.is_mapped()
     }
 

@@ -9,6 +9,7 @@ bootloader_api = "=0.11.17"
 phoenix-acpi = { path = "../crates/acpi" }
 phoenix-pcie = { path = "../crates/pcie" }
 phoenix-vm = { path = "../crates/virtual-memory" }
+phoenix-diagnostic-journal = { path = "../crates/diagnostic-journal" }
 phoenix-framebuffer = { path = "../crates/phoenix-framebuffer" }
 noto-sans-mono-bitmap = { version = "0.3.2", default-features = false, features = ["regular", "size_16", "unicode-basic-latin"] }
 uart_16550 = "0.8.0"

@@ -3,10 +3,13 @@
 
 use crate::screen::Report;
 use bootloader_api::BootInfo;
+use bootloader_api::info::MemoryRegionKind;
 use core::arch::x86_64::__cpuid;
 use phoenix_acpi::{McfgInfo, RSDP_V2_SIZE, Rsdp, SDT_HEADER_SIZE, SdtHeader, Xsdt};
 use phoenix_pcie::{ConfigAccess, EcamSegment};
-use phoenix_vm::dma_cache::{DmaCacheSnapshot, FIXED_MTRR_REGISTERS, MAX_VARIABLE_MTRRS};
+use phoenix_vm::dma_cache::{
+    DmaCacheSnapshot, FIXED_MTRR_REGISTERS, MAX_VARIABLE_MTRRS, memory_type_name,
+};
 use x86_64::VirtAddr;
 
 const PHYSICAL_MAPPING_MINIMUM: u64 = 0x1_0000_0000;
@@ -20,13 +23,13 @@ enum ReadError {
     MissingMapping,
     BadAddress,
     InvalidAcpi,
-    Unsupported,
-}
+ }
 
 pub struct HardwareContext {
     rsdp: Option<u64>,
     physical_offset: Option<u64>,
     physical_end: u64,
+    ram_samples: [Option<u64>; 2],
 }
 
 impl HardwareContext {
@@ -38,8 +41,36 @@ impl HardwareContext {
                 .memory_regions
                 .iter()
                 .fold(PHYSICAL_MAPPING_MINIMUM, |end, region| end.max(region.end)),
+            ram_samples: select_ram_samples(info),
         }
     }
+}
+
+/// Образец по одной доступной странице ниже и выше 4 ГиБ.
+/// Из памяти не читаем и её не изменяем: используем только карту загрузчика.
+fn select_ram_samples(info: &BootInfo) -> [Option<u64>; 2] {
+    let mut samples = [None, None];
+    for region in info.memory_regions.iter() {
+        if region.kind != MemoryRegionKind::Usable {
+            continue;
+        }
+        let Some(candidate) = region.start.max(0x10_0000).checked_add(4095) else {
+            continue;
+        };
+        let aligned_start = candidate & !4095;
+        let aligned_end = region.end & !4095;
+        if aligned_start >= aligned_end {
+            continue;
+        }
+        if aligned_start < 0x1_0000_0000 && samples[0].is_none() {
+            samples[0] = Some(aligned_start);
+        }
+        let high_start = aligned_start.max(0x1_0000_0000);
+        if high_start < aligned_end && samples[1].is_none() {
+            samples[1] = Some(high_start);
+        }
+    }
+    samples
 }
 
 struct ReadOnlyMemory {
@@ -109,7 +140,7 @@ impl ConfigAccess for DirectEcam<'_> {
 }
 
 pub fn run(context: &HardwareContext, out: &mut Report<'_>) {
-    cpu(out);
+    cpu(context, out);
     let Some(rsdp) = context.rsdp else {
         log!(out, "[WARN] diagnostic ACPI: no RSDP");
         return;
@@ -124,7 +155,7 @@ pub fn run(context: &HardwareContext, out: &mut Report<'_>) {
     acpi_and_pci(rsdp, &memory, out);
 }
 
-fn cpu(out: &mut Report<'_>) {
+fn cpu(context: &HardwareContext, out: &mut Report<'_>) {
     let basic = __cpuid(0);
     let mut vendor = [0u8; 12];
     vendor[..4].copy_from_slice(&basic.ebx.to_le_bytes());
@@ -197,10 +228,26 @@ fn cpu(out: &mut Report<'_>) {
     }
     log!(
         out,
-        "[INFO] diagnostic cache: OK variable={} fixed_enabled={}",
+        "[INFO] diagnostic cache: OK default={} variable={} fixed_enabled={}",
+        memory_type_name(snapshot.default_memory_type()),
         snapshot.variable_count(),
         mtrr_default & (1 << 10) != 0
     );
+    for sample in context.ram_samples.iter().flatten() {
+        match snapshot.effective_mtrr_type(*sample) {
+            Ok(kind) => log!(
+                out,
+                "[INFO] diagnostic cache sample: phys={:#x} MTRR={} PAT-alias=not-verified",
+                sample,
+                memory_type_name(kind)
+            ),
+            Err(error) => log!(
+                out,
+                "[WARN] diagnostic cache sample: phys={:#x} error={error:?}",
+                sample
+            ),
+        }
+    }
     log!(
         out,
         "[INFO] diagnostic IOMMU: table presence only, not enabled status"

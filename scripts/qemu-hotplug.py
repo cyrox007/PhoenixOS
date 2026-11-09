@@ -166,7 +166,7 @@ class Qmp:
                     raise RuntimeError(f"QMP {command}: {response['error']}")
                 if "return" not in response:
                     raise RuntimeError(f"QMP {command}: нет подтверждения")
-                return
+                return response["return"]
         raise RuntimeError(f"QMP {command}: слишком много посторонних событий")
 
     def close(self):
@@ -464,6 +464,20 @@ def main():
         except Exception as error:
             print(f"QEMU: отказ: {error}; последняя контрольная точка: "
                   f"{last_checkpoint}", file=sys.stderr, flush=True)
+            if last_checkpoint == "последовательный порт ещё не ответил":
+                # Подтверждаем, стартовала ли виртуальная машина вообще.
+                # Отсутствие вывода ядра не является доказательством ошибки ядра.
+                try:
+                    if monitor.connection is None:
+                        monitor.connect()
+                    status = monitor.execute("query-status")
+                    print(f"QEMU: состояние монитора при раннем отказе: {status}",
+                          file=sys.stderr, flush=True)
+                except Exception as diagnostic_error:
+                    print(f"QEMU: монитор недоступен: {diagnostic_error}",
+                          file=sys.stderr, flush=True)
+                print(f"QEMU: код завершения процесса: {process.poll()}",
+                      file=sys.stderr, flush=True)
             raise
         finally:
             monitor.close()

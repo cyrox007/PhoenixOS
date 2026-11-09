@@ -131,6 +131,12 @@ where
             return Err(PageWalkError::BudgetExceeded);
         }
         let size = 1u64 << shift;
+        // Для больших страниц бит 12 — PAT, остальные адресные
+        // биты ниже границы страницы зарезервированы и не должны
+        // беззвучно отбрасываться при вычислении физического адреса.
+        if level > 1 && entry & mask & (size - 1) & !(1u64 << 12) != 0 {
+            return Err(PageWalkError::InvalidEntry);
+        }
         let physical = (entry & mask) & !(size - 1);
         if physical
             .checked_add(size)
@@ -220,6 +226,25 @@ mod tests {
         assert_eq!(observed, 2);
         assert_eq!(report.one_gib_pages, 1);
         assert_eq!(report.two_mib_pages, 1);
+    }
+
+    #[test]
+    fn large_pages_with_reserved_address_bits_are_rejected() {
+        // На странице 2 МиБ бит 13 зарезервирован, бит 12 — PAT.
+        assert_eq!(
+            walk_current_cr3(
+                0x1000,
+                48,
+                |table, index| match (table, index) {
+                    (0x1000, 0) => Some(0x2000 | 3),
+                    (0x2000, 0) => Some(0x3000 | 3),
+                    (0x3000, 0) => Some(0x20_0000 | 3 | HUGE | (1 << 13)),
+                    _ => Some(0),
+                },
+                |_| panic!("invalid large leaf must not be reported"),
+            ),
+            Err(PageWalkError::InvalidEntry)
+        );
     }
 
     #[test]

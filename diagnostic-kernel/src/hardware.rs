@@ -12,6 +12,9 @@ use phoenix_vm::dma_cache::{
     DmaCacheSnapshot, FIXED_MTRR_REGISTERS, MAX_VARIABLE_MTRRS, memory_type_name,
 };
 use phoenix_vm::ram_audit::{ObservedMapping, RamAuditReport};
+use phoenix_vm::page_walk::{AliasAuditReport, walk_current_cr3};
+use phoenix_vm::hardware_gate::{DmaSafetyEvidence, blocking_reason, diagnostic_dma_authorized};
+use x86_64::registers::control::Cr3;
 use x86_64::VirtAddr;
 
 const PHYSICAL_MAPPING_MINIMUM: u64 = 0x1_0000_0000;
@@ -318,6 +321,7 @@ fn cpu(context: &HardwareContext, out: &mut Report<'_>) {
         report_memory_sample(context, &snapshot, table.as_ref(), *sample, out);
     }
     audit_ram_regions(context, &snapshot, table.as_ref(), out);
+    audit_current_aliases(context, &snapshot, table.as_ref(), out);
     log!(
         out,
         "[INFO] diagnostic IOMMU: table presence only, not enabled status"
@@ -466,6 +470,129 @@ fn audit_ram_regions(
             "[INFO] diagnostic RAM audit: first_blocked={physical:#x}"
         );
     }
+}
+
+/// Обход текущей CR3 без изменения таблиц и без обращения к MMIO.
+/// Другие CR3, дополнительные процессоры и будущие отображения НЕ проверены.
+fn audit_current_aliases(
+    context: &HardwareContext,
+    snapshot: &DmaCacheSnapshot,
+    table: Option<&ActivePageTable>,
+    out: &mut Report<'_>,
+) {
+    let Some(table) = table else {
+        log!(out, "[WARN] diagnostic aliases: complete=false reason=no-page-table");
+        return;
+    };
+    let Some(offset) = context.physical_offset else {
+        log!(out, "[WARN] diagnostic aliases: complete=false reason=no-offset");
+        return;
+    };
+
+    let cr4: u64;
+    unsafe { core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags)) };
+    if cr4 & (1 << 12) != 0 {
+        log!(out, "[WARN] diagnostic aliases: complete=false reason=five-level-paging");
+        return;
+    }
+
+    let root = Cr3::read().0.start_address().as_u64();
+    let mut result = AliasAuditReport::default();
+    let mut alias_error = None;
+    let mut last_checked = None;
+    let scan = walk_current_cr3(
+        root,
+        snapshot.physical_bits(),
+        |table_phys, index| {
+            if table_phys.checked_add(4096)? > context.physical_end {
+                return None;
+            }
+            if last_checked != Some(table_phys) {
+                let virtual_table = offset
+                    .checked_add(table_phys)
+                    .and_then(|raw| VirtAddr::try_new(raw).ok())?;
+                if table.translate_addr(virtual_table).map(|p| p.as_u64())
+                    != Some(table_phys)
+                {
+                    return None;
+                }
+                last_checked = Some(table_phys);
+            }
+            let address = offset
+                .checked_add(table_phys)?
+                .checked_add(index as u64 * 8)
+                .and_then(|raw| VirtAddr::try_new(raw).ok())?;
+            // Только физические таблицы страниц текущего ядра,
+            // предварительно проверена трансляция всей страницы.
+            Some(unsafe { (address.as_u64() as *const u64).read_volatile() })
+        },
+        |leaf| {
+            if alias_error.is_some() {
+                return;
+            }
+            let outcome = result.inspect_leaf(
+                leaf,
+                offset,
+                &context.ram_regions[..context.ram_region_count],
+                snapshot,
+                |physical| {
+                    let virtual_addr = offset
+                        .checked_add(physical)
+                        .and_then(|raw| VirtAddr::try_new(raw).ok())?;
+                    let mapped = table.translate_addr(virtual_addr)?.as_u64();
+                    let pat = table.pat_index(virtual_addr)?;
+                    Some((mapped, pat))
+                },
+            );
+            if let Err(error) = outcome {
+                alias_error = Some(error);
+            }
+        },
+    );
+
+    let complete = scan.is_ok()
+        && alias_error.is_none()
+        && !context.ram_map_invalid
+        && result.conflicting_pages == 0
+        && result.unavailable_pages == 0;
+    let leaves = scan.as_ref().map(|v| v.leaf_mappings).unwrap_or(0);
+    log!(
+        out,
+        "[INFO] diagnostic aliases: complete={} leaves={} other_pages={} conflicts={} unknown={} scope=current-cr3",
+        complete,
+        leaves,
+        result.checked_pages,
+        result.conflicting_pages,
+        result.unavailable_pages
+    );
+    if let Some(physical) = result.first_conflict {
+        log!(out, "[WARN] diagnostic aliases: first_conflict={physical:#x}");
+    }
+    if let Some(physical) = result.first_unavailable {
+        log!(out, "[WARN] diagnostic aliases: first_unknown={physical:#x}");
+    }
+    if let Err(error) = scan {
+        log!(out, "[WARN] diagnostic aliases: walk={error:?}");
+    }
+    if let Some(error) = alias_error {
+        log!(out, "[WARN] diagnostic aliases: compare={error:?}");
+    }
+
+    // Ни текущая CR3, ни IVRS сами по себе не доказывают безопасность DMA.
+    // Другие процессоры/таблицы, активная изоляция IOMMU и остановка
+    // контроллера отсутствуют в диагностическом режиме.
+    let evidence = DmaSafetyEvidence {
+        memory_map_valid: !context.ram_map_invalid,
+        direct_mapping_valid: true,
+        current_cr3_aliases_clear: complete,
+        ..DmaSafetyEvidence::default()
+    };
+    let reason = blocking_reason(&evidence);
+    log!(
+        out,
+        "[INFO] diagnostic DMA gate: authorized={} reason={reason:?} readonly=1",
+        diagnostic_dma_authorized(&evidence)
+    );
 }
 
 fn acpi_and_pci(rsdp_address: u64, memory: &ReadOnlyMemory, out: &mut Report<'_>) {

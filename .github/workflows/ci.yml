@@ -109,7 +109,7 @@ jobs:
           cp "$IMAGE" artifacts/phoenixos-diagnostic-uefi.img
 
       - name: Проверить безопасный диагностический запуск QEMU
-        run: python3 scripts/run-diagnostic-qemu.py artifacts/phoenixos-diagnostic-uefi.img artifacts/diagnostic-serial.log
+        run: sudo python3 scripts/run-diagnostic-qemu.py artifacts/phoenixos-diagnostic-uefi.img artifacts/diagnostic-serial.log
 
       - name: Сохранить диагностический журнал при ошибке
         if: failure()

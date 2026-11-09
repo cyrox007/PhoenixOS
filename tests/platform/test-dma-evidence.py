@@ -15,6 +15,7 @@ GOOD = """[INFO] PhoenixOS physical diagnostic
 [INFO] diagnostic RAM audit: complete=true pages=1234 WB=1234 blocked=0 invalid=0 scope=direct-only
 [INFO] diagnostic aliases: complete=true leaves=1300 other_pages=1 conflicts=0 unknown=0 scope=current-cr3
 [INFO] diagnostic IOMMU: ivhd=1 structural_ok=true runtime=unverified domain=unverified
+[INFO] diagnostic IOMMU MMIO: observed=false reason=no-ivhd domain=unverified
 [INFO] diagnostic CPU cores: MADT=12 msr_consensus=unverified BSP_only=true
 [INFO] diagnostic DMA gate: authorized=false reason=Some(OtherAddressSpaces) readonly=1
 [INFO] diagnostic complete: OK
@@ -31,6 +32,22 @@ class EvidenceTests(unittest.TestCase):
         self.assertFalse(result["criterion_16_accepted"])
         self.assertFalse(result["criterion_17_accepted"])
         self.assertFalse(result["source_is_real_hardware_verified"])
+
+    def test_control_register_observation_never_proves_iommu_domain(self):
+        transcript = GOOD.replace(
+            "observed=false reason=no-ivhd domain=unverified",
+            "observed=true enabled_bit=true device_table_nonzero=true domain=unverified readonly=1",
+        )
+        result = module.evaluate(transcript)
+        self.assertTrue(result["iommu_control_observed"])
+        self.assertTrue(result["iommu_enable_bit_seen"])
+        self.assertFalse(result["iommu_runtime_verified"])
+        self.assertFalse(result["criterion_17_accepted"])
+
+    def test_control_register_not_read_keeps_unknown(self):
+        result = module.evaluate(GOOD)
+        self.assertFalse(result["iommu_control_observed"])
+        self.assertFalse(result["iommu_enable_bit_seen"])
 
     def test_does_not_merge_multiple_boots(self):
         result = module.evaluate(GOOD + "[INFO] PhoenixOS physical diagnostic\n")

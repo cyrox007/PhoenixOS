@@ -25,6 +25,7 @@ def evaluate(text):
     ram = record(lines, "[INFO] diagnostic RAM audit:")
     aliases = record(lines, "[INFO] diagnostic aliases:")
     iommu = record(lines, "[INFO] diagnostic IOMMU: ivhd=")
+    iommu_control = record(lines, "[INFO] diagnostic IOMMU MMIO:")
     cpus = record(lines, "[INFO] diagnostic CPU cores:")
     gate = record(lines, "[INFO] diagnostic DMA gate:")
 
@@ -55,6 +56,12 @@ def evaluate(text):
         "diagnostic_dma_blocked": gate_off,
         "cpu_other_cores_checked": False,
         "all_address_spaces_checked": False,
+        "iommu_control_observed": complete and iommu_control.get("observed") == "true",
+        "iommu_enable_bit_seen": (
+            complete
+            and iommu_control.get("observed") == "true"
+            and iommu_control.get("enabled_bit") == "true"
+        ),
         "iommu_runtime_verified": False,
         "device_isolation_verified": False,
         "physical_dma_verified": False,

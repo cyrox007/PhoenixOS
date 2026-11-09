@@ -52,6 +52,8 @@ class DiagnosticIsolationTests(unittest.TestCase):
         self.assertIn("blocking_reason(&evidence)", self.hardware)
         self.assertIn("diagnostic_dma_authorized(&evidence)", self.hardware)
         self.assertIn("parse_ivrs(bytes)", self.hardware)
+        self.assertIn("validate_passive_read(", self.hardware)
+        self.assertIn("domain=unverified readonly=1", self.hardware)
         self.assertIn("busmaster_enabled=", self.hardware)
         self.assertIn("diagnostic memory map:", self.hardware)
         self.assertNotIn("write_msr(", self.hardware)

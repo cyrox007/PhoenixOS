@@ -1,5 +1,6 @@
 #![no_std]
 
+pub mod iommu_observation;
 pub mod ivrs;
 
 pub const SDT_HEADER_SIZE: usize = 36;

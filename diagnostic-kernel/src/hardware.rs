@@ -72,9 +72,8 @@ impl HardwareContext {
             }
             usable_bytes = usable_bytes.saturating_add(region.end - region.start);
             if region.end > 0x1_0000_0000 {
-                high_usable_bytes = high_usable_bytes.saturating_add(
-                    region.end - region.start.max(0x1_0000_0000),
-                );
+                high_usable_bytes =
+                    high_usable_bytes.saturating_add(region.end - region.start.max(0x1_0000_0000));
             }
             let start = region.start.max(MIN_AUDITED_RAM);
             let end = region.end;

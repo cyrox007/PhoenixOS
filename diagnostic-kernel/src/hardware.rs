@@ -9,7 +9,7 @@ use phoenix_acpi::{McfgInfo, RSDP_V2_SIZE, Rsdp, SDT_HEADER_SIZE, SdtHeader, Xsd
 use phoenix_pcie::{ConfigAccess, EcamSegment};
 use phoenix_vm::ActivePageTable;
 use phoenix_vm::dma_cache::{
-    DmaCacheSnapshot, FIXED_MTRR_REGISTERS, MAX_VARIABLE_MTRRS, memory_type_name, pat_type,
+    DmaCacheSnapshot, FIXED_MTRR_REGISTERS, MAX_VARIABLE_MTRRS, memory_type_name,
 };
 use x86_64::VirtAddr;
 

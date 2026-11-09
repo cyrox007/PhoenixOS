@@ -33,7 +33,7 @@ cargo run -p phoenixos-diagnostic-image --release --quiet
 
 ```sh
 python3 tests/platform/test-diagnostic-isolation.py
-python3 scripts/run-diagnostic-qemu.py artifacts/phoenixos-diagnostic-uefi.img artifacts/diagnostic-serial.log
+sudo python3 scripts/run-diagnostic-qemu.py artifacts/phoenixos-diagnostic-uefi.img artifacts/diagnostic-serial.log
 ```
 
 Для запуска второго сценария нужны QEMU, OVMF и KVM. Виртуальная машина получает единственный загрузочный образ в режиме чтения и собственную временную копию переменных OVMF. Физический накопитель компьютера-исполнителя к QEMU не подключается.

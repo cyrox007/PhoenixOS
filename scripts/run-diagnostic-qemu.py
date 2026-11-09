@@ -25,6 +25,7 @@ MARKERS = (
     "scope=current-cr3",
     "diagnostic DMA gate: authorized=false",
     "diagnostic IOMMU: ivhd=",
+    "diagnostic IOMMU MMIO: observed=",
     "diagnostic PCI DMA:",
     "diagnostic ACPI: OK",
     "diagnostic PCI: OK",

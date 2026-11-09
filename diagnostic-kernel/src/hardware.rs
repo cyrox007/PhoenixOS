@@ -6,6 +6,7 @@ use bootloader_api::BootInfo;
 use bootloader_api::info::MemoryRegionKind;
 use core::arch::x86_64::__cpuid;
 use phoenix_acpi::{McfgInfo, RSDP_V2_SIZE, Rsdp, SDT_HEADER_SIZE, SdtHeader, Xsdt};
+use phoenix_acpi::iommu_observation::{ReadOnlyIommuState, validate_passive_read};
 use phoenix_pcie::{ConfigAccess, EcamSegment};
 use phoenix_vm::ActivePageTable;
 use phoenix_vm::dma_cache::{
@@ -222,7 +223,7 @@ pub fn run(context: &HardwareContext, out: &mut Report<'_>) {
         context.high_usable_bytes >> 20,
         context.ram_map_invalid
     );
-    cpu(context, out);
+    let cache = cpu(context, out);
     let Some(rsdp) = context.rsdp else {
         log!(out, "[WARN] diagnostic ACPI: no RSDP");
         return;
@@ -234,10 +235,10 @@ pub fn run(context: &HardwareContext, out: &mut Report<'_>) {
             return;
         }
     };
-    acpi_and_pci(rsdp, &memory, out);
+    acpi_and_pci(rsdp, &memory, context, cache.as_ref(), out);
 }
 
-fn cpu(context: &HardwareContext, out: &mut Report<'_>) {
+fn cpu(context: &HardwareContext, out: &mut Report<'_>) -> Option<DmaCacheSnapshot> {
     let basic = __cpuid(0);
     let mut vendor = [0u8; 12];
     vendor[..4].copy_from_slice(&basic.ebx.to_le_bytes());
@@ -262,7 +263,7 @@ fn cpu(context: &HardwareContext, out: &mut Report<'_>) {
     );
     if !pat_supported || !mtrr_supported || physical_bits == 0 {
         log!(out, "[WARN] diagnostic cache: unsupported CPUID");
-        return;
+        return None;
     }
     let pat = unsafe { read_msr(IA32_PAT) };
     let mtrr_cap = unsafe { read_msr(IA32_MTRRCAP) };
@@ -281,7 +282,7 @@ fn cpu(context: &HardwareContext, out: &mut Report<'_>) {
             "[WARN] diagnostic cache: too many variable MTRRs {}",
             count
         );
-        return;
+        return None;
     }
     let mut variable = [(0, 0); MAX_VARIABLE_MTRRS];
     for (index, item) in variable[..count].iter_mut().enumerate() {
@@ -295,7 +296,7 @@ fn cpu(context: &HardwareContext, out: &mut Report<'_>) {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 log!(out, "[WARN] diagnostic cache policy: {error:?}");
-                return;
+                return None;
             }
         };
     if mtrr_default & (1 << 10) != 0 && mtrr_cap & (1 << 8) != 0 {
@@ -329,7 +330,7 @@ fn cpu(context: &HardwareContext, out: &mut Report<'_>) {
             Ok(value) => value,
             Err(error) => {
                 log!(out, "[WARN] diagnostic AMD TOM2: {error:?}");
-                return;
+                return None;
             }
         };
     }
@@ -359,6 +360,7 @@ fn cpu(context: &HardwareContext, out: &mut Report<'_>) {
         out,
         "[INFO] diagnostic IOMMU: table presence only, not enabled status"
     );
+    Some(snapshot)
 }
 
 /// Сверка физического адреса с фактическим прямым отображением RAM.
@@ -645,8 +647,14 @@ fn audit_current_aliases(
     );
 }
 
-fn acpi_and_pci(rsdp_address: u64, memory: &ReadOnlyMemory, out: &mut Report<'_>) {
-    let outcome = read_acpi(rsdp_address, memory, out);
+fn acpi_and_pci(
+    rsdp_address: u64,
+    memory: &ReadOnlyMemory,
+    context: &HardwareContext,
+    cache: Option<&DmaCacheSnapshot>,
+    out: &mut Report<'_>,
+) {
+    let outcome = read_acpi(rsdp_address, memory, context, cache, out);
     let Ok(mcfg) = outcome else {
         log!(out, "[WARN] diagnostic ACPI: {:?}", outcome.err());
         return;
@@ -743,6 +751,8 @@ fn acpi_and_pci(rsdp_address: u64, memory: &ReadOnlyMemory, out: &mut Report<'_>
 fn read_acpi(
     physical: u64,
     memory: &ReadOnlyMemory,
+    context: &HardwareContext,
+    cache: Option<&DmaCacheSnapshot>,
     out: &mut Report<'_>,
 ) -> Result<Option<McfgInfo>, ReadError> {
     let rsdp =
@@ -753,6 +763,7 @@ fn read_acpi(
     let mut iommu_kind = "none";
     let mut ivrs_hardware = 0u16;
     let mut ivrs_invalid = false;
+    let mut first_iommu_base = None;
     let mut processor_count = None;
     for physical in xsdt.iter() {
         let bytes = memory.table(physical)?;
@@ -769,6 +780,7 @@ fn read_acpi(
                 match phoenix_acpi::ivrs::parse_ivrs(bytes) {
                     Ok(ivrs) => {
                         ivrs_hardware = ivrs.hardware_blocks;
+                        first_iommu_base = ivrs.first_iommu_base;
                         log!(
                             out,
                             "[INFO] diagnostic IVRS: hardware={} reserved={} unknown={} remap_reported={} first_mmio={:?}",
@@ -806,11 +818,69 @@ fn read_acpi(
         ivrs_hardware,
         !ivrs_invalid && ivrs_hardware > 0
     );
+    passive_iommu_registers(first_iommu_base, memory, context, cache, out);
     log!(
         out,
         "[INFO] diagnostic CPU cores: MADT={processor_count:?} msr_consensus=unverified BSP_only=true"
     );
     Ok(mcfg)
+}
+
+/// Никаких записей MMIO: только два поля известного контроллера,
+/// и лишь если существующее отображение явно UC по PAT и MTRR.
+/// Наличие установленного IOMMUEn без проверки домена НЕ разрешает DMA.
+fn passive_iommu_registers(
+    base: Option<u64>,
+    memory: &ReadOnlyMemory,
+    context: &HardwareContext,
+    cache: Option<&DmaCacheSnapshot>,
+    out: &mut Report<'_>,
+) {
+    let Some(base) = base else {
+        log!(out, "[INFO] diagnostic IOMMU MMIO: observed=false reason=no-ivhd domain=unverified");
+        return;
+    };
+    let page = base & !4095;
+    let virt = memory.offset.checked_add(base).and_then(|x| VirtAddr::try_new(x).ok());
+    let translated = virt.and_then(|address| {
+        let offset = VirtAddr::try_new(memory.offset).ok()?;
+        let table = unsafe { ActivePageTable::from_current(offset) };
+        table.translate_addr(address).map(|physical| physical.as_u64())
+    });
+    let pat = virt.and_then(|address| {
+        let offset = VirtAddr::try_new(memory.offset).ok()?;
+        let table = unsafe { ActivePageTable::from_current(offset) };
+        let index = table.pat_index(address)?;
+        cache?.pat_memory_type(index)
+    });
+    let mtrr = cache.and_then(|snapshot| snapshot.effective_mtrr_type(page).ok());
+    let checked = validate_passive_read(
+        base,
+        context.physical_end,
+        translated,
+        mtrr,
+        pat,
+        &context.ram_regions[..context.ram_region_count],
+    );
+    if let Err(reason) = checked {
+        log!(out, "[INFO] diagnostic IOMMU MMIO: observed=false reason={reason:?} domain=unverified");
+        return;
+    }
+    let Some(address) = virt else {
+        log!(out, "[INFO] diagnostic IOMMU MMIO: observed=false reason=no-mapping domain=unverified");
+        return;
+    };
+    // Два документированных R/O наблюдения через явно некэшируемое
+    // отображение: AMD IOMMU MMIO +0 (таблица устройств), +0x18 (управление).
+    let table = unsafe { (address.as_u64() as *const u64).read_volatile() };
+    let control = unsafe { ((address.as_u64() + 0x18) as *const u64).read_volatile() };
+    let observation = ReadOnlyIommuState::decode(control, table);
+    log!(
+        out,
+        "[INFO] diagnostic IOMMU MMIO: observed=true enabled_bit={} device_table_nonzero={} domain=unverified readonly=1",
+        observation.enabled_bit,
+        observation.table_address_nonzero
+    );
 }
 
 unsafe fn read_msr(register: u32) -> u64 {

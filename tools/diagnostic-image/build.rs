@@ -10,5 +10,8 @@ fn main() {
     bootloader::UefiBoot::new(&kernel)
         .create_disk_image(&image)
         .expect("Не удалось создать диагностический образ UEFI");
-    println!("cargo:rustc-env=PHOENIXOS_DIAGNOSTIC_IMAGE={}", image.display());
+    println!(
+        "cargo:rustc-env=PHOENIXOS_DIAGNOSTIC_IMAGE={}",
+        image.display()
+    );
 }

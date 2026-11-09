@@ -8,10 +8,10 @@ use core::arch::x86_64::__cpuid;
 use phoenix_acpi::{McfgInfo, RSDP_V2_SIZE, Rsdp, SDT_HEADER_SIZE, SdtHeader, Xsdt};
 use phoenix_pcie::{ConfigAccess, EcamSegment};
 use phoenix_vm::ActivePageTable;
-use phoenix_vm::ram_audit::{ObservedMapping, RamAuditReport};
 use phoenix_vm::dma_cache::{
     DmaCacheSnapshot, FIXED_MTRR_REGISTERS, MAX_VARIABLE_MTRRS, memory_type_name,
 };
+use phoenix_vm::ram_audit::{ObservedMapping, RamAuditReport};
 use x86_64::VirtAddr;
 
 const PHYSICAL_MAPPING_MINIMUM: u64 = 0x1_0000_0000;
@@ -404,11 +404,17 @@ fn audit_ram_regions(
     out: &mut Report<'_>,
 ) {
     let Some(table) = table else {
-        log!(out, "[WARN] diagnostic RAM audit: complete=false reason=no-page-table");
+        log!(
+            out,
+            "[WARN] diagnostic RAM audit: complete=false reason=no-page-table"
+        );
         return;
     };
     let Some(offset) = context.physical_offset else {
-        log!(out, "[WARN] diagnostic RAM audit: complete=false reason=no-offset");
+        log!(
+            out,
+            "[WARN] diagnostic RAM audit: complete=false reason=no-offset"
+        );
         return;
     };
     let mut report = RamAuditReport::default();
@@ -449,10 +455,16 @@ fn audit_ram_regions(
         report.invalid_mappings
     );
     if let Some(physical) = report.first_invalid {
-        log!(out, "[WARN] diagnostic RAM audit: first_invalid={physical:#x}");
+        log!(
+            out,
+            "[WARN] diagnostic RAM audit: first_invalid={physical:#x}"
+        );
     }
     if let Some(physical) = report.first_blocked {
-        log!(out, "[INFO] diagnostic RAM audit: first_blocked={physical:#x}");
+        log!(
+            out,
+            "[INFO] diagnostic RAM audit: first_blocked={physical:#x}"
+        );
     }
 }
 

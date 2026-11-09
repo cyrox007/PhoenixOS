@@ -3,8 +3,8 @@
 
 use bootloader_api::info::{FrameBuffer, FrameBufferInfo, PixelFormat};
 use core::fmt::{self, Write};
-use phoenix_diagnostic_journal::Journal;
 use noto_sans_mono_bitmap::{FontWeight, RasterHeight, get_raster};
+use phoenix_diagnostic_journal::Journal;
 use uart_16550::backend::PioBackend;
 use uart_16550::{Config, Uart16550Tty};
 
@@ -23,7 +23,11 @@ impl<'a> Report<'a> {
             Screen::new(frame)
         });
         let serial = unsafe { Uart16550Tty::new_port(0x3f8, Config::default()) }.ok();
-        Self { serial, screen, journal: Journal::new() }
+        Self {
+            serial,
+            screen,
+            journal: Journal::new(),
+        }
     }
 
     pub fn line(&mut self, args: fmt::Arguments<'_>) {
@@ -108,7 +112,8 @@ impl<'a> Screen<'a> {
     }
 
     fn clear_text(&mut self) {
-        let start = 140usize.saturating_mul(self.info.stride)
+        let start = 140usize
+            .saturating_mul(self.info.stride)
             .saturating_mul(self.info.bytes_per_pixel);
         let end = self.info.byte_len.min(self.buffer.len());
         if start < end {

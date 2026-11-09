@@ -40,7 +40,10 @@ fn kernel_main(info: &'static mut BootInfo) -> ! {
     if report.journal_complete() {
         log!(report, "[INFO] diagnostic complete: OK");
     } else {
-        log!(report, "[WARN] diagnostic complete: INCOMPLETE journal-overflow");
+        log!(
+            report,
+            "[WARN] diagnostic complete: INCOMPLETE journal-overflow"
+        );
     }
     let mut page = report.page_count().saturating_sub(1);
     report.display_page(page);

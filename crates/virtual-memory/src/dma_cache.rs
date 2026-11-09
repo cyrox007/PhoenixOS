@@ -120,7 +120,8 @@ impl DmaCacheSnapshot {
         let physical_mask = (physical_limit - 1) & !(PAGE_SIZE - 1);
         let mut matched_types = 0u8;
         for &(base, mask) in &self.variable[..self.variable_count] {
-            let Some((start, end, kind)) = decode_variable_region(base, mask, physical_mask)? else {
+            let Some((start, end, kind)) = decode_variable_region(base, mask, physical_mask)?
+            else {
                 continue;
             };
             if physical_page < start || physical_page >= end {
@@ -247,10 +248,7 @@ fn decode_variable_region(
     let start = raw_base & physical_mask;
     let end = start.checked_add(size).ok_or(DmaCacheError::InvalidMtrr)?;
     let kind = (raw_base & 0xff) as u8;
-    if start & (size - 1) != 0
-        || end > physical_mask + PAGE_SIZE
-        || !valid_memory_type(kind)
-    {
+    if start & (size - 1) != 0 || end > physical_mask + PAGE_SIZE || !valid_memory_type(kind) {
         return Err(DmaCacheError::InvalidMtrr);
     }
     Ok(Some((start, end, kind)))
@@ -439,16 +437,20 @@ mod tests {
 
     #[test]
     fn invalid_mtrr_registers_do_not_obtain_permissions() {
-        assert!(matches!(snapshot(0xc02, &[]), Err(DmaCacheError::InvalidMtrr)));
-        assert!(matches!(snapshot(0xc00 | (1 << 12), &[]), Err(DmaCacheError::InvalidMtrr)));
-        let unaligned = snapshot(0xc00, &[(0x30_0000 | 6, region(0, 0x20_0000, 6).1)])
-            .unwrap();
+        assert!(matches!(
+            snapshot(0xc02, &[]),
+            Err(DmaCacheError::InvalidMtrr)
+        ));
+        assert!(matches!(
+            snapshot(0xc00 | (1 << 12), &[]),
+            Err(DmaCacheError::InvalidMtrr)
+        ));
+        let unaligned = snapshot(0xc00, &[(0x30_0000 | 6, region(0, 0x20_0000, 6).1)]).unwrap();
         assert_eq!(
             unaligned.effective_mtrr_type(0x20_0000),
             Err(DmaCacheError::InvalidMtrr)
         );
-        let reserved = snapshot(0xc00, &[(6 | (1u64 << 58), MTRR_RANGE_VALID)])
-            .unwrap();
+        let reserved = snapshot(0xc00, &[(6 | (1u64 << 58), MTRR_RANGE_VALID)]).unwrap();
         assert_eq!(
             reserved.effective_mtrr_type(0x20_0000),
             Err(DmaCacheError::InvalidMtrr)

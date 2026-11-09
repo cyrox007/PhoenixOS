@@ -5,8 +5,8 @@ use crate::screen::Report;
 use bootloader_api::BootInfo;
 use bootloader_api::info::MemoryRegionKind;
 use core::arch::x86_64::__cpuid;
-use phoenix_acpi::{McfgInfo, RSDP_V2_SIZE, Rsdp, SDT_HEADER_SIZE, SdtHeader, Xsdt};
 use phoenix_acpi::iommu_observation::{ReadOnlyIommuState, validate_passive_read};
+use phoenix_acpi::{McfgInfo, RSDP_V2_SIZE, Rsdp, SDT_HEADER_SIZE, SdtHeader, Xsdt};
 use phoenix_pcie::{ConfigAccess, EcamSegment};
 use phoenix_vm::ActivePageTable;
 use phoenix_vm::dma_cache::{
@@ -837,15 +837,23 @@ fn passive_iommu_registers(
     out: &mut Report<'_>,
 ) {
     let Some(base) = base else {
-        log!(out, "[INFO] diagnostic IOMMU MMIO: observed=false reason=no-ivhd domain=unverified");
+        log!(
+            out,
+            "[INFO] diagnostic IOMMU MMIO: observed=false reason=no-ivhd domain=unverified"
+        );
         return;
     };
     let page = base & !4095;
-    let virt = memory.offset.checked_add(base).and_then(|x| VirtAddr::try_new(x).ok());
+    let virt = memory
+        .offset
+        .checked_add(base)
+        .and_then(|x| VirtAddr::try_new(x).ok());
     let translated = virt.and_then(|address| {
         let offset = VirtAddr::try_new(memory.offset).ok()?;
         let table = unsafe { ActivePageTable::from_current(offset) };
-        table.translate_addr(address).map(|physical| physical.as_u64())
+        table
+            .translate_addr(address)
+            .map(|physical| physical.as_u64())
     });
     let pat = virt.and_then(|address| {
         let offset = VirtAddr::try_new(memory.offset).ok()?;
@@ -863,11 +871,17 @@ fn passive_iommu_registers(
         &context.ram_regions[..context.ram_region_count],
     );
     if let Err(reason) = checked {
-        log!(out, "[INFO] diagnostic IOMMU MMIO: observed=false reason={reason:?} domain=unverified");
+        log!(
+            out,
+            "[INFO] diagnostic IOMMU MMIO: observed=false reason={reason:?} domain=unverified"
+        );
         return;
     }
     let Some(address) = virt else {
-        log!(out, "[INFO] diagnostic IOMMU MMIO: observed=false reason=no-mapping domain=unverified");
+        log!(
+            out,
+            "[INFO] diagnostic IOMMU MMIO: observed=false reason=no-mapping domain=unverified"
+        );
         return;
     };
     // Два документированных R/O наблюдения через явно некэшируемое

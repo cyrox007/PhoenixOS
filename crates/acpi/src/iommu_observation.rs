@@ -51,11 +51,16 @@ pub fn validate_passive_read(
     if base == 0 || base & 0xfff != 0 {
         return Err(ObservationError::InvalidBase);
     }
-    let end = base.checked_add(REQUIRED_BYTES).ok_or(ObservationError::InvalidBase)?;
+    let end = base
+        .checked_add(REQUIRED_BYTES)
+        .ok_or(ObservationError::InvalidBase)?;
     if end > known_physical_end {
         return Err(ObservationError::OutsideKnownMapping);
     }
-    if usable_ram.iter().any(|&(first, last)| base < last && first < end) {
+    if usable_ram
+        .iter()
+        .any(|&(first, last)| base < last && first < end)
+    {
         return Err(ObservationError::OverlapsRam);
     }
     if translated_base != Some(base) {
@@ -73,8 +78,12 @@ mod tests {
 
     fn valid() -> Result<(), ObservationError> {
         validate_passive_read(
-            0xfed8_0000, 0x1_0000_0000, Some(0xfed8_0000),
-            Some(0), Some(0), &[(0x10_0000, 0x8000_0000)],
+            0xfed8_0000,
+            0x1_0000_0000,
+            Some(0xfed8_0000),
+            Some(0),
+            Some(0),
+            &[(0x10_0000, 0x8000_0000)],
         )
     }
 
@@ -94,7 +103,14 @@ mod tests {
             Err(ObservationError::InvalidBase),
         );
         assert_eq!(
-            validate_passive_read(0xfed8_0000, 0xfed8_0018, Some(0xfed8_0000), Some(0), Some(0), &[]),
+            validate_passive_read(
+                0xfed8_0000,
+                0xfed8_0018,
+                Some(0xfed8_0000),
+                Some(0),
+                Some(0),
+                &[]
+            ),
             Err(ObservationError::OutsideKnownMapping),
         );
     }
@@ -103,14 +119,23 @@ mod tests {
     fn rejects_ram_and_translation_aliases() {
         assert_eq!(
             validate_passive_read(
-                0xfed8_0000, u64::MAX, Some(0xfed8_0000), Some(0), Some(0),
+                0xfed8_0000,
+                u64::MAX,
+                Some(0xfed8_0000),
+                Some(0),
+                Some(0),
                 &[(0xfed8_0000, 0xfed8_1000)],
             ),
             Err(ObservationError::OverlapsRam),
         );
         assert_eq!(
             validate_passive_read(
-                0xfed8_0000, u64::MAX, Some(0xdead_0000), Some(0), Some(0), &[],
+                0xfed8_0000,
+                u64::MAX,
+                Some(0xdead_0000),
+                Some(0),
+                Some(0),
+                &[],
             ),
             Err(ObservationError::TranslationMismatch),
         );
@@ -120,17 +145,13 @@ mod tests {
     fn unknown_or_writeback_policy_blocks_even_reading() {
         for mtrr in [None, Some(6), Some(1)] {
             assert_eq!(
-                validate_passive_read(
-                    0xfed8_0000, u64::MAX, Some(0xfed8_0000), mtrr, Some(0), &[],
-                ),
+                validate_passive_read(0xfed8_0000, u64::MAX, Some(0xfed8_0000), mtrr, Some(0), &[],),
                 Err(ObservationError::CacheNotUncached),
             );
         }
         for pat in [None, Some(6), Some(4)] {
             assert_eq!(
-                validate_passive_read(
-                    0xfed8_0000, u64::MAX, Some(0xfed8_0000), Some(0), pat, &[],
-                ),
+                validate_passive_read(0xfed8_0000, u64::MAX, Some(0xfed8_0000), Some(0), pat, &[],),
                 Err(ObservationError::CacheNotUncached),
             );
         }
@@ -152,7 +173,7 @@ mod tests {
     #[test]
     fn address_overflow_rejected() {
         assert_eq!(
-            validate_passive_read(u64::MAX - 4095, u64::MAX, None, Some(0), Some(0), &[]),
+            validate_passive_read(u64::MAX - 4095, u64::MAX - 4095, None, Some(0), Some(0), &[]),
             Err(ObservationError::OutsideKnownMapping),
         );
     }

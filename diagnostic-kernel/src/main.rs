@@ -27,6 +27,8 @@ pub static BOOTLOADER_CONFIG: BootloaderConfig = {
 entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 
 fn kernel_main(info: &'static mut BootInfo) -> ! {
+    // Без собственного обработчика прерываний внешние IRQ здесь запрещены.
+    x86_64::instructions::interrupts::disable();
     let context = hardware::HardwareContext::from_boot_info(info);
     let mut report = screen::Report::new(info.framebuffer.as_mut());
 
@@ -40,7 +42,7 @@ fn kernel_main(info: &'static mut BootInfo) -> ! {
     // Не перезагружаем компьютер автоматически, чтобы отчёт оставался
     // на экране. Не запускаем драйверы, задачи или прерывания.
     loop {
-        core::hint::spin_loop();
+        x86_64::instructions::hlt();
     }
 }
 
@@ -48,6 +50,6 @@ fn kernel_main(info: &'static mut BootInfo) -> ! {
 fn panic(info: &PanicInfo<'_>) -> ! {
     screen::emergency(format_args!("{info}"));
     loop {
-        core::hint::spin_loop();
+        x86_64::instructions::hlt();
     }
 }

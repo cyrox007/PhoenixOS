@@ -6,8 +6,9 @@
 const PRESENT: u64 = 1;
 const HUGE: u64 = 1 << 7;
 const PAGE_SIZE: u64 = 4096;
-pub const MAX_PAGE_TABLE_ENTRIES: u64 = 1_000_000;
-pub const MAX_LEAF_MAPPINGS: u64 = 65_536;
+/// Верхний предел сканирования с запасом под 16 ГиБ 4-КиБ листьев.
+pub const MAX_PAGE_TABLE_ENTRIES: u64 = 8_388_608;
+pub const MAX_LEAF_MAPPINGS: u64 = 4_194_304;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageWalkError {

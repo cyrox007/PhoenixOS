@@ -50,7 +50,11 @@ fn kernel_main(info: &'static mut BootInfo) -> ! {
     // 15 млрд тактов НЕ означают фиксированное число секунд на разных ЦП.
     // Это резервный способ снять полный отчёт на видео при отсутствии i8042.
     const PAGE_INTERVAL_TICKS: u64 = 15_000_000_000;
-    let mut pages = PageCycle::new(report.page_count(), unsafe { core::arch::x86_64::_rdtsc() }, PAGE_INTERVAL_TICKS);
+    let mut pages = PageCycle::new(
+        report.page_count(),
+        unsafe { core::arch::x86_64::_rdtsc() },
+        PAGE_INTERVAL_TICKS,
+    );
     report.display_page(pages.page());
 
     // Не перезагружаем компьютер автоматически, чтобы отчёт оставался

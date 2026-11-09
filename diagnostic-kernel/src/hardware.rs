@@ -7,6 +7,7 @@ use bootloader_api::info::MemoryRegionKind;
 use core::arch::x86_64::__cpuid;
 use phoenix_acpi::{McfgInfo, RSDP_V2_SIZE, Rsdp, SDT_HEADER_SIZE, SdtHeader, Xsdt};
 use phoenix_pcie::{ConfigAccess, EcamSegment};
+use phoenix_vm::ActivePageTable;
 use phoenix_vm::dma_cache::{
     DmaCacheSnapshot, FIXED_MTRR_REGISTERS, MAX_VARIABLE_MTRRS, memory_type_name,
 };
@@ -17,6 +18,10 @@ const MAX_ACPI_TABLE: usize = 1024 * 1024;
 const IA32_MTRRCAP: u32 = 0xfe;
 const IA32_PAT: u32 = 0x277;
 const IA32_MTRR_DEFAULT: u32 = 0x2ff;
+const AMD_SYSCFG: u32 = 0xc001_0010;
+const AMD_TOP_MEM2: u32 = 0xc001_001d;
+const AMD_TOM2_ENABLE: u64 = 1 << 21;
+const AMD_TOM2_FORCE_WB: u64 = 1 << 22;
 
 #[derive(Clone, Copy, Debug)]
 enum ReadError {
@@ -226,6 +231,32 @@ fn cpu(context: &HardwareContext, out: &mut Report<'_>) {
         }
         snapshot = snapshot.with_fixed(fixed);
     }
+    // У виртуальных ЦП чтение AMD-специфических MSR может вызвать #GP.
+    // Такой режим оставляем в консервативном варианте без TOM2-исключения.
+    if vendor == "AuthenticAMD" && (leaf1.ecx & (1 << 31)) == 0 {
+        let syscfg = unsafe { read_msr(AMD_SYSCFG) };
+        let top = if syscfg & AMD_TOM2_ENABLE != 0 {
+            unsafe { read_msr(AMD_TOP_MEM2) }
+        } else {
+            0
+        };
+        log!(
+            out,
+            "[INFO] diagnostic AMD cache: SYSCFG={:#x} TOP_MEM2={:#x} TOM2={} FWB={}",
+            syscfg,
+            top,
+            syscfg & AMD_TOM2_ENABLE != 0,
+            syscfg & AMD_TOM2_FORCE_WB != 0
+        );
+        snapshot = match snapshot.with_amd_top_mem2(syscfg, top) {
+            Ok(value) => value,
+            Err(error) => {
+                log!(out, "[WARN] diagnostic AMD TOM2: {error:?}");
+                return;
+            }
+        };
+    }
+
     log!(
         out,
         "[INFO] diagnostic cache: OK default={} variable={} fixed_enabled={}",
@@ -233,25 +264,92 @@ fn cpu(context: &HardwareContext, out: &mut Report<'_>) {
         snapshot.variable_count(),
         mtrr_default & (1 << 10) != 0
     );
+    let table = context
+        .physical_offset
+        .and_then(|offset| VirtAddr::try_new(offset).ok())
+        .map(|offset| {
+            // Загрузчик передал единственное прямое отображение RAM,
+            // изменяемого владельца таблиц в диагностическом ядре нет.
+            // Используем только translate_addr и pat_index.
+            unsafe { ActivePageTable::from_current(offset) }
+        });
     for sample in context.ram_samples.iter().flatten() {
-        match snapshot.effective_mtrr_type(*sample) {
-            Ok(kind) => log!(
-                out,
-                "[INFO] diagnostic cache sample: phys={:#x} MTRR={} PAT-alias=not-verified",
-                sample,
-                memory_type_name(kind)
-            ),
-            Err(error) => log!(
-                out,
-                "[WARN] diagnostic cache sample: phys={:#x} error={error:?}",
-                sample
-            ),
-        }
+        report_memory_sample(context, &snapshot, table.as_ref(), *sample, out);
     }
     log!(
         out,
         "[INFO] diagnostic IOMMU: table presence only, not enabled status"
     );
+}
+
+/// Сверка физического адреса с фактическим прямым отображением RAM.
+/// Ничего не записываем в память и не выдаём новых DMA-отображений.
+fn report_memory_sample(
+    context: &HardwareContext,
+    snapshot: &DmaCacheSnapshot,
+    table: Option<&ActivePageTable>,
+    physical: u64,
+    out: &mut Report<'_>,
+) {
+    let kind = match snapshot.effective_mtrr_type(physical) {
+        Ok(kind) => kind,
+        Err(error) => {
+            log!(
+                out,
+                "[WARN] diagnostic cache sample: phys={physical:#x} MTRR={error:?}"
+            );
+            return;
+        }
+    };
+    let Some(table) = table else {
+        log!(
+            out,
+            "[WARN] diagnostic cache sample: phys={physical:#x} PAT=no-table"
+        );
+        return;
+    };
+    let address = context
+        .physical_offset
+        .and_then(|offset| offset.checked_add(physical))
+        .and_then(|address| VirtAddr::try_new(address).ok());
+    let Some(address) = address else {
+        log!(
+            out,
+            "[WARN] diagnostic cache sample: phys={physical:#x} PAT=bad-address"
+        );
+        return;
+    };
+    if table.translate_addr(address).map(|p| p.as_u64()) != Some(physical) {
+        log!(
+            out,
+            "[WARN] diagnostic cache sample: phys={physical:#x} PAT=bad-mapping"
+        );
+        return;
+    }
+    let Some(index) = table.pat_index(address) else {
+        log!(
+            out,
+            "[WARN] diagnostic cache sample: phys={physical:#x} PAT=unmapped"
+        );
+        return;
+    };
+    let pat_kind = pat_type_from_snapshot(snapshot, index);
+    let candidate = snapshot.verify_writeback_alias(physical, 1, index).is_ok();
+    log!(
+        out,
+        "[INFO] diagnostic cache sample: phys={physical:#x} MTRR={} PAT={} index={} WB-candidate={}",
+        memory_type_name(kind),
+        pat_kind,
+        index,
+        candidate
+    );
+}
+
+fn pat_type_from_snapshot(snapshot: &DmaCacheSnapshot, index: u8) -> &'static str {
+    snapshot
+        .pat_memory_type(index)
+        .map(memory_type_name)
+        .unwrap_or("unknown")
 }
 
 fn acpi_and_pci(rsdp_address: u64, memory: &ReadOnlyMemory, out: &mut Report<'_>) {
@@ -299,7 +397,7 @@ fn acpi_and_pci(rsdp_address: u64, memory: &ReadOnlyMemory, out: &mut Report<'_>
             if function.class_code == 2 {
                 network = network.saturating_add(1);
             }
-            if total <= 12 {
+            if total <= 8 {
                 log!(
                     out,
                     "[INFO] PCI {:02x}:{:02x}.{} {:04x}:{:04x} class={:02x}:{:02x}",

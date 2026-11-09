@@ -16,6 +16,8 @@ MARKERS = (
     "device DMA: disabled",
     "diagnostic CPU: OK",
     "diagnostic cache: OK",
+    "diagnostic cache sample: phys=",
+    "WB-candidate=true",
     "diagnostic ACPI: OK",
     "diagnostic PCI: OK",
     "diagnostic complete: OK",

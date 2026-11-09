@@ -36,6 +36,13 @@ class DiagnosticIsolationTests(unittest.TestCase):
             self.assertNotIn(forbidden, self.hardware)
         self.assertIn("read_volatile", self.hardware)
         self.assertIn("read_msr", self.hardware)
+        self.assertIn("read_msr(AMD_SYSCFG)", self.hardware)
+        self.assertIn("read_msr(AMD_TOP_MEM2)", self.hardware)
+        self.assertIn("ActivePageTable::from_current", self.hardware)
+        self.assertIn("table.translate_addr", self.hardware)
+        self.assertIn("table.pat_index", self.hardware)
+        self.assertNotIn("map_4k(", self.hardware)
+        self.assertNotIn("unmap_4k(", self.hardware)
 
     def test_boot_medium_is_read_only_and_no_test_disk(self):
         command = self.runner.build_command("diag.img", "code.fd", "vars.fd")
@@ -55,6 +62,8 @@ class DiagnosticIsolationTests(unittest.TestCase):
         self.assertIn("device DMA: disabled", required)
         self.assertIn("diagnostic CPU: OK", required)
         self.assertIn("diagnostic cache: OK", required)
+        self.assertIn("diagnostic cache sample: phys=", required)
+        self.assertIn("WB-candidate=true", required)
         self.assertIn("diagnostic ACPI: OK", required)
         self.assertIn("diagnostic PCI: OK", required)
         self.assertIn("diagnostic complete: OK", required)

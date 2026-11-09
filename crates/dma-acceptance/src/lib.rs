@@ -116,7 +116,9 @@ pub fn validate(plan: &AcceptancePlan) -> Result<ModelPermit, Rejection> {
     if plan.timeout_ticks < MIN_TIMEOUT_TICKS {
         return Err(Rejection::InvalidTimeout);
     }
-    Ok(ModelPermit { timeout_ticks: plan.timeout_ticks })
+    Ok(ModelPermit {
+        timeout_ticks: plan.timeout_ticks,
+    })
 }
 
 /// Разрешение не экспортирует адреса или аппаратные команды.
@@ -151,7 +153,11 @@ pub struct ModelCycle {
 
 impl ModelCycle {
     pub fn new(permit: ModelPermit) -> Self {
-        Self { phase: Phase::Prepared, began_at: 0, timeout_ticks: permit.timeout_ticks }
+        Self {
+            phase: Phase::Prepared,
+            began_at: 0,
+            timeout_ticks: permit.timeout_ticks,
+        }
     }
 
     pub const fn phase(&self) -> Phase {
@@ -230,7 +236,14 @@ mod tests {
     }
 
     fn device() -> PciIdentity {
-        PciIdentity { segment: 0, bus: 1, device: 2, function: 0, vendor: 0x1234, product: 0x5678 }
+        PciIdentity {
+            segment: 0,
+            bus: 1,
+            device: 2,
+            function: 0,
+            vendor: 0x1234,
+            product: 0x5678,
+        }
     }
 
     fn plan() -> AcceptancePlan {
@@ -238,9 +251,18 @@ mod tests {
             profile: Profile::QemuModel,
             expected_device: Some(device()),
             observed_device: Some(device()),
-            owned_buffer: Range { start: 0x4000, length: PAGE_SIZE },
-            iommu_aperture: Range { start: 0x4000, length: 0x4000 },
-            protected_storage: Range { start: 0x8000, length: PAGE_SIZE },
+            owned_buffer: Range {
+                start: 0x4000,
+                length: PAGE_SIZE,
+            },
+            iommu_aperture: Range {
+                start: 0x4000,
+                length: 0x4000,
+            },
+            protected_storage: Range {
+                start: 0x8000,
+                length: PAGE_SIZE,
+            },
             timeout_ticks: 10,
             evidence: evidence(),
         }
@@ -250,7 +272,10 @@ mod tests {
     fn physical_hardware_is_always_denied_even_with_all_flags_true() {
         let mut plan = plan();
         plan.profile = Profile::PhysicalAsus;
-        assert!(matches!(validate(&plan), Err(Rejection::PhysicalExecutionForbidden)));
+        assert!(matches!(
+            validate(&plan),
+            Err(Rejection::PhysicalExecutionForbidden)
+        ));
     }
 
     #[test]
@@ -290,7 +315,10 @@ mod tests {
         plan.owned_buffer.start += 1;
         assert!(matches!(validate(&plan), Err(Rejection::InvalidBuffer)));
         plan = plan();
-        plan.owned_buffer = Range { start: u64::MAX - 4095, length: PAGE_SIZE };
+        plan.owned_buffer = Range {
+            start: u64::MAX - 4095,
+            length: PAGE_SIZE,
+        };
         assert!(matches!(validate(&plan), Err(Rejection::InvalidBuffer)));
         plan = plan();
         plan.owned_buffer.length = MAX_BUFFER + PAGE_SIZE;
@@ -302,10 +330,16 @@ mod tests {
         let mut plan = plan();
         plan.owned_buffer.start = 0x7000;
         plan.owned_buffer.length = 0x2000;
-        assert!(matches!(validate(&plan), Err(Rejection::BufferOutsideDomain)));
+        assert!(matches!(
+            validate(&plan),
+            Err(Rejection::BufferOutsideDomain)
+        ));
         plan = plan();
         plan.protected_storage.start = 0x4000;
-        assert!(matches!(validate(&plan), Err(Rejection::ProtectedStorageOverlap)));
+        assert!(matches!(
+            validate(&plan),
+            Err(Rejection::ProtectedStorageOverlap)
+        ));
     }
 
     #[test]
@@ -319,11 +353,20 @@ mod tests {
     fn completes_model_lifecycle_in_strict_order() {
         let permit = validate(&plan()).unwrap();
         let mut cycle = ModelCycle::new(permit);
-        assert_eq!(cycle.confirm_released(true), Err(CycleError::InvalidTransition));
+        assert_eq!(
+            cycle.confirm_released(true),
+            Err(CycleError::InvalidTransition)
+        );
         cycle.begin(100).unwrap();
         assert!(cycle.poll(109).is_ok());
-        assert_eq!(cycle.confirm_stopped(false), Err(CycleError::DeviceStillActive));
-        assert_eq!(cycle.confirm_unmapped(true), Err(CycleError::InvalidTransition));
+        assert_eq!(
+            cycle.confirm_stopped(false),
+            Err(CycleError::DeviceStillActive)
+        );
+        assert_eq!(
+            cycle.confirm_unmapped(true),
+            Err(CycleError::InvalidTransition)
+        );
         cycle.confirm_stopped(true).unwrap();
         cycle.confirm_unmapped(true).unwrap();
         cycle.confirm_released(true).unwrap();

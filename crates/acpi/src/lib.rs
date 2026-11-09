@@ -1,5 +1,7 @@
 #![no_std]
 
+pub mod ivrs;
+
 pub const SDT_HEADER_SIZE: usize = 36;
 pub const RSDP_V2_SIZE: usize = 36;
 pub const XSDT_ENTRY_SIZE: usize = 8;

@@ -2,7 +2,9 @@
 
 pub mod dma_cache;
 pub mod dma_window;
+pub mod hardware_gate;
 pub mod kernel_reservations;
+pub mod page_walk;
 pub mod ram_audit;
 
 use x86_64::registers::control::{Cr3, Cr3Flags};

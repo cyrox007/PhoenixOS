@@ -1,0 +1,15 @@
+[package]
+name = "phoenix-diagnostic-kernel"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[dependencies]
+bootloader_api = "=0.11.17"
+phoenix-acpi = { path = "../crates/acpi" }
+phoenix-pcie = { path = "../crates/pcie" }
+phoenix-vm = { path = "../crates/virtual-memory" }
+phoenix-framebuffer = { path = "../crates/phoenix-framebuffer" }
+noto-sans-mono-bitmap = { version = "0.3.2", default-features = false, features = ["regular", "size_16", "unicode-basic-latin"] }
+uart_16550 = "0.8.0"
+x86_64 = "0.15.2"

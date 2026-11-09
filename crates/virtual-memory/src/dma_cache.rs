@@ -11,6 +11,7 @@ const MTRR_ENABLE: u64 = 1 << 11;
 const MTRR_FIXED_ENABLE: u64 = 1 << 10;
 const MTRR_RANGE_VALID: u64 = 1 << 11;
 pub const MAX_VARIABLE_MTRRS: usize = 16;
+pub const FIXED_MTRR_REGISTERS: usize = 11;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DmaCacheError {
@@ -33,6 +34,7 @@ pub struct DmaCacheSnapshot {
     physical_bits: u8,
     variable: [(u64, u64); MAX_VARIABLE_MTRRS],
     variable_count: usize,
+    fixed: Option<[u64; FIXED_MTRR_REGISTERS]>,
 }
 
 impl DmaCacheSnapshot {
@@ -64,7 +66,15 @@ impl DmaCacheSnapshot {
             physical_bits,
             variable: ranges,
             variable_count: variable.len(),
+            fixed: None,
         })
+    }
+
+    /// Фиксированные MTRR аппаратуры для первых 1024 КиБ.
+    /// Отсутствие этих данных не разрешает WB-псевдоним в этом диапазоне.
+    pub fn with_fixed(mut self, fixed: [u64; FIXED_MTRR_REGISTERS]) -> Self {
+        self.fixed = Some(fixed);
+        self
     }
 
     pub const fn variable_count(&self) -> usize {
@@ -93,9 +103,8 @@ impl DmaCacheSnapshot {
         if page_count == 0 || physical_start % PAGE_SIZE != 0 || end > physical_limit {
             return Err(DmaCacheError::InvalidRange);
         }
-        // Фиксированные MTRR ниже 1 МиБ здесь не разбираются.
-        if self.mtrr_default & MTRR_FIXED_ENABLE != 0 && physical_start < 0x10_0000 {
-            return Err(DmaCacheError::UnsupportedFixedRange);
+        if self.mtrr_default & MTRR_FIXED_ENABLE != 0 {
+            self.verify_fixed_writeback(physical_start, end)?;
         }
         if pat_type(self.pat, existing_pat_index) != Some(PAT_WRITE_BACK) {
             return Err(DmaCacheError::ConflictingAlias);
@@ -113,6 +122,40 @@ impl DmaCacheSnapshot {
         }
         Ok(())
     }
+
+    /// Проверяет каждую пересекаемую область фиксированного MTRR. Без
+    /// доступных регистров запрос не разрешается даже при MTRR WB по умолчанию.
+    fn verify_fixed_writeback(&self, start: u64, end: u64) -> Result<(), DmaCacheError> {
+        if start >= 0x10_0000 {
+            return Ok(());
+        }
+        let fixed = self.fixed.ok_or(DmaCacheError::UnsupportedFixedRange)?;
+        let mut address = start;
+        let upper = end.min(0x10_0000);
+        while address < upper {
+            let (register, slot) = fixed_entry(address);
+            let kind = ((fixed[register] >> (slot * 8)) & 0xff) as u8;
+            if kind != PAT_WRITE_BACK {
+                return Err(DmaCacheError::UnknownMemoryType);
+            }
+            address += PAGE_SIZE;
+        }
+        Ok(())
+    }
+}
+
+fn fixed_entry(address: u64) -> (usize, u64) {
+    if address < 0x8_0000 {
+        return (0, address / 0x1_0000);
+    }
+    if address < 0xa_0000 {
+        return (1, (address - 0x8_0000) / 0x4000);
+    }
+    if address < 0xc_0000 {
+        return (2, (address - 0xa_0000) / 0x4000);
+    }
+    let page = (address - 0xc_0000) / PAGE_SIZE;
+    (3 + (page / 8) as usize, page % 8)
 }
 
 pub fn pat_type(pat: u64, index: u8) -> Option<u8> {
@@ -236,6 +279,23 @@ mod tests {
             state.verify_writeback_alias(1u64 << 48, 1, 0),
             Err(DmaCacheError::InvalidRange)
         );
+    }
+
+    #[test]
+    fn fixed_mtrr_is_verified_instead_of_assuming_writeback() {
+        let all_wb = [0x0606_0606_0606_0606; FIXED_MTRR_REGISTERS];
+        let state = snapshot(0xc06, &[]).unwrap().with_fixed(all_wb);
+        state.verify_writeback_alias(0x2000, 2, 0).unwrap();
+        state.verify_writeback_alias(0x9_f000, 2, 0).unwrap();
+
+        let mut mixed = all_wb;
+        mixed[2] = 0;
+        let state = snapshot(0xc06, &[]).unwrap().with_fixed(mixed);
+        assert_eq!(
+            state.verify_writeback_alias(0xa_0000, 1, 0),
+            Err(DmaCacheError::UnknownMemoryType)
+        );
+        state.verify_writeback_alias(0x8_0000, 1, 0).unwrap();
     }
 
     #[test]

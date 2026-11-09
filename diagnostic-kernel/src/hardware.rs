@@ -11,11 +11,11 @@ use phoenix_vm::ActivePageTable;
 use phoenix_vm::dma_cache::{
     DmaCacheSnapshot, FIXED_MTRR_REGISTERS, MAX_VARIABLE_MTRRS, memory_type_name,
 };
-use phoenix_vm::ram_audit::{ObservedMapping, RamAuditReport};
-use phoenix_vm::page_walk::{AliasAuditReport, walk_current_cr3};
 use phoenix_vm::hardware_gate::{DmaSafetyEvidence, blocking_reason, diagnostic_dma_authorized};
-use x86_64::registers::control::Cr3;
+use phoenix_vm::page_walk::{AliasAuditReport, walk_current_cr3};
+use phoenix_vm::ram_audit::{ObservedMapping, RamAuditReport};
 use x86_64::VirtAddr;
+use x86_64::registers::control::Cr3;
 
 const PHYSICAL_MAPPING_MINIMUM: u64 = 0x1_0000_0000;
 const MAX_ACPI_TABLE: usize = 1024 * 1024;
@@ -481,18 +481,29 @@ fn audit_current_aliases(
     out: &mut Report<'_>,
 ) {
     let Some(table) = table else {
-        log!(out, "[WARN] diagnostic aliases: complete=false reason=no-page-table");
+        log!(
+            out,
+            "[WARN] diagnostic aliases: complete=false reason=no-page-table"
+        );
         return;
     };
     let Some(offset) = context.physical_offset else {
-        log!(out, "[WARN] diagnostic aliases: complete=false reason=no-offset");
+        log!(
+            out,
+            "[WARN] diagnostic aliases: complete=false reason=no-offset"
+        );
         return;
     };
 
     let cr4: u64;
-    unsafe { core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags)) };
+    unsafe {
+        core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags))
+    };
     if cr4 & (1 << 12) != 0 {
-        log!(out, "[WARN] diagnostic aliases: complete=false reason=five-level-paging");
+        log!(
+            out,
+            "[WARN] diagnostic aliases: complete=false reason=five-level-paging"
+        );
         return;
     }
 
@@ -511,9 +522,7 @@ fn audit_current_aliases(
                 let virtual_table = offset
                     .checked_add(table_phys)
                     .and_then(|raw| VirtAddr::try_new(raw).ok())?;
-                if table.translate_addr(virtual_table).map(|p| p.as_u64())
-                    != Some(table_phys)
-                {
+                if table.translate_addr(virtual_table).map(|p| p.as_u64()) != Some(table_phys) {
                     return None;
                 }
                 last_checked = Some(table_phys);
@@ -566,10 +575,16 @@ fn audit_current_aliases(
         result.unavailable_pages
     );
     if let Some(physical) = result.first_conflict {
-        log!(out, "[WARN] diagnostic aliases: first_conflict={physical:#x}");
+        log!(
+            out,
+            "[WARN] diagnostic aliases: first_conflict={physical:#x}"
+        );
     }
     if let Some(physical) = result.first_unavailable {
-        log!(out, "[WARN] diagnostic aliases: first_unknown={physical:#x}");
+        log!(
+            out,
+            "[WARN] diagnostic aliases: first_unknown={physical:#x}"
+        );
     }
     if let Err(error) = scan {
         log!(out, "[WARN] diagnostic aliases: walk={error:?}");

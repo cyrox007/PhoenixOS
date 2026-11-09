@@ -380,8 +380,14 @@ mod tests {
         cycle.begin(u64::MAX - 3).unwrap();
         assert_eq!(cycle.poll(6), Err(CycleError::Timeout));
         assert_eq!(cycle.phase(), Phase::Faulted);
-        assert_eq!(cycle.confirm_unmapped(true), Err(CycleError::InvalidTransition));
-        assert_eq!(cycle.confirm_stopped(false), Err(CycleError::DeviceStillActive));
+        assert_eq!(
+            cycle.confirm_unmapped(true),
+            Err(CycleError::InvalidTransition)
+        );
+        assert_eq!(
+            cycle.confirm_stopped(false),
+            Err(CycleError::DeviceStillActive)
+        );
         assert_eq!(cycle.phase(), Phase::Faulted);
         cycle.confirm_stopped(true).unwrap();
         cycle.confirm_unmapped(true).unwrap();

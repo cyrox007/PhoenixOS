@@ -62,6 +62,7 @@ jobs:
           cargo test -p phoenix-driver-registry
           cargo test -p phoenix-reference-edu
           cargo test -p phoenix-dma
+          cargo test -p phoenix-dma-acceptance
           cargo test -p phoenix-acpi
           cargo test -p phoenix-block
           cargo test -p phoenix-vm

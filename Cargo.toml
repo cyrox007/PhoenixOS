@@ -24,6 +24,7 @@ members = [
     "crates/ipc-model",
     "crates/input-queue",
     "crates/diagnostic-journal",
+    "crates/dma-acceptance",
     "crates/network",
     "crates/libc-compat",
     "crates/elf-loader",

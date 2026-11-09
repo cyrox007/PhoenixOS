@@ -4,6 +4,7 @@ pub mod dma_cache;
 pub mod dma_window;
 pub mod kernel_reservations;
 pub mod ram_audit;
+pub mod page_walk;
 
 use x86_64::registers::control::{Cr3, Cr3Flags};
 use x86_64::structures::paging::mapper::{MapToError, TranslateResult, UnmapError};

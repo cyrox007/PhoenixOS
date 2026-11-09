@@ -78,12 +78,13 @@ impl KernelDmaArena {
                 Some(page_physical),
                 "прямое отображение RAM не соответствует физической странице"
             );
-            let index = table.pat_index(alias_address)
+            let index = table
+                .pat_index(alias_address)
                 .expect("не найден индекс PAT прямого отображения RAM");
-            cache.verify_writeback_alias(page_physical, 1, index)
+            cache
+                .verify_writeback_alias(page_physical, 1, index)
                 .expect("недопустимый тип кэширования или конфликт алиасов DMA");
         }
-
 
         // В проверочном профиле QEMU нет IOMMU; здесь проверяется только
         // адресная модель, не аппаратная передача DMA.

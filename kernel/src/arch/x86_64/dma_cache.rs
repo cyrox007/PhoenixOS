@@ -59,9 +59,8 @@ pub fn snapshot() -> Result<DmaCacheSnapshot, DmaCacheError> {
     // При работе на AMD без гипервизора учитываем возможный
     // принудительный WB выше 4 ГиБ. Неизвестные значения не разрешаем.
     let vendor = __cpuid(0);
-    let is_amd = vendor.ebx == 0x6874_7541
-        && vendor.edx == 0x6974_6e65
-        && vendor.ecx == 0x444d_4163;
+    let is_amd =
+        vendor.ebx == 0x6874_7541 && vendor.edx == 0x6974_6e65 && vendor.ecx == 0x444d_4163;
     if is_amd && features.ecx & (1 << 31) == 0 {
         let syscfg = unsafe { read_msr(AMD_SYSCFG) };
         let top = if syscfg & AMD_TOM2_ENABLE != 0 {

@@ -4,7 +4,7 @@
 use crate::screen::Report;
 use bootloader_api::BootInfo;
 use core::arch::x86_64::__cpuid;
-use phoenix_acpi::{McfgInfo, Rsdp, SdtHeader, Xsdt, RSDP_V2_SIZE, SDT_HEADER_SIZE};
+use phoenix_acpi::{McfgInfo, RSDP_V2_SIZE, Rsdp, SDT_HEADER_SIZE, SdtHeader, Xsdt};
 use phoenix_pcie::{ConfigAccess, EcamSegment};
 use phoenix_vm::dma_cache::{DmaCacheSnapshot, FIXED_MTRR_REGISTERS, MAX_VARIABLE_MTRRS};
 use x86_64::VirtAddr;
@@ -34,10 +34,10 @@ impl HardwareContext {
         Self {
             rsdp: info.rsdp_addr.into_option(),
             physical_offset: info.physical_memory_offset.into_option(),
-            physical_end: info.memory_regions.iter().fold(
-                PHYSICAL_MAPPING_MINIMUM,
-                |end, region| end.max(region.end),
-            ),
+            physical_end: info
+                .memory_regions
+                .iter()
+                .fold(PHYSICAL_MAPPING_MINIMUM, |end, region| end.max(region.end)),
         }
     }
 }
@@ -63,8 +63,12 @@ impl ReadOnlyMemory {
         if length == 0 || end > self.physical_end {
             return Err(ReadError::BadAddress);
         }
-        let virtual_address = self.offset.checked_add(physical).ok_or(ReadError::BadAddress)?;
-        let virtual_address = VirtAddr::try_new(virtual_address).map_err(|_| ReadError::BadAddress)?;
+        let virtual_address = self
+            .offset
+            .checked_add(physical)
+            .ok_or(ReadError::BadAddress)?;
+        let virtual_address =
+            VirtAddr::try_new(virtual_address).map_err(|_| ReadError::BadAddress)?;
         // Загрузчик гарантирует непрерывное линейное отображение физического
         // адресного пространства; проверены границы и каноничность.
         Ok(unsafe { core::slice::from_raw_parts(virtual_address.as_ptr(), length) })
@@ -82,7 +86,8 @@ impl ReadOnlyMemory {
 
     fn covers_ecam(&self, base: u64, end_bus: u8) -> bool {
         let size = (u64::from(end_bus) + 1) << 20;
-        base.checked_add(size).is_some_and(|end| end <= self.physical_end)
+        base.checked_add(size)
+            .is_some_and(|end| end <= self.physical_end)
     }
 }
 
@@ -158,25 +163,31 @@ fn cpu(out: &mut Report<'_>) {
         mtrr_cap
     );
     if count > MAX_VARIABLE_MTRRS {
-        log!(out, "[WARN] diagnostic cache: too many variable MTRRs {}", count);
+        log!(
+            out,
+            "[WARN] diagnostic cache: too many variable MTRRs {}",
+            count
+        );
         return;
     }
     let mut variable = [(0, 0); MAX_VARIABLE_MTRRS];
     for (index, item) in variable[..count].iter_mut().enumerate() {
         let register = 0x200 + index as u32 * 2;
-        *item = (unsafe { read_msr(register) }, unsafe { read_msr(register + 1) });
+        *item = (unsafe { read_msr(register) }, unsafe {
+            read_msr(register + 1)
+        });
     }
-    let mut snapshot = match DmaCacheSnapshot::new(pat, mtrr_default, physical_bits, &variable[..count]) {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            log!(out, "[WARN] diagnostic cache policy: {error:?}");
-            return;
-        }
-    };
+    let mut snapshot =
+        match DmaCacheSnapshot::new(pat, mtrr_default, physical_bits, &variable[..count]) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                log!(out, "[WARN] diagnostic cache policy: {error:?}");
+                return;
+            }
+        };
     if mtrr_default & (1 << 10) != 0 && mtrr_cap & (1 << 8) != 0 {
         let registers = [
-            0x250, 0x258, 0x259, 0x268, 0x269, 0x26a, 0x26b,
-            0x26c, 0x26d, 0x26e, 0x26f,
+            0x250, 0x258, 0x259, 0x268, 0x269, 0x26a, 0x26b, 0x26c, 0x26d, 0x26e, 0x26f,
         ];
         let mut fixed = [0u64; FIXED_MTRR_REGISTERS];
         for (slot, register) in fixed.iter_mut().zip(registers) {
@@ -190,7 +201,10 @@ fn cpu(out: &mut Report<'_>) {
         snapshot.variable_count(),
         mtrr_default & (1 << 10) != 0
     );
-    log!(out, "[INFO] diagnostic IOMMU: table presence only, not enabled status");
+    log!(
+        out,
+        "[INFO] diagnostic IOMMU: table presence only, not enabled status"
+    );
 }
 
 fn acpi_and_pci(rsdp_address: u64, memory: &ReadOnlyMemory, out: &mut Report<'_>) {
@@ -211,7 +225,11 @@ fn acpi_and_pci(rsdp_address: u64, memory: &ReadOnlyMemory, out: &mut Report<'_>
     let mut network = 0u32;
     for entry in mcfg.iter() {
         if !memory.covers_ecam(entry.base_address, entry.end_bus) {
-            log!(out, "[WARN] diagnostic PCI: ECAM unmapped group={}", entry.segment_group);
+            log!(
+                out,
+                "[WARN] diagnostic PCI: ECAM unmapped group={}",
+                entry.segment_group
+            );
             continue;
         }
         let segment = match EcamSegment::new(
@@ -267,8 +285,8 @@ fn read_acpi(
     memory: &ReadOnlyMemory,
     out: &mut Report<'_>,
 ) -> Result<Option<McfgInfo>, ReadError> {
-    let rsdp = Rsdp::parse(memory.bytes(physical, RSDP_V2_SIZE)?)
-        .map_err(|_| ReadError::InvalidAcpi)?;
+    let rsdp =
+        Rsdp::parse(memory.bytes(physical, RSDP_V2_SIZE)?).map_err(|_| ReadError::InvalidAcpi)?;
     let xsdt_bytes = memory.table(rsdp.xsdt_address)?;
     let xsdt = Xsdt::parse(xsdt_bytes).map_err(|_| ReadError::InvalidAcpi)?;
     let mut mcfg = None;

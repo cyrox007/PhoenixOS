@@ -23,22 +23,37 @@ enum ReadError {
     Unsupported,
 }
 
+pub struct HardwareContext {
+    rsdp: Option<u64>,
+    physical_offset: Option<u64>,
+    physical_end: u64,
+}
+
+impl HardwareContext {
+    pub fn from_boot_info(info: &BootInfo) -> Self {
+        Self {
+            rsdp: info.rsdp_addr.into_option(),
+            physical_offset: info.physical_memory_offset.into_option(),
+            physical_end: info.memory_regions.iter().fold(
+                PHYSICAL_MAPPING_MINIMUM,
+                |end, region| end.max(region.end),
+            ),
+        }
+    }
+}
+
 struct ReadOnlyMemory {
     offset: u64,
     physical_end: u64,
 }
 
 impl ReadOnlyMemory {
-    fn from_boot_info(info: &BootInfo) -> Result<Self, ReadError> {
-        let offset = info
-            .physical_memory_offset
-            .into_option()
-            .ok_or(ReadError::MissingMapping)?;
-        let physical_end = info
-            .memory_regions
-            .iter()
-            .fold(PHYSICAL_MAPPING_MINIMUM, |end, region| end.max(region.end));
-        Ok(Self { offset, physical_end })
+    fn from_context(context: &HardwareContext) -> Result<Self, ReadError> {
+        let offset = context.physical_offset.ok_or(ReadError::MissingMapping)?;
+        Ok(Self {
+            offset,
+            physical_end: context.physical_end,
+        })
     }
 
     fn bytes(&self, physical: u64, length: usize) -> Result<&'static [u8], ReadError> {
@@ -88,13 +103,13 @@ impl ConfigAccess for DirectEcam<'_> {
     }
 }
 
-pub fn run(info: &BootInfo, out: &mut Report<'_>) {
+pub fn run(context: &HardwareContext, out: &mut Report<'_>) {
     cpu(out);
-    let Some(rsdp) = info.rsdp_addr.into_option() else {
+    let Some(rsdp) = context.rsdp else {
         log!(out, "[WARN] diagnostic ACPI: no RSDP");
         return;
     };
-    let memory = match ReadOnlyMemory::from_boot_info(info) {
+    let memory = match ReadOnlyMemory::from_context(context) {
         Ok(memory) => memory,
         Err(error) => {
             log!(out, "[WARN] diagnostic physical mapping: {error:?}");

@@ -611,6 +611,7 @@ fn acpi_and_pci(rsdp_address: u64, memory: &ReadOnlyMemory, out: &mut Report<'_>
     let mut storage = 0u32;
     let mut usb = 0u32;
     let mut network = 0u32;
+    let mut bus_master = 0u32;
     for entry in mcfg.iter() {
         if !memory.covers_ecam(entry.base_address, entry.end_bus) {
             log!(
@@ -631,6 +632,12 @@ fn acpi_and_pci(rsdp_address: u64, memory: &ReadOnlyMemory, out: &mut Report<'_>
         };
         let result = phoenix_pcie::enumerate_segment(&access, segment, |function| {
             total = total.saturating_add(1);
+            // Поле Command доступно для чтения: ничего не включаем
+            // и не меняем в работе PCIe-контроллеров.
+            let command = access.read_u32(function.config_address + 4) as u16;
+            if command & 4 != 0 {
+                bus_master = bus_master.saturating_add(1);
+            }
             if function.class_code == 1 {
                 storage = storage.saturating_add(1);
             }
@@ -666,6 +673,11 @@ fn acpi_and_pci(rsdp_address: u64, memory: &ReadOnlyMemory, out: &mut Report<'_>
         usb,
         network
     );
+    log!(
+        out,
+        "[INFO] diagnostic PCI DMA: busmaster_enabled={} controller_selected=false write_commands=false",
+        bus_master
+    );
 }
 
 fn read_acpi(
@@ -679,6 +691,9 @@ fn read_acpi(
     let xsdt = Xsdt::parse(xsdt_bytes).map_err(|_| ReadError::InvalidAcpi)?;
     let mut mcfg = None;
     let mut iommu_kind = "none";
+    let mut ivrs_hardware = 0u16;
+    let mut ivrs_invalid = false;
+    let mut processor_count = None;
     for physical in xsdt.iter() {
         let bytes = memory.table(physical)?;
         let prefix = SdtHeader::parse_prefix(bytes).map_err(|_| ReadError::InvalidAcpi)?;
@@ -689,8 +704,32 @@ fn read_acpi(
             b"MCFG" => {
                 mcfg = Some(phoenix_acpi::parse_mcfg(bytes).map_err(|_| ReadError::InvalidAcpi)?);
             }
-            b"IVRS" => iommu_kind = "AMD-IVRS",
+            b"IVRS" => {
+                iommu_kind = "AMD-IVRS";
+                match phoenix_acpi::ivrs::parse_ivrs(bytes) {
+                    Ok(ivrs) => {
+                        ivrs_hardware = ivrs.hardware_blocks;
+                        log!(
+                            out,
+                            "[INFO] diagnostic IVRS: hardware={} reserved={} unknown={} remap_reported={} first_mmio={:?}",
+                            ivrs.hardware_blocks,
+                            ivrs.memory_reservations,
+                            ivrs.unsupported_blocks,
+                            ivrs.dma_remap_reported,
+                            ivrs.first_iommu_base
+                        );
+                    }
+                    Err(error) => {
+                        ivrs_invalid = true;
+                        log!(out, "[WARN] diagnostic IVRS: {error:?}");
+                    }
+                }
+            }
             b"DMAR" => iommu_kind = "Intel-DMAR",
+            b"APIC" => match phoenix_acpi::parse_madt(bytes) {
+                Ok(madt) => processor_count = Some(madt.processor_count),
+                Err(error) => log!(out, "[WARN] diagnostic CPU topology: {error:?}"),
+            },
             _ => {}
         }
     }
@@ -700,6 +739,16 @@ fn read_acpi(
         xsdt.entry_count,
         mcfg.is_some(),
         iommu_kind
+    );
+    log!(
+        out,
+        "[INFO] diagnostic IOMMU: ivhd={} structural_ok={} runtime=unverified domain=unverified",
+        ivrs_hardware,
+        !ivrs_invalid && ivrs_hardware > 0
+    );
+    log!(
+        out,
+        "[INFO] diagnostic CPU cores: MADT={processor_count:?} msr_consensus=unverified BSP_only=true"
     );
     Ok(mcfg)
 }

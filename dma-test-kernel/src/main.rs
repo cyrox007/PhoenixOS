@@ -83,9 +83,7 @@ fn is_test_hypervisor() -> bool {
     name[0..4].copy_from_slice(&vendor.ebx.to_le_bytes());
     name[4..8].copy_from_slice(&vendor.ecx.to_le_bytes());
     name[8..12].copy_from_slice(&vendor.edx.to_le_bytes());
-    &name == b"KVMKVMKVM\0\0\0"
-        || &name == b"TCGTCGTCG\0\0"
-        || &name == b"QEMUQEMUQEMU"
+    &name == b"KVMKVMKVM\0\0\0" || &name == b"TCGTCGTCG\0\0" || &name == b"QEMUQEMUQEMU"
 }
 
 unsafe fn read_msr(register: u32) -> u64 {
@@ -215,13 +213,12 @@ fn kernel_main(info: &'static mut BootInfo) -> ! {
     );
 
     initialize_edu_interrupt().expect("QEMU x2APIC/MSI not initialized");
-    let mut frames = SystemFrameAllocator::<MAX_MEMORY_REGIONS>::from_regions(
-        &info.memory_regions,
-    )
-    .expect("no physical allocator");
+    let mut frames = SystemFrameAllocator::<MAX_MEMORY_REGIONS>::from_regions(&info.memory_regions)
+        .expect("no physical allocator");
     let mut page_table = unsafe { ActivePageTable::from_current(offset) };
-    let result = unsafe { reference_edu::self_test(function, &mut page_table, &mut frames, offset) }
-        .expect("real QEMU EDU DMA transfer failed");
+    let result =
+        unsafe { reference_edu::self_test(function, &mut page_table, &mut frames, offset) }
+            .expect("real QEMU EDU DMA transfer failed");
 
     if result.verified_bytes != phoenix_reference_edu::EDU_TRANSFER_BYTES
         || result.returned_dma_pages != 1

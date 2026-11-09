@@ -47,11 +47,7 @@ impl RamAuditReport {
         F: FnMut(u64) -> ObservedMapping,
     {
         let physical_limit = 1u64 << snapshot.physical_bits();
-        if start >= end
-            || start % PAGE_SIZE != 0
-            || end % PAGE_SIZE != 0
-            || end > physical_limit
-        {
+        if start >= end || start % PAGE_SIZE != 0 || end % PAGE_SIZE != 0 || end > physical_limit {
             return Err(RamAuditError::InvalidRegion);
         }
 
@@ -68,7 +64,10 @@ impl RamAuditReport {
                     physical: translated,
                     pat_index,
                 } if translated == physical && pat_index < 8 => {
-                    if snapshot.verify_writeback_alias(physical, 1, pat_index).is_ok() {
+                    if snapshot
+                        .verify_writeback_alias(physical, 1, pat_index)
+                        .is_ok()
+                    {
                         self.wb_candidates += 1;
                     } else {
                         self.blocked_pages += 1;
@@ -195,12 +194,9 @@ mod tests {
             );
         }
         assert_eq!(
-            report.inspect_region(
-                &state,
-                0,
-                (MAX_AUDIT_PAGES + 1) * PAGE_SIZE,
-                |_| panic!("over-limit region scanned")
-            ),
+            report.inspect_region(&state, 0, (MAX_AUDIT_PAGES + 1) * PAGE_SIZE, |_| panic!(
+                "over-limit region scanned"
+            )),
             Err(RamAuditError::LimitExceeded)
         );
         assert_eq!(report.scanned_pages, 0);

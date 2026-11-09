@@ -312,10 +312,12 @@ mod tests {
             snapshot(0x406, &[]),
             Err(DmaCacheError::InvalidMtrr)
         ));
-        assert!(matches!(
-            snapshot(0x800, &[]),
-            Err(DmaCacheError::InvalidMtrr)
-        ));
+        let uncacheable = snapshot(0x800, &[]).unwrap();
+        assert_eq!(uncacheable.effective_mtrr_type(0x20_0000), Ok(0));
+        assert_eq!(
+            uncacheable.verify_writeback_alias(0x20_0000, 1, 0),
+            Err(DmaCacheError::UnknownMemoryType)
+        );
         let state = snapshot(0x806, &[(0x6, MTRR_RANGE_VALID | (1u64 << 40))]).unwrap();
         assert_eq!(
             state.verify_writeback_alias(0x20_0000, 1, 0),

@@ -130,6 +130,10 @@ impl DmaCacheSnapshot {
         self.mtrr_default as u8
     }
 
+    pub fn pat_memory_type(&self, index: u8) -> Option<u8> {
+        pat_type(self.pat, index)
+    }
+
     /// Итоговый тип MTRR для физической страницы. Фиксированные MTRR
     /// имеют приоритет на первом мегабайте. При отсутствии совпадений
     /// применяем тип по умолчанию, а не автоматически WB.

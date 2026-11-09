@@ -91,11 +91,7 @@ impl DmaCacheSnapshot {
     /// Дополнительное правило AMD для 4 ГиБ..TOP_MEM2. Оно действует
     /// только при одновременной установке SYSCFG.TOM2 и SYSCFG.FWB.
     /// Не изменяет регистры, не делает неподтверждённые алиасы допустимыми.
-    pub fn with_amd_top_mem2(
-        mut self,
-        syscfg: u64,
-        top_mem2: u64,
-    ) -> Result<Self, DmaCacheError> {
+    pub fn with_amd_top_mem2(mut self, syscfg: u64, top_mem2: u64) -> Result<Self, DmaCacheError> {
         let active = syscfg & (AMD_SYSCFG_TOM2_ENABLE | AMD_SYSCFG_TOM2_FORCE_WB)
             == AMD_SYSCFG_TOM2_ENABLE | AMD_SYSCFG_TOM2_FORCE_WB;
         if !active {

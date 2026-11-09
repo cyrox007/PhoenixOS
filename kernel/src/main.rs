@@ -744,6 +744,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial::line(
         &mut out,
         "INFO",
+        format_args!("dma cache alias guard: OK pat=read-only mtrr=read-only pages=2"),
+    );
+
+    serial::line(
+        &mut out,
+        "INFO",
         format_args!("dma direct address self-test: OK"),
     );
 

@@ -43,6 +43,10 @@ class DiagnosticIsolationTests(unittest.TestCase):
         self.assertIn("table.pat_index", self.hardware)
         self.assertNotIn("map_4k(", self.hardware)
         self.assertNotIn("unmap_4k(", self.hardware)
+        self.assertIn("audit_ram_regions", self.hardware)
+        self.assertIn("RamAuditReport::default()", self.hardware)
+        self.assertIn("ObservedMapping::Mapped", self.hardware)
+        self.assertIn("scope=direct-only", self.hardware)
 
     def test_boot_medium_is_read_only_and_no_test_disk(self):
         command = self.runner.build_command("diag.img", "code.fd", "vars.fd")

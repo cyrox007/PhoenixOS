@@ -3,7 +3,7 @@
 
 use bootloader_api::info::{FrameBuffer, FrameBufferInfo, PixelFormat};
 use core::fmt::{self, Write};
-use noto_sans_mono_bitmap::{get_raster, FontWeight, RasterHeight};
+use noto_sans_mono_bitmap::{FontWeight, RasterHeight, get_raster};
 use uart_16550::backend::PioBackend;
 use uart_16550::{Config, Uart16550Tty};
 
@@ -127,7 +127,9 @@ impl Write for Screen<'_> {
 
 pub fn emergency(args: fmt::Arguments<'_>) {
     use core::fmt::Write;
-    if let Ok(mut console) = unsafe { Uart16550Tty::<PioBackend>::new_port(0x3f8, Config::default()) } {
+    if let Ok(mut console) =
+        unsafe { Uart16550Tty::<PioBackend>::new_port(0x3f8, Config::default()) }
+    {
         let _ = console.write_str("[PANIC] ");
         let _ = console.write_fmt(args);
         let _ = console.write_str("\n");

@@ -5,7 +5,7 @@
 // Только независимый проверочный образ: чтение ЦП/ACPI/PCI и вывод в GOP/COM1.
 
 use bootloader_api::config::{BootloaderConfig, Mapping};
-use bootloader_api::{entry_point, BootInfo};
+use bootloader_api::{BootInfo, entry_point};
 use core::panic::PanicInfo;
 
 macro_rules! log {

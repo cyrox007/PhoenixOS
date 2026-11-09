@@ -198,7 +198,7 @@ fn effective_variable_type(types: u8, default: u8) -> Result<u8, DmaCacheError> 
     if types.count_ones() == 1 {
         return Ok(types.trailing_zeros() as u8);
     }
-    if types == (1 << 4) | (1 << PAT_WRITE_BACK) {
+    if types == ((1u8 << 4) | (1u8 << PAT_WRITE_BACK)) {
         return Ok(4);
     }
     Err(DmaCacheError::UnknownMemoryType)

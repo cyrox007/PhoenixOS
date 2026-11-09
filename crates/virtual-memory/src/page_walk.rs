@@ -238,3 +238,170 @@ mod tests {
         );
     }
 }
+
+// Ограниченный анализ псевдонимов текущей CR3.
+// Это не подтверждение того, что альтернативных адресных пространств нет.
+use crate::dma_cache::DmaCacheSnapshot;
+
+pub const MAX_ALIAS_PAGES: u64 = 4_194_304;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AliasAuditReport {
+    pub alternative_leaves: u64,
+    pub checked_pages: u64,
+    pub compatible_pages: u64,
+    pub conflicting_pages: u64,
+    pub unavailable_pages: u64,
+    pub first_conflict: Option<u64>,
+    pub first_unavailable: Option<u64>,
+}
+
+impl AliasAuditReport {
+    /// Сопоставляет только физические страницы RAM, на которые указывают
+    /// альтернативные отображения текущей CR3. Замыкание возвращает
+    /// физический кадр и PAT текущего прямого отображения.
+    pub fn inspect_leaf<F>(
+        &mut self,
+        leaf: MappedLeaf,
+        physical_offset: u64,
+        ram_regions: &[(u64, u64)],
+        snapshot: &DmaCacheSnapshot,
+        mut direct: F,
+    ) -> Result<(), PageWalkError>
+    where
+        F: FnMut(u64) -> Option<(u64, u8)>,
+    {
+        if physical_offset.checked_add(leaf.physical_start) == Some(leaf.virtual_start) {
+            return Ok(());
+        }
+        let end = leaf
+            .physical_start
+            .checked_add(leaf.size)
+            .ok_or(PageWalkError::InvalidEntry)?;
+        for &(start, limit) in ram_regions {
+            if start >= limit {
+                return Err(PageWalkError::InvalidEntry);
+            }
+            let overlap_start = start.max(leaf.physical_start);
+            let overlap_end = limit.min(end);
+            if overlap_start >= overlap_end {
+                continue;
+            }
+            let page_count = (overlap_end - overlap_start) / PAGE_SIZE;
+            if self.checked_pages > MAX_ALIAS_PAGES.saturating_sub(page_count) {
+                return Err(PageWalkError::BudgetExceeded);
+            }
+            self.alternative_leaves += 1;
+            let mut page = overlap_start;
+            while page < overlap_end {
+                self.checked_pages += 1;
+                let result = direct(page);
+                match result {
+                    Some((found, index)) if found == page && index < 8 => {
+                        let same_type = snapshot.pat_memory_type(index)
+                            == snapshot.pat_memory_type(leaf.pat_index);
+                        if same_type && snapshot.pat_memory_type(index).is_some() {
+                            self.compatible_pages += 1;
+                        } else {
+                            self.conflicting_pages += 1;
+                            self.first_conflict.get_or_insert(page);
+                        }
+                    }
+                    _ => {
+                        self.unavailable_pages += 1;
+                        self.first_unavailable.get_or_insert(page);
+                    }
+                }
+                page += PAGE_SIZE;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod alias_tests {
+    use super::*;
+
+    const DEFAULT_PAT: u64 = 0x0007_0406_0007_0406;
+    fn snapshot() -> DmaCacheSnapshot {
+        DmaCacheSnapshot::new(DEFAULT_PAT, 0x806, 48, &[]).unwrap()
+    }
+    fn leaf(virtual_start: u64, pat_index: u8) -> MappedLeaf {
+        MappedLeaf {
+            virtual_start,
+            physical_start: 0x20_0000,
+            size: 8192,
+            pat_index,
+        }
+    }
+
+    #[test]
+    fn direct_leaf_is_not_counted_as_alias() {
+        let mut report = AliasAuditReport::default();
+        report
+            .inspect_leaf(
+                leaf(0xffff_8000_0020_0000, 0),
+                0xffff_8000_0000_0000,
+                &[(0x20_0000, 0x20_2000)],
+                &snapshot(),
+                |_| panic!("direct mapping should not be rechecked"),
+            )
+            .unwrap();
+        assert_eq!(report.checked_pages, 0);
+    }
+
+    #[test]
+    fn compatible_and_conflicting_aliases_are_counted() {
+        let mut report = AliasAuditReport::default();
+        let ram = [(0x20_0000, 0x20_2000)];
+        report
+            .inspect_leaf(leaf(0xffff_9000_0020_0000, 0), 0, &ram, &snapshot(), |p| {
+                Some((p, 0))
+            })
+            .unwrap();
+        report
+            .inspect_leaf(leaf(0xffff_a000_0020_0000, 3), 0, &ram, &snapshot(), |p| {
+                Some((p, 0))
+            })
+            .unwrap();
+        assert_eq!(report.checked_pages, 4);
+        assert_eq!(report.compatible_pages, 2);
+        assert_eq!(report.conflicting_pages, 2);
+        assert_eq!(report.first_conflict, Some(0x20_0000));
+    }
+
+    #[test]
+    fn unknown_direct_mapping_cannot_count_as_safe() {
+        let mut report = AliasAuditReport::default();
+        report
+            .inspect_leaf(
+                leaf(0xffff_9000_0020_0000, 0),
+                0,
+                &[(0x20_0000, 0x20_2000)],
+                &snapshot(),
+                |_| None,
+            )
+            .unwrap();
+        assert_eq!(report.unavailable_pages, 2);
+        assert_eq!(report.compatible_pages, 0);
+    }
+
+    #[test]
+    fn alias_limit_is_strict() {
+        let mut report = AliasAuditReport {
+            checked_pages: MAX_ALIAS_PAGES,
+            ..AliasAuditReport::default()
+        };
+        assert_eq!(
+            report.inspect_leaf(
+                leaf(0xffff_9000_0020_0000, 0),
+                0,
+                &[(0x20_0000, 0x20_2000)],
+                &snapshot(),
+                |_| panic!("over-cap must not check pages"),
+            ),
+            Err(PageWalkError::BudgetExceeded)
+        );
+    }
+}

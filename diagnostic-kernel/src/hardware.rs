@@ -44,6 +44,10 @@ pub struct HardwareContext {
     ram_regions: [(u64, u64); MAX_RAM_REGIONS],
     ram_region_count: usize,
     ram_map_invalid: bool,
+    memory_entries: u32,
+    nonusable_entries: u32,
+    usable_bytes: u64,
+    high_usable_bytes: u64,
 }
 
 impl HardwareContext {
@@ -51,10 +55,26 @@ impl HardwareContext {
         let mut ram_regions = [(0, 0); MAX_RAM_REGIONS];
         let mut ram_region_count = 0;
         let mut ram_map_invalid = false;
+        let mut memory_entries = 0u32;
+        let mut nonusable_entries = 0u32;
+        let mut usable_bytes = 0u64;
+        let mut high_usable_bytes = 0u64;
 
         for region in info.memory_regions.iter() {
+            memory_entries = memory_entries.saturating_add(1);
             if region.kind != MemoryRegionKind::Usable {
+                nonusable_entries = nonusable_entries.saturating_add(1);
                 continue;
+            }
+            if region.end < region.start {
+                ram_map_invalid = true;
+                continue;
+            }
+            usable_bytes = usable_bytes.saturating_add(region.end - region.start);
+            if region.end > 0x1_0000_0000 {
+                high_usable_bytes = high_usable_bytes.saturating_add(
+                    region.end - region.start.max(0x1_0000_0000),
+                );
             }
             let start = region.start.max(MIN_AUDITED_RAM);
             let end = region.end;
@@ -91,6 +111,10 @@ impl HardwareContext {
             ram_regions,
             ram_region_count,
             ram_map_invalid,
+            memory_entries,
+            nonusable_entries,
+            usable_bytes,
+            high_usable_bytes,
         }
     }
 }
@@ -189,6 +213,16 @@ impl ConfigAccess for DirectEcam<'_> {
 }
 
 pub fn run(context: &HardwareContext, out: &mut Report<'_>) {
+    log!(
+        out,
+        "[INFO] diagnostic memory map: entries={} RAM={} other={} RAM_MiB={} high_MiB={} invalid={}",
+        context.memory_entries,
+        context.ram_region_count,
+        context.nonusable_entries,
+        context.usable_bytes >> 20,
+        context.high_usable_bytes >> 20,
+        context.ram_map_invalid
+    );
     cpu(context, out);
     let Some(rsdp) = context.rsdp else {
         log!(out, "[WARN] diagnostic ACPI: no RSDP");
@@ -663,6 +697,16 @@ fn acpi_and_pci(rsdp_address: u64, memory: &ReadOnlyMemory, out: &mut Report<'_>
             }
             if function.class_code == 2 {
                 network = network.saturating_add(1);
+                log!(
+                    out,
+                    "[INFO] diagnostic PCI network: {:02x}:{:02x}.{} vendor={:04x} device={:04x} busmaster={} DMA-approved=false",
+                    function.bus,
+                    function.device,
+                    function.function,
+                    function.vendor_id,
+                    function.device_id,
+                    command & 4 != 0
+                );
             }
             if total <= 8 {
                 log!(

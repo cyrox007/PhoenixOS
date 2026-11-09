@@ -244,9 +244,7 @@ mod tests {
             Err(NetworkError::InvalidMacAddress)
         );
         assert_eq!(
-            MacAddress::new([0x02, 0, 0, 0, 0, 1])
-                .unwrap()
-                .octets(),
+            MacAddress::new([0x02, 0, 0, 0, 0, 1]).unwrap().octets(),
             [0x02, 0, 0, 0, 0, 1]
         );
     }

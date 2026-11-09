@@ -8,6 +8,7 @@ use core::arch::x86_64::__cpuid;
 use phoenix_acpi::{McfgInfo, RSDP_V2_SIZE, Rsdp, SDT_HEADER_SIZE, SdtHeader, Xsdt};
 use phoenix_pcie::{ConfigAccess, EcamSegment};
 use phoenix_vm::ActivePageTable;
+use phoenix_vm::ram_audit::{ObservedMapping, RamAuditReport};
 use phoenix_vm::dma_cache::{
     DmaCacheSnapshot, FIXED_MTRR_REGISTERS, MAX_VARIABLE_MTRRS, memory_type_name,
 };
@@ -22,6 +23,8 @@ const AMD_SYSCFG: u32 = 0xc001_0010;
 const AMD_TOP_MEM2: u32 = 0xc001_001d;
 const AMD_TOM2_ENABLE: u64 = 1 << 21;
 const AMD_TOM2_FORCE_WB: u64 = 1 << 22;
+const MIN_AUDITED_RAM: u64 = 0x10_0000;
+const MAX_RAM_REGIONS: usize = 256;
 
 #[derive(Clone, Copy, Debug)]
 enum ReadError {
@@ -35,10 +38,45 @@ pub struct HardwareContext {
     physical_offset: Option<u64>,
     physical_end: u64,
     ram_samples: [Option<u64>; 2],
+    ram_regions: [(u64, u64); MAX_RAM_REGIONS],
+    ram_region_count: usize,
+    ram_map_invalid: bool,
 }
 
 impl HardwareContext {
     pub fn from_boot_info(info: &BootInfo) -> Self {
+        let mut ram_regions = [(0, 0); MAX_RAM_REGIONS];
+        let mut ram_region_count = 0;
+        let mut ram_map_invalid = false;
+
+        for region in info.memory_regions.iter() {
+            if region.kind != MemoryRegionKind::Usable {
+                continue;
+            }
+            let start = region.start.max(MIN_AUDITED_RAM);
+            let end = region.end;
+            if end <= MIN_AUDITED_RAM {
+                continue;
+            }
+            if start >= end || start % 4096 != 0 || end % 4096 != 0 {
+                ram_map_invalid = true;
+                continue;
+            }
+            if ram_region_count == MAX_RAM_REGIONS {
+                ram_map_invalid = true;
+                continue;
+            }
+            let overlaps = ram_regions[..ram_region_count]
+                .iter()
+                .any(|&(a, b)| start < b && a < end);
+            if overlaps {
+                ram_map_invalid = true;
+                continue;
+            }
+            ram_regions[ram_region_count] = (start, end);
+            ram_region_count += 1;
+        }
+
         Self {
             rsdp: info.rsdp_addr.into_option(),
             physical_offset: info.physical_memory_offset.into_option(),
@@ -47,6 +85,9 @@ impl HardwareContext {
                 .iter()
                 .fold(PHYSICAL_MAPPING_MINIMUM, |end, region| end.max(region.end)),
             ram_samples: select_ram_samples(info),
+            ram_regions,
+            ram_region_count,
+            ram_map_invalid,
         }
     }
 }
@@ -276,6 +317,7 @@ fn cpu(context: &HardwareContext, out: &mut Report<'_>) {
     for sample in context.ram_samples.iter().flatten() {
         report_memory_sample(context, &snapshot, table.as_ref(), *sample, out);
     }
+    audit_ram_regions(context, &snapshot, table.as_ref(), out);
     log!(
         out,
         "[INFO] diagnostic IOMMU: table presence only, not enabled status"
@@ -350,6 +392,68 @@ fn pat_type_from_snapshot(snapshot: &DmaCacheSnapshot, index: u8) -> &'static st
         .pat_memory_type(index)
         .map(memory_type_name)
         .unwrap_or("unknown")
+}
+
+/// Полный постраничный обход доступной RAM выше 1 МиБ, ограниченный
+/// 16 ГиБ и 256 участками. Анализируется ТОЛЬКО прямое отображение.
+/// Отсутствие других виртуальных псевдонимов эта проверка не доказывает.
+fn audit_ram_regions(
+    context: &HardwareContext,
+    snapshot: &DmaCacheSnapshot,
+    table: Option<&ActivePageTable>,
+    out: &mut Report<'_>,
+) {
+    let Some(table) = table else {
+        log!(out, "[WARN] diagnostic RAM audit: complete=false reason=no-page-table");
+        return;
+    };
+    let Some(offset) = context.physical_offset else {
+        log!(out, "[WARN] diagnostic RAM audit: complete=false reason=no-offset");
+        return;
+    };
+    let mut report = RamAuditReport::default();
+    let mut incomplete = context.ram_map_invalid || context.ram_region_count == 0;
+    for &(start, end) in &context.ram_regions[..context.ram_region_count] {
+        let result = report.inspect_region(snapshot, start, end, |physical| {
+            let virtual_address = offset
+                .checked_add(physical)
+                .and_then(|raw| VirtAddr::try_new(raw).ok());
+            let Some(virtual_address) = virtual_address else {
+                return ObservedMapping::Missing;
+            };
+            let Some(mapped) = table.translate_addr(virtual_address) else {
+                return ObservedMapping::Missing;
+            };
+            let Some(pat_index) = table.pat_index(virtual_address) else {
+                return ObservedMapping::Missing;
+            };
+            ObservedMapping::Mapped {
+                physical: mapped.as_u64(),
+                pat_index,
+            }
+        });
+        if result.is_err() {
+            incomplete = true;
+            break;
+        }
+    }
+
+    let complete = !incomplete && report.invalid_mappings == 0;
+    log!(
+        out,
+        "[INFO] diagnostic RAM audit: complete={} pages={} WB={} blocked={} invalid={} scope=direct-only",
+        complete,
+        report.scanned_pages,
+        report.wb_candidates,
+        report.blocked_pages,
+        report.invalid_mappings
+    );
+    if let Some(physical) = report.first_invalid {
+        log!(out, "[WARN] diagnostic RAM audit: first_invalid={physical:#x}");
+    }
+    if let Some(physical) = report.first_blocked {
+        log!(out, "[INFO] diagnostic RAM audit: first_blocked={physical:#x}");
+    }
 }
 
 fn acpi_and_pci(rsdp_address: u64, memory: &ReadOnlyMemory, out: &mut Report<'_>) {

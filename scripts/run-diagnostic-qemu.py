@@ -18,6 +18,8 @@ MARKERS = (
     "diagnostic cache: OK",
     "diagnostic cache sample: phys=",
     "WB-candidate=true",
+    "diagnostic RAM audit: complete=true",
+    "scope=direct-only",
     "diagnostic ACPI: OK",
     "diagnostic PCI: OK",
     "diagnostic complete: OK",

@@ -43,6 +43,10 @@ class DiagnosticIsolationTests(unittest.TestCase):
         self.assertIn("table.pat_index", self.hardware)
         self.assertNotIn("map_4k(", self.hardware)
         self.assertNotIn("unmap_4k(", self.hardware)
+        self.assertIn("audit_ram_regions", self.hardware)
+        self.assertIn("RamAuditReport::default()", self.hardware)
+        self.assertIn("ObservedMapping::Mapped", self.hardware)
+        self.assertIn("scope=direct-only", self.hardware)
 
     def test_boot_medium_is_read_only_and_no_test_disk(self):
         command = self.runner.build_command("diag.img", "code.fd", "vars.fd")
@@ -64,6 +68,8 @@ class DiagnosticIsolationTests(unittest.TestCase):
         self.assertIn("diagnostic cache: OK", required)
         self.assertIn("diagnostic cache sample: phys=", required)
         self.assertIn("WB-candidate=true", required)
+        self.assertIn("diagnostic RAM audit: complete=true", required)
+        self.assertIn("scope=direct-only", required)
         self.assertIn("diagnostic ACPI: OK", required)
         self.assertIn("diagnostic PCI: OK", required)
         self.assertIn("diagnostic complete: OK", required)

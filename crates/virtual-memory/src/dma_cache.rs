@@ -10,6 +10,10 @@ const PAT_UNCACHEABLE: u8 = 0;
 const MTRR_ENABLE: u64 = 1 << 11;
 const MTRR_FIXED_ENABLE: u64 = 1 << 10;
 const MTRR_RANGE_VALID: u64 = 1 << 11;
+const AMD_SYSCFG_TOM2_ENABLE: u64 = 1 << 21;
+const AMD_SYSCFG_TOM2_FORCE_WB: u64 = 1 << 22;
+const FOUR_GIB: u64 = 1 << 32;
+const AMD_TOP_MEM2_ALIGNMENT: u64 = 1 << 23;
 pub const MAX_VARIABLE_MTRRS: usize = 16;
 pub const FIXED_MTRR_REGISTERS: usize = 11;
 
@@ -35,6 +39,7 @@ pub struct DmaCacheSnapshot {
     variable: [(u64, u64); MAX_VARIABLE_MTRRS],
     variable_count: usize,
     fixed: Option<[u64; FIXED_MTRR_REGISTERS]>,
+    amd_forced_wb_end: Option<u64>,
 }
 
 impl DmaCacheSnapshot {
@@ -72,6 +77,7 @@ impl DmaCacheSnapshot {
             variable: ranges,
             variable_count: variable.len(),
             fixed: None,
+            amd_forced_wb_end: None,
         })
     }
 
@@ -80,6 +86,36 @@ impl DmaCacheSnapshot {
     pub fn with_fixed(mut self, fixed: [u64; FIXED_MTRR_REGISTERS]) -> Self {
         self.fixed = Some(fixed);
         self
+    }
+
+    /// Дополнительное правило AMD для 4 ГиБ..TOP_MEM2. Оно действует
+    /// только при одновременной установке SYSCFG.TOM2 и SYSCFG.FWB.
+    /// Не изменяет регистры, не делает неподтверждённые алиасы допустимыми.
+    pub fn with_amd_top_mem2(
+        mut self,
+        syscfg: u64,
+        top_mem2: u64,
+    ) -> Result<Self, DmaCacheError> {
+        let active = syscfg & (AMD_SYSCFG_TOM2_ENABLE | AMD_SYSCFG_TOM2_FORCE_WB)
+            == AMD_SYSCFG_TOM2_ENABLE | AMD_SYSCFG_TOM2_FORCE_WB;
+        if !active {
+            return Ok(self);
+        }
+
+        let physical_limit = 1u64 << self.physical_bits;
+        if top_mem2 <= FOUR_GIB
+            || top_mem2 > physical_limit
+            || top_mem2 % AMD_TOP_MEM2_ALIGNMENT != 0
+        {
+            return Err(DmaCacheError::InvalidMtrr);
+        }
+
+        self.amd_forced_wb_end = Some(top_mem2);
+        Ok(self)
+    }
+
+    pub const fn amd_forced_wb_end(&self) -> Option<u64> {
+        self.amd_forced_wb_end
     }
 
     pub const fn variable_count(&self) -> usize {
@@ -130,7 +166,13 @@ impl DmaCacheSnapshot {
             matched_types |= 1u8 << kind;
         }
 
-        effective_variable_type(matched_types, self.default_memory_type())
+        let mut fallback = self.default_memory_type();
+        if let Some(top_mem2) = self.amd_forced_wb_end {
+            if physical_page >= FOUR_GIB && physical_page < top_mem2 {
+                fallback = PAT_WRITE_BACK;
+            }
+        }
+        effective_variable_type(matched_types, fallback)
     }
 
     /// Разрешение только двух WB-алиасов обычной RAM. UC/WC/MMIO сюда
@@ -461,6 +503,72 @@ mod tests {
             snapshot(0xc00, &[]).unwrap().effective_mtrr_type(0x20_0001),
             Err(DmaCacheError::InvalidRange)
         );
+    }
+
+    #[test]
+    fn amd_tom2_force_wb_only_inside_enabled_high_memory_window() {
+        let enabled = (1 << 21) | (1 << 22);
+        let top = 0x2_0000_0000;
+        let state = snapshot(0xc00, &[])
+            .unwrap()
+            .with_amd_top_mem2(enabled, top)
+            .unwrap();
+
+        assert_eq!(state.default_memory_type(), 0);
+        assert_eq!(state.amd_forced_wb_end(), Some(top));
+        assert_eq!(state.effective_mtrr_type(FOUR_GIB - PAGE_SIZE), Ok(0));
+        assert_eq!(state.effective_mtrr_type(FOUR_GIB), Ok(6));
+        assert_eq!(state.effective_mtrr_type(top - PAGE_SIZE), Ok(6));
+        assert_eq!(state.effective_mtrr_type(top), Ok(0));
+        state.verify_writeback_alias(FOUR_GIB, 1, 0).unwrap();
+        assert_eq!(
+            state.verify_writeback_alias(top - PAGE_SIZE, 2, 0),
+            Err(DmaCacheError::UnknownMemoryType)
+        );
+        assert_eq!(
+            state.verify_writeback_alias(FOUR_GIB, 1, 3),
+            Err(DmaCacheError::ConflictingAlias)
+        );
+    }
+
+    #[test]
+    fn amd_tom2_disabled_or_invalid_must_not_create_writeback_permissions() {
+        let top = 0x2_0000_0000;
+        for syscfg in [0, 1 << 21, 1 << 22] {
+            let state = snapshot(0xc00, &[])
+                .unwrap()
+                .with_amd_top_mem2(syscfg, top)
+                .unwrap();
+            assert_eq!(state.amd_forced_wb_end(), None);
+            assert_eq!(state.effective_mtrr_type(FOUR_GIB), Ok(0));
+        }
+        for bad_top in [FOUR_GIB, FOUR_GIB + PAGE_SIZE, 1u64 << 48] {
+            assert!(matches!(
+                snapshot(0xc00, &[])
+                    .unwrap()
+                    .with_amd_top_mem2((1 << 21) | (1 << 22), bad_top),
+                Err(DmaCacheError::InvalidMtrr)
+            ));
+        }
+    }
+
+    #[test]
+    fn explicit_variable_mtrrs_override_amd_forced_default() {
+        let base = snapshot(0xc00, &[region(FOUR_GIB, FOUR_GIB, 0)])
+            .unwrap()
+            .with_amd_top_mem2((1 << 21) | (1 << 22), 0x2_0000_0000)
+            .unwrap();
+        assert_eq!(base.effective_mtrr_type(FOUR_GIB), Ok(0));
+        assert_eq!(
+            base.verify_writeback_alias(FOUR_GIB, 1, 0),
+            Err(DmaCacheError::UnknownMemoryType)
+        );
+
+        let write_through = snapshot(0xc00, &[region(FOUR_GIB, FOUR_GIB, 4)])
+            .unwrap()
+            .with_amd_top_mem2((1 << 21) | (1 << 22), 0x2_0000_0000)
+            .unwrap();
+        assert_eq!(write_through.effective_mtrr_type(FOUR_GIB), Ok(4));
     }
 
     #[test]

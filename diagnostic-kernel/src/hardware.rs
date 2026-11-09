@@ -294,12 +294,18 @@ fn report_memory_sample(
     let kind = match snapshot.effective_mtrr_type(physical) {
         Ok(kind) => kind,
         Err(error) => {
-            log!(out, "[WARN] diagnostic cache sample: phys={physical:#x} MTRR={error:?}");
+            log!(
+                out,
+                "[WARN] diagnostic cache sample: phys={physical:#x} MTRR={error:?}"
+            );
             return;
         }
     };
     let Some(table) = table else {
-        log!(out, "[WARN] diagnostic cache sample: phys={physical:#x} PAT=no-table");
+        log!(
+            out,
+            "[WARN] diagnostic cache sample: phys={physical:#x} PAT=no-table"
+        );
         return;
     };
     let address = context
@@ -307,15 +313,24 @@ fn report_memory_sample(
         .and_then(|offset| offset.checked_add(physical))
         .and_then(|address| VirtAddr::try_new(address).ok());
     let Some(address) = address else {
-        log!(out, "[WARN] diagnostic cache sample: phys={physical:#x} PAT=bad-address");
+        log!(
+            out,
+            "[WARN] diagnostic cache sample: phys={physical:#x} PAT=bad-address"
+        );
         return;
     };
     if table.translate_addr(address).map(|p| p.as_u64()) != Some(physical) {
-        log!(out, "[WARN] diagnostic cache sample: phys={physical:#x} PAT=bad-mapping");
+        log!(
+            out,
+            "[WARN] diagnostic cache sample: phys={physical:#x} PAT=bad-mapping"
+        );
         return;
     }
     let Some(index) = table.pat_index(address) else {
-        log!(out, "[WARN] diagnostic cache sample: phys={physical:#x} PAT=unmapped");
+        log!(
+            out,
+            "[WARN] diagnostic cache sample: phys={physical:#x} PAT=unmapped"
+        );
         return;
     };
     let pat_kind = pat_type_from_snapshot(snapshot, index);
@@ -331,7 +346,8 @@ fn report_memory_sample(
 }
 
 fn pat_type_from_snapshot(snapshot: &DmaCacheSnapshot, index: u8) -> &'static str {
-    snapshot.pat_memory_type(index)
+    snapshot
+        .pat_memory_type(index)
         .map(memory_type_name)
         .unwrap_or("unknown")
 }

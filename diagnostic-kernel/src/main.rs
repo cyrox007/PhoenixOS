@@ -37,12 +37,40 @@ fn kernel_main(info: &'static mut BootInfo) -> ! {
     log!(report, "[INFO] storage controllers: not initialized");
     log!(report, "[INFO] device DMA: disabled");
     hardware::run(&context, &mut report);
-    log!(report, "[INFO] diagnostic complete: OK");
+    if report.journal_complete() {
+        log!(report, "[INFO] diagnostic complete: OK");
+    } else {
+        log!(report, "[WARN] diagnostic complete: INCOMPLETE journal-overflow");
+    }
+    let mut page = report.page_count().saturating_sub(1);
+    report.display_page(page);
 
     // Не перезагружаем компьютер автоматически, чтобы отчёт оставался
     // на экране. Не запускаем драйверы, задачи или прерывания.
+    // Только чтение состояния совместимого контроллера клавиатуры.
+    // Если он отсутствует, последний экран остаётся видимым.
+    let mut extended = false;
     loop {
-        x86_64::instructions::hlt();
+        use x86_64::instructions::port::Port;
+        let status = unsafe { Port::<u8>::new(0x64).read() };
+        if status & 1 == 0 {
+            core::hint::spin_loop();
+            continue;
+        }
+        let code = unsafe { Port::<u8>::new(0x60).read() };
+        if code == 0xe0 {
+            extended = true;
+            continue;
+        }
+        if extended && code == 0x49 {
+            page = page.saturating_sub(1);
+            report.display_page(page);
+        }
+        if extended && code == 0x51 {
+            page = (page + 1).min(report.page_count().saturating_sub(1));
+            report.display_page(page);
+        }
+        extended = false;
     }
 }
 

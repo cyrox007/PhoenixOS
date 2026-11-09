@@ -72,6 +72,7 @@ input mouse source=2 buttons=0 dx=12 dy=-6 wheel=0 seq=5 lost=0
 input shell event: OK
 input userspace app: OK
 xhci usb interfaces: OK
+dma cache alias guard: OK pat=read-only mtrr=read-only pages=2
 dma kernel mapping self-test: OK
 dma direct address self-test: OK
 virtual memory self-test: OK

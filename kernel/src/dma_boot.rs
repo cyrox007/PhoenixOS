@@ -2,7 +2,8 @@
 //!
 //! Контроллер в этом испытании не участвует: проверяются распределитель,
 //! активные таблицы страниц, владение виртуальным окном и обратный порядок
-//! освобождения. Политику PAT/MTRR аппаратного устройства оно не подтверждает.
+//! освобождения. Программно сверяются PAT/MTRR и WB-алиасы;
+//! реальные устройства и изменение настроек кэша не проверяются.
 
 use phoenix_dma::DmaLayout;
 use phoenix_dma::mapping::{DeviceMapping, DirectDmaAperture, PhysicalAddress, QemuDirectDma};
@@ -58,6 +59,33 @@ impl KernelDmaArena {
             .expect("системный распределитель не смог выделить физические страницы DMA");
         let physical = first_frame.start_address().as_u64();
 
+        // Перед созданием второго WB-алиаса сверяем аппаратные PAT/MTRR
+        // и фактический индекс PAT линейного отображения загрузчика.
+        // При неизвестном режиме — отказ до отображения страниц/запуска DMA.
+        let cache = crate::arch::x86_64::dma_cache::snapshot()
+            .expect("невозможно подтвердить аппаратную политику кэша DMA");
+        for index in 0..TEST_PAGES {
+            let offset = index * phoenix_vm::PAGE_SIZE;
+            let page_physical = physical + offset;
+            let alias_address = VirtAddr::new(
+                physical_memory_offset
+                    .as_u64()
+                    .checked_add(page_physical)
+                    .expect("переполнение линейного адреса памяти"),
+            );
+            assert_eq!(
+                table.translate_addr(alias_address).map(|p| p.as_u64()),
+                Some(page_physical),
+                "прямое отображение RAM не соответствует физической странице"
+            );
+            let index = table
+                .pat_index(alias_address)
+                .expect("не найден индекс PAT прямого отображения RAM");
+            cache
+                .verify_writeback_alias(page_physical, 1, index)
+                .expect("недопустимый тип кэширования или конфликт алиасов DMA");
+        }
+
         // В проверочном профиле QEMU нет IOMMU; здесь проверяется только
         // адресная модель, не аппаратная передача DMA.
         let aperture =
@@ -91,9 +119,9 @@ impl KernelDmaArena {
             );
         }
 
-        // В этой проверке обе процессорские ссылки на обычную RAM используют
-        // тип WriteBack. Реальное устройство, IOMMU и некогерентное DMA не
-        // проверяются; для физических машин нужна отдельная проверка PAT/MTRR.
+        // Оба процессорских WB-отображения разрешены только после проверки
+        // PAT/MTRR и индекса PAT прямого отображения. Реальное устройство,
+        // IOMMU и аппаратная согласованность DMA не подтверждаются.
         {
             let mut access = unsafe {
                 ActiveDmaPageAccess::with_cache_policy(table, frames, DmaCachePolicy::WriteBack)

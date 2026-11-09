@@ -1,5 +1,6 @@
 pub mod apic;
 pub mod context;
+pub mod dma_cache;
 pub mod exceptions;
 mod gdt;
 pub mod syscall;

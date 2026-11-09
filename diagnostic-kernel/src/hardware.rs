@@ -320,8 +320,8 @@ fn cpu(context: &HardwareContext, out: &mut Report<'_>) {
     for sample in context.ram_samples.iter().flatten() {
         report_memory_sample(context, &snapshot, table.as_ref(), *sample, out);
     }
-    audit_ram_regions(context, &snapshot, table.as_ref(), out);
-    audit_current_aliases(context, &snapshot, table.as_ref(), out);
+    let direct_ready = audit_ram_regions(context, &snapshot, table.as_ref(), out);
+    audit_current_aliases(context, &snapshot, table.as_ref(), direct_ready, out);
     log!(
         out,
         "[INFO] diagnostic IOMMU: table presence only, not enabled status"
@@ -406,20 +406,20 @@ fn audit_ram_regions(
     snapshot: &DmaCacheSnapshot,
     table: Option<&ActivePageTable>,
     out: &mut Report<'_>,
-) {
+) -> bool {
     let Some(table) = table else {
         log!(
             out,
             "[WARN] diagnostic RAM audit: complete=false reason=no-page-table"
         );
-        return;
+        return false;
     };
     let Some(offset) = context.physical_offset else {
         log!(
             out,
             "[WARN] diagnostic RAM audit: complete=false reason=no-offset"
         );
-        return;
+        return false;
     };
     let mut report = RamAuditReport::default();
     let mut incomplete = context.ram_map_invalid || context.ram_region_count == 0;
@@ -470,6 +470,7 @@ fn audit_ram_regions(
             "[INFO] diagnostic RAM audit: first_blocked={physical:#x}"
         );
     }
+    complete && report.blocked_pages == 0
 }
 
 /// Обход текущей CR3 без изменения таблиц и без обращения к MMIO.
@@ -478,6 +479,7 @@ fn audit_current_aliases(
     context: &HardwareContext,
     snapshot: &DmaCacheSnapshot,
     table: Option<&ActivePageTable>,
+    direct_ready: bool,
     out: &mut Report<'_>,
 ) {
     let Some(table) = table else {
@@ -597,8 +599,8 @@ fn audit_current_aliases(
     // Другие процессоры/таблицы, активная изоляция IOMMU и остановка
     // контроллера отсутствуют в диагностическом режиме.
     let evidence = DmaSafetyEvidence {
-        memory_map_valid: !context.ram_map_invalid,
-        direct_mapping_valid: true,
+        memory_map_valid: !context.ram_map_invalid && context.ram_region_count > 0,
+        direct_mapping_valid: direct_ready,
         current_cr3_aliases_clear: complete,
         ..DmaSafetyEvidence::default()
     };

@@ -542,7 +542,7 @@ mod tests {
             assert_eq!(state.amd_forced_wb_end(), None);
             assert_eq!(state.effective_mtrr_type(FOUR_GIB), Ok(0));
         }
-        for bad_top in [FOUR_GIB, FOUR_GIB + PAGE_SIZE, 1u64 << 48] {
+        for bad_top in [FOUR_GIB, FOUR_GIB + PAGE_SIZE, (1u64 << 48) + AMD_TOP_MEM2_ALIGNMENT] {
             assert!(matches!(
                 snapshot(0xc00, &[])
                     .unwrap()

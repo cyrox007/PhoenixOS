@@ -2,7 +2,9 @@
 //! Любая неизвестная конфигурация отклоняется на границе нового WB-алиаса.
 
 use core::arch::x86_64::__cpuid;
-use phoenix_vm::dma_cache::{DmaCacheError, DmaCacheSnapshot, FIXED_MTRR_REGISTERS, MAX_VARIABLE_MTRRS};
+use phoenix_vm::dma_cache::{
+    DmaCacheError, DmaCacheSnapshot, FIXED_MTRR_REGISTERS, MAX_VARIABLE_MTRRS,
+};
 
 const IA32_MTRRCAP: u32 = 0x00fe;
 const IA32_PAT: u32 = 0x0277;
@@ -43,8 +45,7 @@ pub fn snapshot() -> Result<DmaCacheSnapshot, DmaCacheError> {
     // 0..1 МиБ использует специальные фиксированные регистры.
     if default_type & (1 << 10) != 0 && cap & (1 << 8) != 0 {
         let registers = [
-            0x250, 0x258, 0x259, 0x268, 0x269, 0x26a, 0x26b,
-            0x26c, 0x26d, 0x26e, 0x26f,
+            0x250, 0x258, 0x259, 0x268, 0x269, 0x26a, 0x26b, 0x26c, 0x26d, 0x26e, 0x26f,
         ];
         let mut fixed = [0u64; FIXED_MTRR_REGISTERS];
         for (slot, register) in fixed.iter_mut().zip(registers) {

@@ -48,9 +48,7 @@ impl DmaCacheSnapshot {
         if variable.len() > MAX_VARIABLE_MTRRS {
             return Err(DmaCacheError::InsufficientCapacity);
         }
-        if pat_type(pat, 0) != Some(PAT_WRITE_BACK)
-            || pat_type(pat, 3) != Some(PAT_UNCACHEABLE)
-        {
+        if pat_type(pat, 0) != Some(PAT_WRITE_BACK) || pat_type(pat, 3) != Some(PAT_UNCACHEABLE) {
             return Err(DmaCacheError::InvalidPat);
         }
         // Для нового WB-алиаса требуем включённый MTRR и известный
@@ -88,12 +86,11 @@ impl DmaCacheSnapshot {
         let size = page_count
             .checked_mul(PAGE_SIZE)
             .ok_or(DmaCacheError::InvalidRange)?;
-        let end = physical_start.checked_add(size).ok_or(DmaCacheError::InvalidRange)?;
+        let end = physical_start
+            .checked_add(size)
+            .ok_or(DmaCacheError::InvalidRange)?;
         let physical_limit = 1u64 << self.physical_bits;
-        if page_count == 0
-            || physical_start % PAGE_SIZE != 0
-            || end > physical_limit
-        {
+        if page_count == 0 || physical_start % PAGE_SIZE != 0 || end > physical_limit {
             return Err(DmaCacheError::InvalidRange);
         }
         // Фиксированные MTRR ниже 1 МиБ здесь не разбираются.
@@ -110,10 +107,7 @@ impl DmaCacheSnapshot {
             else {
                 continue;
             };
-            if physical_start < region_end
-                && region_start < end
-                && kind != PAT_WRITE_BACK
-            {
+            if physical_start < region_end && region_start < end && kind != PAT_WRITE_BACK {
                 return Err(DmaCacheError::UnknownMemoryType);
             }
         }
@@ -160,13 +154,19 @@ mod tests {
 
     const DEFAULT_PAT: u64 = 0x0007_0406_0007_0406;
 
-    fn snapshot(mtrr_default: u64, regions: &[(u64, u64)]) -> Result<DmaCacheSnapshot, DmaCacheError> {
+    fn snapshot(
+        mtrr_default: u64,
+        regions: &[(u64, u64)],
+    ) -> Result<DmaCacheSnapshot, DmaCacheError> {
         DmaCacheSnapshot::new(DEFAULT_PAT, mtrr_default, 48, regions)
     }
 
     fn region(base: u64, size: u64, kind: u8) -> (u64, u64) {
         let physical_mask = ((1u64 << 48) - 1) & !(PAGE_SIZE - 1);
-        (base | u64::from(kind), (physical_mask & !(size - 1)) | MTRR_RANGE_VALID)
+        (
+            base | u64::from(kind),
+            (physical_mask & !(size - 1)) | MTRR_RANGE_VALID,
+        )
     }
 
     #[test]
@@ -180,48 +180,74 @@ mod tests {
     #[test]
     fn uncached_direct_alias_is_rejected() {
         let state = snapshot(0xc06, &[]).unwrap();
-        assert_eq!(state.verify_writeback_alias(0x20_0000, 1, 3),
-            Err(DmaCacheError::ConflictingAlias));
-        assert_eq!(state.verify_writeback_alias(0x20_0000, 1, 8),
-            Err(DmaCacheError::ConflictingAlias));
+        assert_eq!(
+            state.verify_writeback_alias(0x20_0000, 1, 3),
+            Err(DmaCacheError::ConflictingAlias)
+        );
+        assert_eq!(
+            state.verify_writeback_alias(0x20_0000, 1, 8),
+            Err(DmaCacheError::ConflictingAlias)
+        );
     }
 
     #[test]
     fn mixed_mtrr_region_is_rejected() {
         let state = snapshot(0xc06, &[region(0x20_0000, 0x20_0000, 0)]).unwrap();
-        assert_eq!(state.verify_writeback_alias(0x3f_f000, 2, 0),
-            Err(DmaCacheError::UnknownMemoryType));
+        assert_eq!(
+            state.verify_writeback_alias(0x3f_f000, 2, 0),
+            Err(DmaCacheError::UnknownMemoryType)
+        );
         state.verify_writeback_alias(0x40_0000, 1, 0).unwrap();
     }
 
     #[test]
     fn malformed_and_disabled_mtrr_fail_closed() {
-        assert!(matches!(snapshot(0x406, &[]), Err(DmaCacheError::InvalidMtrr)));
-        assert!(matches!(snapshot(0x800, &[]), Err(DmaCacheError::InvalidMtrr)));
+        assert!(matches!(
+            snapshot(0x406, &[]),
+            Err(DmaCacheError::InvalidMtrr)
+        ));
+        assert!(matches!(
+            snapshot(0x800, &[]),
+            Err(DmaCacheError::InvalidMtrr)
+        ));
         let state = snapshot(0x806, &[(0x6, MTRR_RANGE_VALID | (1u64 << 40))]).unwrap();
-        assert_eq!(state.verify_writeback_alias(0x20_0000, 1, 0),
-            Err(DmaCacheError::InvalidMtrr));
+        assert_eq!(
+            state.verify_writeback_alias(0x20_0000, 1, 0),
+            Err(DmaCacheError::InvalidMtrr)
+        );
     }
 
     #[test]
     fn fixed_mtrr_range_and_invalid_physical_addresses_are_rejected() {
         let state = snapshot(0xc06, &[]).unwrap();
-        assert_eq!(state.verify_writeback_alias(0x80_000, 1, 0),
-            Err(DmaCacheError::UnsupportedFixedRange));
-        assert_eq!(state.verify_writeback_alias(0x20_0000, 0, 0),
-            Err(DmaCacheError::InvalidRange));
-        assert_eq!(state.verify_writeback_alias(0x20_0001, 1, 0),
-            Err(DmaCacheError::InvalidRange));
-        assert_eq!(state.verify_writeback_alias(1u64 << 48, 1, 0),
-            Err(DmaCacheError::InvalidRange));
+        assert_eq!(
+            state.verify_writeback_alias(0x80_000, 1, 0),
+            Err(DmaCacheError::UnsupportedFixedRange)
+        );
+        assert_eq!(
+            state.verify_writeback_alias(0x20_0000, 0, 0),
+            Err(DmaCacheError::InvalidRange)
+        );
+        assert_eq!(
+            state.verify_writeback_alias(0x20_0001, 1, 0),
+            Err(DmaCacheError::InvalidRange)
+        );
+        assert_eq!(
+            state.verify_writeback_alias(1u64 << 48, 1, 0),
+            Err(DmaCacheError::InvalidRange)
+        );
     }
 
     #[test]
     fn unknown_pat_and_capacity_are_rejected() {
-        assert!(matches!(DmaCacheSnapshot::new(0, 0x806, 48, &[]),
-            Err(DmaCacheError::InvalidPat)));
-        assert!(matches!(DmaCacheSnapshot::new(DEFAULT_PAT, 0x806, 48, &[(0, 0); 17]),
-            Err(DmaCacheError::InsufficientCapacity)));
+        assert!(matches!(
+            DmaCacheSnapshot::new(0, 0x806, 48, &[]),
+            Err(DmaCacheError::InvalidPat)
+        ));
+        assert!(matches!(
+            DmaCacheSnapshot::new(DEFAULT_PAT, 0x806, 48, &[(0, 0); 17]),
+            Err(DmaCacheError::InsufficientCapacity)
+        ));
         assert_eq!(pat_type(DEFAULT_PAT, 3), Some(PAT_UNCACHEABLE));
         assert_eq!(pat_type(DEFAULT_PAT, 8), None);
     }

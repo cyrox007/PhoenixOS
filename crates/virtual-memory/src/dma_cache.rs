@@ -53,9 +53,14 @@ impl DmaCacheSnapshot {
         if pat_type(pat, 0) != Some(PAT_WRITE_BACK) || pat_type(pat, 3) != Some(PAT_UNCACHEABLE) {
             return Err(DmaCacheError::InvalidPat);
         }
-        // Для нового WB-алиаса требуем включённый MTRR и известный
-        // исходный тип WB. Более сложные комбинации пока отклоняются.
-        if mtrr_default & MTRR_ENABLE == 0 || mtrr_default as u8 != PAT_WRITE_BACK {
+        // На реальных AMD тип по умолчанию часто UC: диапазоны RAM
+        // становятся WB через переменные MTRR. Отвергать весь снимок
+        // по одной только настройке UC неправильно. Но MTRR обязаны
+        // быть включены, а тип/зарезервированные биты — корректны.
+        if mtrr_default & MTRR_ENABLE == 0
+            || mtrr_default & !(MTRR_ENABLE | MTRR_FIXED_ENABLE | 0xff) != 0
+            || !valid_memory_type(mtrr_default as u8)
+        {
             return Err(DmaCacheError::InvalidMtrr);
         }
         let mut ranges = [(0, 0); MAX_VARIABLE_MTRRS];
@@ -85,6 +90,51 @@ impl DmaCacheSnapshot {
         self.physical_bits
     }
 
+    pub const fn default_memory_type(&self) -> u8 {
+        self.mtrr_default as u8
+    }
+
+    /// Итоговый тип MTRR для физической страницы. Фиксированные MTRR
+    /// имеют приоритет на первом мегабайте. При отсутствии совпадений
+    /// применяем тип по умолчанию, а не автоматически WB.
+    /// Не учитывает PAT и права виртуальных отображений; для создания
+    /// WB-алиаса необходима отдельная проверка verify_writeback_alias.
+    pub fn effective_mtrr_type(&self, physical_page: u64) -> Result<u8, DmaCacheError> {
+        let physical_limit = 1u64 << self.physical_bits;
+        if physical_page % PAGE_SIZE != 0 || physical_page >= physical_limit {
+            return Err(DmaCacheError::InvalidRange);
+        }
+
+        if physical_page < 0x10_0000 && self.mtrr_default & MTRR_FIXED_ENABLE != 0 {
+            let fixed = self.fixed.ok_or(DmaCacheError::UnsupportedFixedRange)?;
+            let (register, slot) = fixed_entry(physical_page);
+            let kind = ((fixed[register] >> (slot * 8)) & 0xff) as u8;
+            // Расширенные кодировки фиксированных AMD MTRR здесь
+            // намеренно не разрешены: нужен отдельный анализ SYSCFG.
+            if !valid_memory_type(kind) {
+                return Err(DmaCacheError::UnknownMemoryType);
+            }
+            return Ok(kind);
+        }
+
+        let physical_mask = (physical_limit - 1) & !(PAGE_SIZE - 1);
+        let mut effective = None;
+        for &(base, mask) in &self.variable[..self.variable_count] {
+            let Some((start, end, kind)) = decode_variable_region(base, mask, physical_mask)? else {
+                continue;
+            };
+            if physical_page < start || physical_page >= end {
+                continue;
+            }
+            effective = Some(match effective {
+                None => kind,
+                Some(previous) => combine_variable_types(previous, kind)?,
+            });
+        }
+
+        Ok(effective.unwrap_or(self.default_memory_type()))
+    }
+
     /// Разрешение только двух WB-алиасов обычной RAM. UC/WC/MMIO сюда
     /// не относятся; их владельцы должны использовать отдельную политику.
     pub fn verify_writeback_alias(
@@ -103,42 +153,19 @@ impl DmaCacheSnapshot {
         if page_count == 0 || physical_start % PAGE_SIZE != 0 || end > physical_limit {
             return Err(DmaCacheError::InvalidRange);
         }
-        if self.mtrr_default & MTRR_FIXED_ENABLE != 0 {
-            self.verify_fixed_writeback(physical_start, end)?;
-        }
         if pat_type(self.pat, existing_pat_index) != Some(PAT_WRITE_BACK) {
             return Err(DmaCacheError::ConflictingAlias);
         }
-        let physical_mask = (physical_limit - 1) & !(PAGE_SIZE - 1);
-        for &(base, mask) in &self.variable[..self.variable_count] {
-            let Some((region_start, region_end, kind)) =
-                decode_variable_region(base, mask, physical_mask)?
-            else {
-                continue;
-            };
-            if physical_start < region_end && region_start < end && kind != PAT_WRITE_BACK {
-                return Err(DmaCacheError::UnknownMemoryType);
-            }
-        }
-        Ok(())
-    }
 
-    /// Проверяет каждую пересекаемую область фиксированного MTRR. Без
-    /// доступных регистров запрос не разрешается даже при MTRR WB по умолчанию.
-    fn verify_fixed_writeback(&self, start: u64, end: u64) -> Result<(), DmaCacheError> {
-        if start >= 0x10_0000 {
-            return Ok(());
-        }
-        let fixed = self.fixed.ok_or(DmaCacheError::UnsupportedFixedRange)?;
-        let mut address = start;
-        let upper = end.min(0x10_0000);
-        while address < upper {
-            let (register, slot) = fixed_entry(address);
-            let kind = ((fixed[register] >> (slot * 8)) & 0xff) as u8;
-            if kind != PAT_WRITE_BACK {
+        // Проверять только одну точку в диапазоне недостаточно:
+        // граница MTRR может проходить между соседними страницами.
+        // Разрешаем WB-алиас только если КАЖДАЯ страница — MTRR WB.
+        let mut page = physical_start;
+        while page < end {
+            if self.effective_mtrr_type(page)? != PAT_WRITE_BACK {
                 return Err(DmaCacheError::UnknownMemoryType);
             }
-            address += PAGE_SIZE;
+            page += PAGE_SIZE;
         }
         Ok(())
     }
@@ -156,6 +183,36 @@ fn fixed_entry(address: u64) -> (usize, u64) {
     }
     let page = (address - 0xc_0000) / PAGE_SIZE;
     (3 + (page / 8) as usize, page % 8)
+}
+
+fn valid_memory_type(kind: u8) -> bool {
+    matches!(kind, 0 | 1 | 4 | 5 | 6)
+}
+
+/// Только определённые архитектурой сочетания MTRR; все остальные
+/// перекрытия отклоняются вместо выбора произвольного типа.
+fn combine_variable_types(previous: u8, current: u8) -> Result<u8, DmaCacheError> {
+    if previous == current {
+        return Ok(previous);
+    }
+    if previous == PAT_UNCACHEABLE || current == PAT_UNCACHEABLE {
+        return Ok(PAT_UNCACHEABLE);
+    }
+    if matches!((previous, current), (4, 6) | (6, 4)) {
+        return Ok(4);
+    }
+    Err(DmaCacheError::UnknownMemoryType)
+}
+
+pub fn memory_type_name(kind: u8) -> &'static str {
+    match kind {
+        0 => "UC",
+        1 => "WC",
+        4 => "WT",
+        5 => "WP",
+        6 => "WB",
+        _ => "unknown",
+    }
 }
 
 pub fn pat_type(pat: u64, index: u8) -> Option<u8> {
@@ -177,15 +234,23 @@ fn decode_variable_region(
     if raw_mask & MTRR_RANGE_VALID == 0 {
         return Ok(None);
     }
+    if raw_base & !(physical_mask | 0xff) != 0
+        || raw_mask & !(physical_mask | MTRR_RANGE_VALID) != 0
+    {
+        return Err(DmaCacheError::InvalidMtrr);
+    }
     let mask = raw_mask & physical_mask;
-    let size = ((!mask & physical_mask) + PAGE_SIZE);
+    let size = (!mask & physical_mask) + PAGE_SIZE;
     if !size.is_power_of_two() || mask != (physical_mask & !(size - 1)) {
         return Err(DmaCacheError::InvalidMtrr);
     }
-    let start = (raw_base & physical_mask) & mask;
+    let start = raw_base & physical_mask;
     let end = start.checked_add(size).ok_or(DmaCacheError::InvalidMtrr)?;
     let kind = (raw_base & 0xff) as u8;
-    if !matches!(kind, 0 | 1 | 4 | 5 | 6) {
+    if start & (size - 1) != 0
+        || end > physical_mask + PAGE_SIZE
+        || !valid_memory_type(kind)
+    {
         return Err(DmaCacheError::InvalidMtrr);
     }
     Ok(Some((start, end, kind)))
@@ -296,6 +361,100 @@ mod tests {
             Err(DmaCacheError::UnknownMemoryType)
         );
         state.verify_writeback_alias(0x8_0000, 1, 0).unwrap();
+    }
+
+    #[test]
+    fn amd_default_uncacheable_accepts_explicit_writeback_ram_only() {
+        let state = snapshot(0xc00, &[region(0x20_0000, 0x20_0000, 6)]).unwrap();
+        assert_eq!(state.default_memory_type(), 0);
+        assert_eq!(state.effective_mtrr_type(0x20_0000), Ok(6));
+        assert_eq!(state.effective_mtrr_type(0x10_0000), Ok(0));
+        assert_eq!(state.effective_mtrr_type(0x40_0000), Ok(0));
+        state.verify_writeback_alias(0x20_0000, 2, 0).unwrap();
+        assert_eq!(
+            state.verify_writeback_alias(0x1f_f000, 2, 0),
+            Err(DmaCacheError::UnknownMemoryType)
+        );
+        assert_eq!(
+            state.verify_writeback_alias(0x3f_f000, 2, 0),
+            Err(DmaCacheError::UnknownMemoryType)
+        );
+        assert_eq!(
+            state.verify_writeback_alias(0x50_0000, 1, 0),
+            Err(DmaCacheError::UnknownMemoryType)
+        );
+    }
+
+    #[test]
+    fn mtrr_overlap_priority_is_resolved_without_leaking_unsafe_types() {
+        let outer = region(0, 0x80_0000, 6);
+        let inner_wb = region(0x20_0000, 0x20_0000, 6);
+        let inner_uc = region(0x20_0000, 0x20_0000, 0);
+        let inner_wt = region(0x20_0000, 0x20_0000, 4);
+        let inner_wc = region(0x20_0000, 0x20_0000, 1);
+        let wb_wb = snapshot(0xc00, &[outer, inner_wb]).unwrap();
+        assert_eq!(wb_wb.effective_mtrr_type(0x20_0000), Ok(6));
+        wb_wb.verify_writeback_alias(0x20_0000, 1, 0).unwrap();
+
+        let wb_uc = snapshot(0xc00, &[outer, inner_uc]).unwrap();
+        assert_eq!(wb_uc.effective_mtrr_type(0x20_0000), Ok(0));
+        assert_eq!(
+            wb_uc.verify_writeback_alias(0x20_0000, 1, 0),
+            Err(DmaCacheError::UnknownMemoryType)
+        );
+        let wb_wt = snapshot(0xc00, &[outer, inner_wt]).unwrap();
+        assert_eq!(wb_wt.effective_mtrr_type(0x20_0000), Ok(4));
+        let wb_wc = snapshot(0xc00, &[outer, inner_wc]).unwrap();
+        assert_eq!(
+            wb_wc.effective_mtrr_type(0x20_0000),
+            Err(DmaCacheError::UnknownMemoryType)
+        );
+
+        let uc_wc = snapshot(0xc00, &[inner_uc, inner_wc]).unwrap();
+        assert_eq!(uc_wc.effective_mtrr_type(0x20_0000), Ok(0));
+    }
+
+    #[test]
+    fn fixed_mtrr_overrides_variable_ranges_with_uc_default() {
+        let all_wb = [0x0606_0606_0606_0606; FIXED_MTRR_REGISTERS];
+        let state = snapshot(0xc00, &[region(0, 0x20_0000, 0)])
+            .unwrap()
+            .with_fixed(all_wb);
+        assert_eq!(state.effective_mtrr_type(0x8_0000), Ok(6));
+        state.verify_writeback_alias(0x8_0000, 1, 0).unwrap();
+        assert_eq!(state.effective_mtrr_type(0x10_0000), Ok(0));
+        assert_eq!(
+            state.verify_writeback_alias(0x10_0000, 1, 0),
+            Err(DmaCacheError::UnknownMemoryType)
+        );
+
+        let missing = snapshot(0xc00, &[]).unwrap();
+        assert_eq!(
+            missing.effective_mtrr_type(0x8_0000),
+            Err(DmaCacheError::UnsupportedFixedRange)
+        );
+    }
+
+    #[test]
+    fn invalid_mtrr_registers_do_not_obtain_permissions() {
+        assert!(matches!(snapshot(0xc02, &[]), Err(DmaCacheError::InvalidMtrr)));
+        assert!(matches!(snapshot(0xc00 | (1 << 12), &[]), Err(DmaCacheError::InvalidMtrr)));
+        let unaligned = snapshot(0xc00, &[(0x30_0000 | 6, region(0, 0x20_0000, 6).1)])
+            .unwrap();
+        assert_eq!(
+            unaligned.effective_mtrr_type(0x20_0000),
+            Err(DmaCacheError::InvalidMtrr)
+        );
+        let reserved = snapshot(0xc00, &[(6 | (1u64 << 58), MTRR_RANGE_VALID)])
+            .unwrap();
+        assert_eq!(
+            reserved.effective_mtrr_type(0x20_0000),
+            Err(DmaCacheError::InvalidMtrr)
+        );
+        assert_eq!(
+            snapshot(0xc00, &[]).unwrap().effective_mtrr_type(0x20_0001),
+            Err(DmaCacheError::InvalidRange)
+        );
     }
 
     #[test]

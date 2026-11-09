@@ -3,7 +3,9 @@ resolver = "3"
 members = [
     "kernel",
     "diagnostic-kernel",
+    "dma-test-kernel",
     "tools/diagnostic-image",
+    "tools/dma-test-image",
     "crates/acpi",
     "crates/phoenix-framebuffer",
     "crates/pcie",

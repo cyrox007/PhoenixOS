@@ -44,6 +44,9 @@ jobs:
       - name: Проверить разбор аппаратного протокола
         run: python3 tests/platform/test-dma-evidence.py
 
+      - name: Проверить изоляцию отдельного DMA-образа
+        run: python3 tests/platform/test-dma-qemu-profile.py
+
       - name: Проверить форматирование
         run: cargo fmt --all -- --check
 
@@ -137,4 +140,28 @@ jobs:
         with:
           name: phoenixos-uefi
           path: artifacts/phoenixos-uefi.img
+          if-no-files-found: error
+
+      - name: Собрать отдельный образ реального DMA для QEMU
+        run: |
+          IMAGE="$(cargo run -p phoenixos-dma-test-image --release --quiet)"
+          test -f "$IMAGE"
+          cp "$IMAGE" artifacts/phoenixos-dma-qemu-only-uefi.img
+
+      - name: Проверить аппаратную передачу на виртуальном PCI EDU
+        run: sudo python3 scripts/run-dma-test-qemu.py artifacts/phoenixos-dma-qemu-only-uefi.img artifacts/dma-qemu-serial.log
+
+      - name: Сохранить журнал отдельного испытания DMA при ошибке
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phoenixos-dma-qemu-error-log
+          path: artifacts/dma-qemu-serial.log
+          if-no-files-found: warn
+
+      - name: Сохранить отдельный испытательный образ DMA
+        uses: actions/upload-artifact@v4
+        with:
+          name: phoenixos-dma-qemu-only-uefi
+          path: artifacts/phoenixos-dma-qemu-only-uefi.img
           if-no-files-found: error

@@ -1,10 +1,11 @@
 #![no_std]
 
+pub mod dma_cache;
 pub mod dma_window;
 pub mod kernel_reservations;
 
 use x86_64::registers::control::{Cr3, Cr3Flags};
-use x86_64::structures::paging::mapper::{MapToError, UnmapError};
+use x86_64::structures::paging::mapper::{MapToError, TranslateResult, UnmapError};
 use x86_64::structures::paging::{
     FrameAllocator, FrameDeallocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags,
     PhysFrame, Size4KiB, Translate,
@@ -192,6 +193,26 @@ impl ActivePageTable {
 
     pub fn translate_addr(&self, address: VirtAddr) -> Option<PhysAddr> {
         self.mapper.translate_addr(address)
+    }
+
+    /// Индекс PAT действительного отображения, а не только требуемые флаги.
+    /// Для страниц 4 КиБ бит PAT находится в позиции 7, для больших — 12.
+    pub fn pat_index(&self, address: VirtAddr) -> Option<u8> {
+        let TranslateResult::Mapped { frame, flags, .. } = self.mapper.translate(address) else {
+            return None;
+        };
+        let pat_bit = if frame.size() == PAGE_SIZE { 7 } else { 12 };
+        let mut index = 0u8;
+        if flags.contains(PageTableFlags::WRITE_THROUGH) {
+            index |= 1;
+        }
+        if flags.contains(PageTableFlags::NO_CACHE) {
+            index |= 2;
+        }
+        if flags.bits() & (1u64 << pat_bit) != 0 {
+            index |= 4;
+        }
+        Some(index)
     }
 }
 

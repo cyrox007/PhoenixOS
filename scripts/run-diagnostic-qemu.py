@@ -14,6 +14,7 @@ MARKERS = (
     "diagnostic mode: OK readonly=1",
     "storage controllers: not initialized",
     "device DMA: disabled",
+    "diagnostic memory map:",
     "diagnostic CPU: OK",
     "diagnostic cache: OK",
     "diagnostic cache sample: phys=",

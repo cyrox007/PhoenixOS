@@ -80,7 +80,7 @@ class DiagnosticIsolationTests(unittest.TestCase):
         self.assertIn("WB-candidate=true", required)
         self.assertIn("diagnostic RAM audit: complete=true", required)
         self.assertIn("scope=direct-only", required)
-        self.assertIn("diagnostic aliases:", required)
+        self.assertIn("diagnostic aliases: complete=true", required)
         self.assertIn("scope=current-cr3", required)
         self.assertIn("diagnostic DMA gate: authorized=false", required)
         self.assertIn("diagnostic IOMMU: ivhd=", required)

@@ -47,6 +47,14 @@ class DiagnosticIsolationTests(unittest.TestCase):
         self.assertIn("RamAuditReport::default()", self.hardware)
         self.assertIn("ObservedMapping::Mapped", self.hardware)
         self.assertIn("scope=direct-only", self.hardware)
+        self.assertIn("walk_current_cr3", self.hardware)
+        self.assertIn("AliasAuditReport::default()", self.hardware)
+        self.assertIn("blocking_reason(&evidence)", self.hardware)
+        self.assertIn("diagnostic_dma_authorized(&evidence)", self.hardware)
+        self.assertIn("parse_ivrs(bytes)", self.hardware)
+        self.assertIn("busmaster_enabled=", self.hardware)
+        self.assertNotIn("write_msr(", self.hardware)
+        self.assertNotIn("Cr3::write", self.hardware)
 
     def test_boot_medium_is_read_only_and_no_test_disk(self):
         command = self.runner.build_command("diag.img", "code.fd", "vars.fd")

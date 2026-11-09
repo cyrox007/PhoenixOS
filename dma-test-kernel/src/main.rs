@@ -53,7 +53,7 @@ const IA32_X2APIC_SPURIOUS: u32 = 0x80f;
 lazy_static! {
     static ref IDT: InterruptDescriptorTable = {
         let mut idt = InterruptDescriptorTable::new();
-        idt[usize::from(arch::x86_64::apic::REFERENCE_EDU_VECTOR)]
+        idt[arch::x86_64::apic::REFERENCE_EDU_VECTOR]
             .set_handler_fn(reference_edu::interrupt_handler);
         idt[0xff].set_handler_fn(spurious_interrupt);
         idt
@@ -83,7 +83,7 @@ fn is_test_hypervisor() -> bool {
     name[0..4].copy_from_slice(&vendor.ebx.to_le_bytes());
     name[4..8].copy_from_slice(&vendor.ecx.to_le_bytes());
     name[8..12].copy_from_slice(&vendor.edx.to_le_bytes());
-    &name == b"KVMKVMKVM\0\0\0" || &name == b"TCGTCGTCG\0\0" || &name == b"QEMUQEMUQEMU"
+    &name == b"KVMKVMKVM\0\0\0" || &name == b"TCGTCGTCG\0\0\0" || &name == b"QEMUQEMUQEMU"
 }
 
 unsafe fn read_msr(register: u32) -> u64 {

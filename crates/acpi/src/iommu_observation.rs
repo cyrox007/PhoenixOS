@@ -173,7 +173,14 @@ mod tests {
     #[test]
     fn address_overflow_rejected() {
         assert_eq!(
-            validate_passive_read(u64::MAX - 4095, u64::MAX - 4095, None, Some(0), Some(0), &[]),
+            validate_passive_read(
+                u64::MAX - 4095,
+                u64::MAX - 4095,
+                None,
+                Some(0),
+                Some(0),
+                &[]
+            ),
             Err(ObservationError::OutsideKnownMapping),
         );
     }

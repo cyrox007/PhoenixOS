@@ -62,6 +62,8 @@ class DiagnosticIsolationTests(unittest.TestCase):
         self.assertIn("device DMA: disabled", required)
         self.assertIn("diagnostic CPU: OK", required)
         self.assertIn("diagnostic cache: OK", required)
+        self.assertIn("diagnostic cache sample: phys=", required)
+        self.assertIn("WB-candidate=true", required)
         self.assertIn("diagnostic ACPI: OK", required)
         self.assertIn("diagnostic PCI: OK", required)
         self.assertIn("diagnostic complete: OK", required)

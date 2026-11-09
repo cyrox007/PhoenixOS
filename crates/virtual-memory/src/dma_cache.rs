@@ -118,7 +118,7 @@ impl DmaCacheSnapshot {
         }
 
         let physical_mask = (physical_limit - 1) & !(PAGE_SIZE - 1);
-        let mut effective = None;
+        let mut matched_types = 0u8;
         for &(base, mask) in &self.variable[..self.variable_count] {
             let Some((start, end, kind)) = decode_variable_region(base, mask, physical_mask)? else {
                 continue;
@@ -126,13 +126,10 @@ impl DmaCacheSnapshot {
             if physical_page < start || physical_page >= end {
                 continue;
             }
-            effective = Some(match effective {
-                None => kind,
-                Some(previous) => combine_variable_types(previous, kind)?,
-            });
+            matched_types |= 1u8 << kind;
         }
 
-        Ok(effective.unwrap_or(self.default_memory_type()))
+        effective_variable_type(matched_types, self.default_memory_type())
     }
 
     /// Разрешение только двух WB-алиасов обычной RAM. UC/WC/MMIO сюда
@@ -189,16 +186,19 @@ fn valid_memory_type(kind: u8) -> bool {
     matches!(kind, 0 | 1 | 4 | 5 | 6)
 }
 
-/// Только определённые архитектурой сочетания MTRR; все остальные
-/// перекрытия отклоняются вместо выбора произвольного типа.
-fn combine_variable_types(previous: u8, current: u8) -> Result<u8, DmaCacheError> {
-    if previous == current {
-        return Ok(previous);
+/// Приоритет UC действует для всех совпавших диапазонов, независимо
+/// от порядка регистров. WT+WB даёт WT. Иные сочетания неопределённы.
+fn effective_variable_type(types: u8, default: u8) -> Result<u8, DmaCacheError> {
+    if types == 0 {
+        return Ok(default);
     }
-    if previous == PAT_UNCACHEABLE || current == PAT_UNCACHEABLE {
+    if types & (1 << PAT_UNCACHEABLE) != 0 {
         return Ok(PAT_UNCACHEABLE);
     }
-    if matches!((previous, current), (4, 6) | (6, 4)) {
+    if types.count_ones() == 1 {
+        return Ok(types.trailing_zeros() as u8);
+    }
+    if types == (1 << 4) | (1 << PAT_WRITE_BACK) {
         return Ok(4);
     }
     Err(DmaCacheError::UnknownMemoryType)
@@ -412,6 +412,8 @@ mod tests {
 
         let uc_wc = snapshot(0xc00, &[inner_uc, inner_wc]).unwrap();
         assert_eq!(uc_wc.effective_mtrr_type(0x20_0000), Ok(0));
+        let wb_wc_uc = snapshot(0xc00, &[outer, inner_wc, inner_uc]).unwrap();
+        assert_eq!(wb_wc_uc.effective_mtrr_type(0x20_0000), Ok(0));
     }
 
     #[test]

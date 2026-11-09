@@ -33,7 +33,7 @@ class EvidenceTests(unittest.TestCase):
         self.assertFalse(result["source_is_real_hardware_verified"])
 
     def test_does_not_merge_multiple_boots(self):
-        result = module.evaluate(GOOD + "[INFO] PhoenixOS physical diagnostic\\n")
+        result = module.evaluate(GOOD + "[INFO] PhoenixOS physical diagnostic\n")
         self.assertFalse(result["complete_passive_log"])
         self.assertFalse(result["direct_ram_checked"])
 

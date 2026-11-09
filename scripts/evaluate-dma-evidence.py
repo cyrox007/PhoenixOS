@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 
 START = "[INFO] PhoenixOS physical diagnostic"
-TOKENS = re.compile(r"([A-Za-z_][A-Za-z_0-9]*)=([^\\s]+)")
+TOKENS = re.compile(r"([A-Za-z_][A-Za-z_0-9]*)=([^\s]+)")
 
 
 def record(lines, marker):
@@ -20,7 +20,7 @@ def evaluate(text):
     pos = text.rfind(START)
     lines = text[pos:].splitlines() if pos >= 0 else []
     complete = any(line.strip() == "[INFO] diagnostic complete: OK" for line in lines)
-    complete = pos >= 0 and complete and "journal-overflow" not in "\\n".join(lines)
+    complete = pos >= 0 and complete and "journal-overflow" not in "\n".join(lines)
     memory = record(lines, "[INFO] diagnostic memory map:")
     ram = record(lines, "[INFO] diagnostic RAM audit:")
     aliases = record(lines, "[INFO] diagnostic aliases:")

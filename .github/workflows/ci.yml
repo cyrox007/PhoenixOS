@@ -41,6 +41,9 @@ jobs:
       - name: Проверить изоляцию диагностического образа
         run: python3 tests/platform/test-diagnostic-isolation.py
 
+      - name: Проверить разбор аппаратного протокола
+        run: python3 tests/platform/test-dma-evidence.py
+
       - name: Проверить форматирование
         run: cargo fmt --all -- --check
 

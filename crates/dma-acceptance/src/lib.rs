@@ -246,7 +246,7 @@ mod tests {
         }
     }
 
-    fn plan() -> AcceptancePlan {
+    fn sample_plan() -> AcceptancePlan {
         AcceptancePlan {
             profile: Profile::QemuModel,
             expected_device: Some(device()),
@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn physical_hardware_is_always_denied_even_with_all_flags_true() {
-        let mut plan = plan();
+        let mut plan = sample_plan();
         plan.profile = Profile::PhysicalAsus;
         assert!(matches!(
             validate(&plan),
@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn missing_each_hardware_condition_fails_closed() {
-        let mut plan = plan();
+        let mut plan = sample_plan();
         for bit in 0..10 {
             plan.evidence = evidence();
             match bit {
@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn rejects_missing_or_different_controller() {
-        let mut plan = plan();
+        let mut plan = sample_plan();
         plan.expected_device = None;
         assert!(matches!(validate(&plan), Err(Rejection::NoDevice)));
         plan.expected_device = Some(device());
@@ -311,30 +311,30 @@ mod tests {
 
     #[test]
     fn blocks_unaligned_overflowing_or_oversize_ranges() {
-        let mut plan = plan();
+        let mut plan = sample_plan();
         plan.owned_buffer.start += 1;
         assert!(matches!(validate(&plan), Err(Rejection::InvalidBuffer)));
-        plan = plan();
+        plan = sample_plan();
         plan.owned_buffer = Range {
             start: u64::MAX - 4095,
             length: PAGE_SIZE,
         };
         assert!(matches!(validate(&plan), Err(Rejection::InvalidBuffer)));
-        plan = plan();
+        plan = sample_plan();
         plan.owned_buffer.length = MAX_BUFFER + PAGE_SIZE;
         assert!(matches!(validate(&plan), Err(Rejection::InvalidBuffer)));
     }
 
     #[test]
     fn blocks_cross_domain_and_protected_storage() {
-        let mut plan = plan();
+        let mut plan = sample_plan();
         plan.owned_buffer.start = 0x7000;
         plan.owned_buffer.length = 0x2000;
         assert!(matches!(
             validate(&plan),
             Err(Rejection::BufferOutsideDomain)
         ));
-        plan = plan();
+        plan = sample_plan();
         plan.protected_storage.start = 0x4000;
         assert!(matches!(
             validate(&plan),
@@ -344,14 +344,14 @@ mod tests {
 
     #[test]
     fn refuses_zero_timeout() {
-        let mut plan = plan();
+        let mut plan = sample_plan();
         plan.timeout_ticks = 0;
         assert!(matches!(validate(&plan), Err(Rejection::InvalidTimeout)));
     }
 
     #[test]
     fn completes_model_lifecycle_in_strict_order() {
-        let permit = validate(&plan()).unwrap();
+        let permit = validate(&sample_plan()).unwrap();
         let mut cycle = ModelCycle::new(permit);
         assert_eq!(
             cycle.confirm_released(true),
@@ -375,7 +375,7 @@ mod tests {
 
     #[test]
     fn timeout_does_not_fake_device_stop_or_free_pages() {
-        let permit = validate(&plan()).unwrap();
+        let permit = validate(&sample_plan()).unwrap();
         let mut cycle = ModelCycle::new(permit);
         cycle.begin(u64::MAX - 3).unwrap();
         assert_eq!(cycle.poll(6), Err(CycleError::Timeout));
@@ -396,7 +396,7 @@ mod tests {
 
     #[test]
     fn cannot_reuse_finished_cycle() {
-        let permit = validate(&plan()).unwrap();
+        let permit = validate(&sample_plan()).unwrap();
         let mut cycle = ModelCycle::new(permit);
         cycle.begin(0).unwrap();
         cycle.confirm_stopped(true).unwrap();

@@ -1,0 +1,22 @@
+[package]
+name = "phoenix-dma-test-kernel"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "phoenix-dma-test-kernel"
+path = "src/main.rs"
+
+[dependencies]
+bootloader_api = "=0.11.17"
+lazy_static = { version = "1.5.0", features = ["spin_no_std"] }
+phoenix-acpi = { path = "../crates/acpi" }
+phoenix-dma = { path = "../crates/dma" }
+phoenix-driver-registry = { path = "../crates/driver-registry" }
+phoenix-memory = { path = "../crates/boot-memory" }
+phoenix-pcie = { path = "../crates/pcie" }
+phoenix-reference-edu = { path = "../drivers/reference-edu" }
+phoenix-vm = { path = "../crates/virtual-memory" }
+uart_16550 = "0.8.0"
+x86_64 = "0.15.2"

@@ -58,6 +58,7 @@ jobs:
           cargo test -p phoenix-memory
           cargo test -p phoenix-pcie
           cargo test -p phoenix-driver-registry
+          cargo test -p phoenix-network
           cargo test -p phoenix-reference-edu
           cargo test -p phoenix-dma
           cargo test -p phoenix-acpi

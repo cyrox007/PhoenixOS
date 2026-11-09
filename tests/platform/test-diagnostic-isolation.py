@@ -53,6 +53,7 @@ class DiagnosticIsolationTests(unittest.TestCase):
         self.assertIn("diagnostic_dma_authorized(&evidence)", self.hardware)
         self.assertIn("parse_ivrs(bytes)", self.hardware)
         self.assertIn("busmaster_enabled=", self.hardware)
+        self.assertIn("diagnostic memory map:", self.hardware)
         self.assertNotIn("write_msr(", self.hardware)
         self.assertNotIn("Cr3::write", self.hardware)
 

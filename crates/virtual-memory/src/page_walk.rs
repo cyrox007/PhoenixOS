@@ -131,7 +131,10 @@ where
         }
         let size = 1u64 << shift;
         let physical = (entry & mask) & !(size - 1);
-        if physical.checked_add(size).is_none_or(|end| end > physical_limit) {
+        if physical
+            .checked_add(size)
+            .is_none_or(|end| end > physical_limit)
+        {
             return Err(PageWalkError::InvalidEntry);
         }
 

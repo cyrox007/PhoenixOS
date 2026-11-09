@@ -34,7 +34,9 @@ pub fn snapshot() -> Result<DmaCacheSnapshot, DmaCacheError> {
     let mut variable = [(0, 0); MAX_VARIABLE_MTRRS];
     for (index, entry) in variable[..count].iter_mut().enumerate() {
         let address = IA32_MTRR_PHYSBASE0 + (index as u32) * 2;
-        *entry = (unsafe { read_msr(address) }, unsafe { read_msr(address + 1) });
+        *entry = (unsafe { read_msr(address) }, unsafe {
+            read_msr(address + 1)
+        });
     }
     DmaCacheSnapshot::new(pat, default_type, physical_bits, &variable[..count])
 }

@@ -7,6 +7,7 @@
 use bootloader_api::config::{BootloaderConfig, Mapping};
 use bootloader_api::{BootInfo, entry_point};
 use core::panic::PanicInfo;
+use phoenix_diagnostic_journal::PageCycle;
 
 macro_rules! log {
     ($report:expr, $($arg:tt)*) => {
@@ -45,16 +46,28 @@ fn kernel_main(info: &'static mut BootInfo) -> ! {
             "[WARN] diagnostic complete: INCOMPLETE journal-overflow"
         );
     }
-    let mut page = report.page_count().saturating_sub(1);
-    report.display_page(page);
+    // Просмотр запускается с первой страницы и автоматически обходит все.
+    // 15 млрд тактов НЕ означают фиксированное число секунд на разных ЦП.
+    // Это резервный способ снять полный отчёт на видео при отсутствии i8042.
+    const PAGE_INTERVAL_TICKS: u64 = 15_000_000_000;
+    let mut pages = PageCycle::new(
+        report.page_count(),
+        unsafe { core::arch::x86_64::_rdtsc() },
+        PAGE_INTERVAL_TICKS,
+    );
+    report.display_page(pages.page());
 
     // Не перезагружаем компьютер автоматически, чтобы отчёт оставался
     // на экране. Не запускаем драйверы, задачи или прерывания.
     // Только чтение состояния совместимого контроллера клавиатуры.
-    // Если он отсутствует, последний экран остаётся видимым.
+    // Если клавиатура отсутствует, экран меняется по счётчику тактов ЦП.
     let mut extended = false;
     loop {
         use x86_64::instructions::port::Port;
+        let now = unsafe { core::arch::x86_64::_rdtsc() };
+        if pages.advance(now) {
+            report.display_page(pages.page());
+        }
         let status = unsafe { Port::<u8>::new(0x64).read() };
         if status & 1 == 0 {
             core::hint::spin_loop();
@@ -66,12 +79,12 @@ fn kernel_main(info: &'static mut BootInfo) -> ! {
             continue;
         }
         if extended && code == 0x49 {
-            page = page.saturating_sub(1);
-            report.display_page(page);
+            pages.previous(now);
+            report.display_page(pages.page());
         }
         if extended && code == 0x51 {
-            page = (page + 1).min(report.page_count().saturating_sub(1));
-            report.display_page(page);
+            pages.next(now);
+            report.display_page(pages.page());
         }
         extended = false;
     }

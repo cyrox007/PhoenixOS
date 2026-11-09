@@ -72,7 +72,7 @@ impl<'a> Report<'a> {
         screen.x = 20;
         let _ = write!(
             screen,
-            "PhoenixOS journal: page {}/{} | complete={} | PgUp/PgDn",
+            "Journal {}/{} complete={} AUTO / PgUp PgDn",
             page + 1,
             pages,
             self.journal.is_complete()

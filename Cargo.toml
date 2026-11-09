@@ -23,6 +23,7 @@ members = [
     "crates/capability-model",
     "crates/ipc-model",
     "crates/input-queue",
+    "crates/network",
     "crates/libc-compat",
     "crates/elf-loader",
     "crates/fat",

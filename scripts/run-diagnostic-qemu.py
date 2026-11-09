@@ -21,7 +21,7 @@ MARKERS = (
     "WB-candidate=true",
     "diagnostic RAM audit: complete=true",
     "scope=direct-only",
-    "diagnostic aliases:",
+    "diagnostic aliases: complete=true",
     "scope=current-cr3",
     "diagnostic DMA gate: authorized=false",
     "diagnostic IOMMU: ivhd=",

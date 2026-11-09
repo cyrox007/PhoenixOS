@@ -23,7 +23,7 @@ enum ReadError {
     MissingMapping,
     BadAddress,
     InvalidAcpi,
- }
+}
 
 pub struct HardwareContext {
     rsdp: Option<u64>,

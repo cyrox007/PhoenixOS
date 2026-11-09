@@ -10,6 +10,9 @@ const IA32_MTRRCAP: u32 = 0x00fe;
 const IA32_PAT: u32 = 0x0277;
 const IA32_MTRR_DEF_TYPE: u32 = 0x02ff;
 const IA32_MTRR_PHYSBASE0: u32 = 0x0200;
+const AMD_SYSCFG: u32 = 0xc001_0010;
+const AMD_TOP_MEM2: u32 = 0xc001_001d;
+const AMD_TOM2_ENABLE: u64 = 1 << 21;
 
 pub fn snapshot() -> Result<DmaCacheSnapshot, DmaCacheError> {
     let features = __cpuid(1);
@@ -52,6 +55,21 @@ pub fn snapshot() -> Result<DmaCacheSnapshot, DmaCacheError> {
             *slot = unsafe { read_msr(register) };
         }
         state = state.with_fixed(fixed);
+    }
+    // При работе на AMD без гипервизора учитываем возможный
+    // принудительный WB выше 4 ГиБ. Неизвестные значения не разрешаем.
+    let vendor = __cpuid(0);
+    let is_amd = vendor.ebx == 0x6874_7541
+        && vendor.edx == 0x6974_6e65
+        && vendor.ecx == 0x444d_4163;
+    if is_amd && features.ecx & (1 << 31) == 0 {
+        let syscfg = unsafe { read_msr(AMD_SYSCFG) };
+        let top = if syscfg & AMD_TOM2_ENABLE != 0 {
+            unsafe { read_msr(AMD_TOP_MEM2) }
+        } else {
+            0
+        };
+        state = state.with_amd_top_mem2(syscfg, top)?;
     }
     Ok(state)
 }

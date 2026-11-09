@@ -1,0 +1,9 @@
+[package]
+name = "phoenixos-diagnostic-image"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[build-dependencies]
+phoenix-diagnostic-kernel = { path = "../../diagnostic-kernel", artifact = "bin", target = "x86_64-unknown-none" }
+bootloader = "=0.11.17"

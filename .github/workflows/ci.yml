@@ -38,6 +38,9 @@ jobs:
       - name: Проверить пределы ожидания QEMU
         run: python3 tests/platform/test-qemu-watchdog.py
 
+      - name: Проверить изоляцию диагностического образа
+        run: python3 tests/platform/test-diagnostic-isolation.py
+
       - name: Проверить форматирование
         run: cargo fmt --all -- --check
 
@@ -98,6 +101,30 @@ jobs:
           name: phoenixos-qemu-diagnostics
           path: artifacts/qemu-serial.log
           if-no-files-found: warn
+
+      - name: Собрать независимый диагностический образ UEFI
+        run: |
+          IMAGE="$(cargo run -p phoenixos-diagnostic-image --release --quiet)"
+          test -f "$IMAGE"
+          cp "$IMAGE" artifacts/phoenixos-diagnostic-uefi.img
+
+      - name: Проверить безопасный диагностический запуск QEMU
+        run: sudo python3 scripts/run-diagnostic-qemu.py artifacts/phoenixos-diagnostic-uefi.img artifacts/diagnostic-serial.log
+
+      - name: Сохранить диагностический журнал при ошибке
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phoenixos-diagnostic-error-log
+          path: artifacts/diagnostic-serial.log
+          if-no-files-found: warn
+
+      - name: Сохранить диагностический образ
+        uses: actions/upload-artifact@v4
+        with:
+          name: phoenixos-diagnostic-uefi
+          path: artifacts/phoenixos-diagnostic-uefi.img
+          if-no-files-found: error
 
       - name: Сохранить UEFI-образ
         uses: actions/upload-artifact@v4

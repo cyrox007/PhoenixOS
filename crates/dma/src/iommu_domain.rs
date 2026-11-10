@@ -501,4 +501,111 @@ mod tests {
         assert!(IsolatedIommuDomain::<_, 0>::new(engine(), 0x1000, 0x2000).is_err());
         assert!(IsolatedIommuDomain::<_, 2>::new(engine(), 0x1001, 0x2000).is_err());
     }
+    struct FixedMemory {
+        reserved: bool,
+        mapped: bool,
+        freed: usize,
+    }
+
+    impl crate::buffer::DmaMemoryBackend for FixedMemory {
+        fn reserve(&mut self, _: DmaLayout) -> Result<PhysicalAddress, DmaError> {
+            if self.reserved {
+                return Err(DmaError::InvalidRange);
+            }
+            self.reserved = true;
+            Ok(PhysicalAddress::new(0x4000))
+        }
+
+        fn map_cpu(
+            &mut self,
+            _: PhysicalAddress,
+            _: DmaLayout,
+        ) -> Result<crate::CpuVirtualAddress, DmaError> {
+            self.mapped = true;
+            Ok(crate::CpuVirtualAddress::new(0x4000))
+        }
+
+        fn unmap_cpu(
+            &mut self,
+            _: crate::CpuVirtualAddress,
+            _: DmaLayout,
+        ) -> Result<(), DmaError> {
+            self.mapped = false;
+            Ok(())
+        }
+
+        fn free(&mut self, _: PhysicalAddress, _: DmaLayout) -> Result<(), DmaError> {
+            if self.mapped {
+                return Err(DmaError::InvalidRange);
+            }
+            self.reserved = false;
+            self.freed += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn failed_install_cannot_free_physical_pages_through_dma_buffer() {
+        use crate::buffer::{DmaBuffer, DmaBufferError, SplitDmaPlatform};
+
+        let mut memory = FixedMemory {
+            reserved: false,
+            mapped: false,
+            freed: 0,
+        };
+        let mut domain = domain();
+        domain.engine.fail_invalidate = true;
+        let mut platform = SplitDmaPlatform::new(&mut memory, &mut domain);
+        let mut buffer = DmaBuffer::reserve(&mut platform, layout()).unwrap();
+        buffer.map_cpu(&mut platform).unwrap();
+        assert!(buffer.map_device(&mut platform).is_err());
+        assert_eq!(buffer.close(&mut platform), Err(DmaBufferError::DeviceActive));
+        drop(platform);
+        assert_eq!(memory.freed, 0);
+        assert_eq!(domain.quarantined_count(), 1);
+
+        domain.engine.fail_invalidate = false;
+        domain.recover_quarantined().unwrap();
+        let mut platform = SplitDmaPlatform::new(&mut memory, &mut domain);
+        buffer.close(&mut platform).unwrap();
+        drop(platform);
+        assert_eq!(memory.freed, 1);
+    }
+
+    #[test]
+    fn failed_unmap_keeps_buffer_until_owner_closes_after_recovery() {
+        use crate::buffer::{DmaBuffer, DmaBufferError, SplitDmaPlatform};
+
+        let mut memory = FixedMemory {
+            reserved: false,
+            mapped: false,
+            freed: 0,
+        };
+        let mut domain = domain();
+        let mut platform = SplitDmaPlatform::new(&mut memory, &mut domain);
+        let mut buffer = DmaBuffer::reserve(&mut platform, layout()).unwrap();
+        buffer.map_cpu(&mut platform).unwrap();
+        buffer.map_device(&mut platform).unwrap();
+        drop(platform);
+
+        domain.engine.fail_remove = true;
+        let mut platform = SplitDmaPlatform::new(&mut memory, &mut domain);
+        assert_eq!(buffer.close(&mut platform), Err(DmaBufferError::DeviceActive));
+        drop(platform);
+        assert_eq!(memory.freed, 0);
+        // До восстановления закрытие намеренно заблокировано даже
+        // после фактической остановки устройства.
+        domain.engine.fail_remove = false;
+        domain.recover_quarantined().unwrap_err();
+        // Ошибка при закрытии до снятия mapping не переводит его в карантин.
+        let mut platform = SplitDmaPlatform::new(&mut memory, &mut domain);
+        assert!(buffer.close(&mut platform).is_err());
+        drop(platform);
+        domain.recover_quarantined().unwrap();
+        let mut platform = SplitDmaPlatform::new(&mut memory, &mut domain);
+        buffer.close(&mut platform).unwrap();
+        drop(platform);
+        assert_eq!(memory.freed, 1);
+    }
+
 }

@@ -3,6 +3,8 @@
 //! Диагностическая загрузка намеренно не выдаёт разрешение.
 //! Проверки должны выполняться заново для каждого устройства и буфера.
 
+use crate::dma_evidence::{CoverageLedger, EvidenceError};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DmaBlockReason {
     MemoryMap,
@@ -29,6 +31,27 @@ pub struct DmaSafetyEvidence {
     pub buffer_is_owned: bool,
     pub rollback_verified: bool,
     pub operator_approved: bool,
+}
+
+/// Сверить оба требования с фактически заполненным журналом, а не с
+/// предполагаемым числом ядер или одной текущей CR3.
+/// При ошибке оба признака сбрасываются, включая ранее положительные.
+pub fn verify_coverage(
+    evidence: &mut DmaSafetyEvidence,
+    ledger: &CoverageLedger,
+    expected_processors: usize,
+    expected_roots: &[u64],
+) -> Result<(), EvidenceError> {
+    evidence.all_processors_checked = false;
+    evidence.all_address_spaces_checked = false;
+    ledger.verify(
+        expected_processors,
+        expected_roots,
+        crate::dma_evidence::current_mapping_epoch(),
+    )?;
+    evidence.all_processors_checked = true;
+    evidence.all_address_spaces_checked = true;
+    Ok(())
 }
 
 pub fn blocking_reason(e: &DmaSafetyEvidence) -> Option<DmaBlockReason> {
@@ -74,6 +97,22 @@ pub fn diagnostic_dma_authorized(_: &DmaSafetyEvidence) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_ledger_cannot_leave_positive_coverage_flags() {
+        let mut evidence = DmaSafetyEvidence {
+            all_processors_checked: true,
+            all_address_spaces_checked: true,
+            ..DmaSafetyEvidence::default()
+        };
+        let ledger = CoverageLedger::new(0);
+        assert_eq!(
+            verify_coverage(&mut evidence, &ledger, 12, &[0x1000]),
+            Err(EvidenceError::StaleGeneration)
+        );
+        assert!(!evidence.all_processors_checked);
+        assert!(!evidence.all_address_spaces_checked);
+    }
 
     #[test]
     fn empty_evidence_blocks_first_prerequisite() {

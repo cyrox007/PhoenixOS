@@ -18,6 +18,8 @@ jobs:
         run: rustup show
       - name: Проверить форматирование
         run: cargo fmt --all -- --check
+      - name: Проверить маршрутизацию PCI устройств через IVHD
+        run: cargo test -p phoenix-acpi
       - name: Проверить IVRS, IVMD и отказные сценарии
         run: cargo test -p phoenix-acpi
       - name: Проверить консервативный разбор отчётов

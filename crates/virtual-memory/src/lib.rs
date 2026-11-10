@@ -153,7 +153,7 @@ impl ActivePageTable {
     /// - для этой P4 не существует другого одновременного изменяемого владельца.
     pub unsafe fn from_current(physical_memory_offset: VirtAddr) -> Self {
         let (root_frame, _) = Cr3::read();
-        root_registry::register_boot_root(root_frame.start_address().as_u64())
+        root_registry::observe_current_root(root_frame.start_address().as_u64())
             .expect("нельзя доверять текущему корню CR3 без реестра");
         let level_4_table = unsafe { active_level_4_table(physical_memory_offset) };
         let mapper = unsafe { OffsetPageTable::new(level_4_table, physical_memory_offset) };

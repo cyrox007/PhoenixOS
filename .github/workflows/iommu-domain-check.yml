@@ -19,8 +19,8 @@ jobs:
       - name: Проверить форматирование Rust
         run: cargo fmt --all -- --check
       - name: Проверить DMA и обратную совместимость
-        run: cargo test -p phoenix-dma
+        run: cargo test --locked -p phoenix-dma
       - name: Проверить запрет физического DMA
-        run: cargo test -p phoenix-dma-acceptance
+        run: cargo test --locked -p phoenix-dma-acceptance
       - name: Проверить безопасные профили
         run: python3 tests/platform/test-dma-qemu-profile.py

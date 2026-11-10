@@ -8,6 +8,11 @@ from pathlib import Path
 
 START = "[INFO] PhoenixOS physical diagnostic"
 TOKENS = re.compile(r"([A-Za-z_][A-Za-z_0-9]*)=([^\s]+)")
+APIC_IDS = re.compile(
+    r"\[INFO\] diagnostic CPU APIC IDs: enabled=(\d+) "
+    r"online_capable=(\d+) ids=\[([\d, ]*)\] measured=false"
+)
+
 
 
 def record(lines, marker):
@@ -28,6 +33,32 @@ def evaluate(text):
     iommu_control = record(lines, "[INFO] diagnostic IOMMU MMIO:")
     cpus = record(lines, "[INFO] diagnostic CPU cores:")
     gate = record(lines, "[INFO] diagnostic DMA gate:")
+    topology_lines = [
+        line for line in lines if line.startswith("[INFO] diagnostic CPU APIC IDs:")
+    ]
+    cores_lines = [
+        line for line in lines if line.startswith("[INFO] diagnostic CPU cores:")
+    ]
+    topology_line = topology_lines[0] if len(topology_lines) == 1 else ""
+    apic_match = APIC_IDS.fullmatch(topology_line)
+    apic_ids = []
+    topology_ok = False
+    if apic_match:
+        raw_ids = apic_match.group(3).split(",")
+        raw_ids = [part.strip() for part in raw_ids if part.strip()]
+        if len(raw_ids) <= 64 and all(len(part) <= 10 for part in raw_ids):
+            apic_ids = [int(part) for part in raw_ids]
+            enabled = int(apic_match.group(1))
+            available = int(apic_match.group(2))
+            topology_ok = (
+                complete
+                and len(cores_lines) == 1
+                and 0 < enabled <= 64
+                and enabled == len(apic_ids)
+                and len(set(apic_ids)) == enabled
+                and all(0 <= apic_id <= 0xFFFFFFFF for apic_id in apic_ids)
+                and cpus.get("MADT") in (str(enabled + available), f"Some({enabled + available})")
+            )
 
     ram_ok = (
         complete
@@ -54,6 +85,8 @@ def evaluate(text):
         "current_cr3_checked": alias_ok,
         "ivrs_structure_checked": complete and iommu.get("structural_ok") == "true",
         "diagnostic_dma_blocked": gate_off,
+        "cpu_topology_consistent": topology_ok,
+        "enabled_apic_ids": apic_ids if topology_ok else [],
         "cpu_other_cores_checked": False,
         "all_address_spaces_checked": False,
         "iommu_control_observed": complete and iommu_control.get("observed") == "true",
@@ -71,13 +104,16 @@ def evaluate(text):
         "criterion_17_accepted": False,
         "source_is_real_hardware_verified": False,
         "hardware_progress": "15/17",
-        "missing": [
-            "Измерение MSR всех процессорных ядер",
-            "Проверка всех иных адресных пространств",
-            "Действующее преобразование IOMMU и выделенный домен",
-            "Выбор безопасного контроллера и реальная DMA-передача",
-            "Аппаратно подтверждённые остановка и освобождение",
-        ],
+        "missing": (
+            ([] if topology_ok else ["Неполная или противоречивая топология APIC"])
+            + [
+                "Измерение MSR всех процессорных ядер",
+                "Проверка всех иных адресных пространств",
+                "Действующее преобразование IOMMU и выделенный домен",
+                "Выбор безопасного контроллера и реальная DMA-передача",
+                "Аппаратно подтверждённые остановка и освобождение",
+            ]
+        ),
     }
 
 

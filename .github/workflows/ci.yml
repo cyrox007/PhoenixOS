@@ -53,6 +53,9 @@ jobs:
       - name: Проверить инвалидирование аппаратных доказательств
         run: python3 tests/platform/test-dma-mapping-coverage.py
 
+      - name: Проверить точные идентификаторы процессоров
+        run: python3 tests/platform/test-dma-topology.py
+
       - name: Проверить форматирование
         run: cargo fmt --all -- --check
 

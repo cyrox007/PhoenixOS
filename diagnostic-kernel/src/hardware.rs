@@ -861,10 +861,25 @@ fn read_acpi(
                 }
             }
             b"DMAR" => iommu_kind = "Intel-DMAR",
-            b"APIC" => match phoenix_acpi::parse_madt(bytes) {
-                Ok(madt) => processor_count = Some(madt.processor_count),
-                Err(error) => log!(out, "[WARN] diagnostic CPU topology: {error:?}"),
-            },
+            b"APIC" => {
+                match phoenix_acpi::parse_madt(bytes) {
+                    Ok(madt) => processor_count = Some(madt.processor_count),
+                    Err(error) => log!(out, "[WARN] diagnostic CPU topology: {error:?}"),
+                }
+                match phoenix_acpi::madt_topology::parse_madt_topology(bytes) {
+                    Ok(topology) => log!(
+                        out,
+                        "[INFO] diagnostic CPU APIC IDs: enabled={} online_capable={} ids={:?} measured=false",
+                        topology.enabled_count,
+                        topology.online_capable_count,
+                        topology.enabled_apic_ids()
+                    ),
+                    Err(error) => log!(
+                        out,
+                        "[WARN] diagnostic CPU APIC IDs: unverified reason={error:?}"
+                    ),
+                }
+            }
             _ => {}
         }
     }

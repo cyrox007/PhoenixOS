@@ -235,7 +235,10 @@ mod tests {
     #[test]
     fn lifecycle_of_boot_and_process_roots_is_exact() {
         let mut registry = RootRegistry::new();
-        assert_eq!(registry.register_process(0x2000), Err(RootError::MissingBootRoot));
+        assert_eq!(
+            registry.register_process(0x2000),
+            Err(RootError::MissingBootRoot)
+        );
         registry.register_boot(0x1000).unwrap();
         registry.register_boot(0x1000).unwrap();
         registry.register_process(0x2000).unwrap();
@@ -244,7 +247,10 @@ mod tests {
             registry.register_process(0x3000),
             Err(RootError::DuplicateRoot)
         );
-        assert_eq!(registry.snapshot(Some(10)).unwrap().roots(), &[0x1000, 0x2000, 0x3000]);
+        assert_eq!(
+            registry.snapshot(Some(10)).unwrap().roots(),
+            &[0x1000, 0x2000, 0x3000]
+        );
         registry.unregister_process(0x2000).unwrap();
         let snapshot = registry.snapshot(Some(11)).unwrap();
         assert_eq!(snapshot.boot_root(), 0x1000);
@@ -278,10 +284,16 @@ mod tests {
     fn all_invalid_addresses_are_rejected() {
         let mut registry = RootRegistry::new();
         for address in [0, 1, 0x1001, u64::MAX] {
-            assert_eq!(registry.register_boot(address), Err(RootError::InvalidAddress));
+            assert_eq!(
+                registry.register_boot(address),
+                Err(RootError::InvalidAddress)
+            );
         }
         registry.register_boot(0x1000).unwrap();
-        assert_eq!(registry.register_process(0x2001), Err(RootError::InvalidAddress));
+        assert_eq!(
+            registry.register_process(0x2001),
+            Err(RootError::InvalidAddress)
+        );
     }
 
     #[test]
@@ -289,7 +301,9 @@ mod tests {
         let mut registry = RootRegistry::new();
         registry.register_boot(0x1000).unwrap();
         for index in 1..MAX_ROOTS {
-            registry.register_process(((index + 1) as u64) * 4096).unwrap();
+            registry
+                .register_process(((index + 1) as u64) * 4096)
+                .unwrap();
         }
         assert_eq!(
             registry.register_process(((MAX_ROOTS + 1) as u64) * 4096),

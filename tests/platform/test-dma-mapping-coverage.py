@@ -41,7 +41,9 @@ class MappingCoverageSourceTests(unittest.TestCase):
 
     def test_registry_remains_untrusted_for_physical_dma(self):
         self.assertIn("physical_coverage_verified(&self) -> bool", self.registry)
-        self.assertIn("return Err(RootError::ConcurrentAccess)", self.registry)
+        self.assertIn("Err(RootError::ConcurrentAccess)", self.registry)
+        self.assertIn("MAX_LOCK_ATTEMPTS", self.registry)
+        self.assertIn("without_interrupts", self.registry)
         self.assertIn("self.compromised.store(true, Ordering::Release)", self.registry)
         self.assertIn("RootError::Capacity", self.registry)
         self.assertIn("DifferentBootRoot", self.registry)

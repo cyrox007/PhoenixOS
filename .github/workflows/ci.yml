@@ -69,41 +69,41 @@ jobs:
 
       - name: Запустить модульные проверки ядра
         run: |
-          cargo test -p phoenix-diagnostic-journal
-          cargo test -p phoenix-network
-          cargo test -p phoenix-framebuffer
-          cargo test -p phoenix-memory
-          cargo test -p phoenix-pcie
-          cargo test -p phoenix-driver-registry
-          cargo test -p phoenix-reference-edu
-          cargo test -p phoenix-dma
-          cargo test -p phoenix-dma-acceptance
-          cargo test -p phoenix-acpi
-          cargo test -p phoenix-block
-          cargo test -p phoenix-vm
-          cargo test -p phoenix-scheduler
-          cargo test -p phoenix-shell
-          cargo test -p phoenix-process
-          cargo test -p phoenix-process-manager
-          cargo test -p phoenix-service-manager
-          cargo test -p phoenix-storage-policy
-          cargo test -p phoenix-syscall-abi
-          cargo test -p phoenix-capability
-          cargo test -p phoenix-ipc
-          cargo test -p phoenix-libc
-          cargo test -p phoenix-elf-loader
-          cargo test -p phoenix-fat
-          cargo test -p phoenix-fs
-          cargo test -p phoenix-user-runtime
-          cargo test -p phoenix-vfs
+          cargo test --locked -p phoenix-diagnostic-journal
+          cargo test --locked -p phoenix-network
+          cargo test --locked -p phoenix-framebuffer
+          cargo test --locked -p phoenix-memory
+          cargo test --locked -p phoenix-pcie
+          cargo test --locked -p phoenix-driver-registry
+          cargo test --locked -p phoenix-reference-edu
+          cargo test --locked -p phoenix-dma
+          cargo test --locked -p phoenix-dma-acceptance
+          cargo test --locked -p phoenix-acpi
+          cargo test --locked -p phoenix-block
+          cargo test --locked -p phoenix-vm
+          cargo test --locked -p phoenix-scheduler
+          cargo test --locked -p phoenix-shell
+          cargo test --locked -p phoenix-process
+          cargo test --locked -p phoenix-process-manager
+          cargo test --locked -p phoenix-service-manager
+          cargo test --locked -p phoenix-storage-policy
+          cargo test --locked -p phoenix-syscall-abi
+          cargo test --locked -p phoenix-capability
+          cargo test --locked -p phoenix-ipc
+          cargo test --locked -p phoenix-libc
+          cargo test --locked -p phoenix-elf-loader
+          cargo test --locked -p phoenix-fat
+          cargo test --locked -p phoenix-fs
+          cargo test --locked -p phoenix-user-runtime
+          cargo test --locked -p phoenix-vfs
 
       - name: Собрать пользовательскую оболочку
-        run: cargo build -p phoenix-userspace-shell --target x86_64-unknown-none --release
+        run: cargo build --locked -p phoenix-userspace-shell --target x86_64-unknown-none --release
 
       - name: Собрать UEFI-образ
         run: |
           mkdir -p artifacts
-          IMAGE="$(cargo run --release --quiet)"
+          IMAGE="$(cargo run --locked --release --quiet)"
           test -f "$IMAGE"
           cp "$IMAGE" artifacts/phoenixos-uefi.img
 
@@ -122,7 +122,7 @@ jobs:
 
       - name: Собрать независимый диагностический образ UEFI
         run: |
-          IMAGE="$(cargo run -p phoenixos-diagnostic-image --release --quiet)"
+          IMAGE="$(cargo run --locked -p phoenixos-diagnostic-image --release --quiet)"
           test -f "$IMAGE"
           cp "$IMAGE" artifacts/phoenixos-diagnostic-uefi.img
 
@@ -153,7 +153,7 @@ jobs:
 
       - name: Собрать отдельный образ реального DMA для QEMU
         run: |
-          IMAGE="$(cargo run -p phoenixos-dma-test-image --release --quiet)"
+          IMAGE="$(cargo run --locked -p phoenixos-dma-test-image --release --quiet)"
           test -f "$IMAGE"
           cp "$IMAGE" artifacts/phoenixos-dma-qemu-only-uefi.img
 

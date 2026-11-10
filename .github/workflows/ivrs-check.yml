@@ -19,8 +19,8 @@ jobs:
       - name: Проверить форматирование
         run: cargo fmt --all -- --check
       - name: Проверить маршрутизацию PCI устройств через IVHD
-        run: cargo test -p phoenix-acpi
+        run: cargo test --locked -p phoenix-acpi
       - name: Проверить IVRS, IVMD и отказные сценарии
-        run: cargo test -p phoenix-acpi
+        run: cargo test --locked -p phoenix-acpi
       - name: Проверить консервативный разбор отчётов
         run: python3 tests/platform/test-dma-evidence.py

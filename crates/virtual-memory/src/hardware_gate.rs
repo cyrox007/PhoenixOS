@@ -132,7 +132,12 @@ mod tests {
         };
         let ledger = CoverageLedger::new(0);
         assert_eq!(
-            verify_coverage(&mut evidence, &ledger, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], &[0x1000]),
+            verify_coverage(
+                &mut evidence,
+                &ledger,
+                &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+                &[0x1000]
+            ),
             Err(EvidenceError::StaleGeneration)
         );
         assert!(!evidence.all_processors_checked);
@@ -155,12 +160,22 @@ mod tests {
         };
         let stale = CoverageLedger::new(0);
         assert_eq!(
-            blocking_reason_with_current_coverage(&evidence, &stale, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], &[0x1000]),
+            blocking_reason_with_current_coverage(
+                &evidence,
+                &stale,
+                &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+                &[0x1000]
+            ),
             Some(DmaBlockReason::OtherAddressSpaces)
         );
         let current = CoverageLedger::new(crate::dma_evidence::current_mapping_epoch().unwrap());
         assert_eq!(
-            blocking_reason_with_current_coverage(&evidence, &current, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], &[0x1000]),
+            blocking_reason_with_current_coverage(
+                &evidence,
+                &current,
+                &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+                &[0x1000]
+            ),
             Some(DmaBlockReason::OtherProcessors)
         );
     }

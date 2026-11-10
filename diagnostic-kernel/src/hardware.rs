@@ -879,7 +879,7 @@ fn read_acpi(
                         "[WARN] diagnostic CPU APIC IDs: unverified reason={error:?}"
                     ),
                 }
-            },
+            }
             _ => {}
         }
     }

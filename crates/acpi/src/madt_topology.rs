@@ -69,10 +69,9 @@ pub fn parse_madt_topology(bytes: &[u8]) -> Result<MadtTopology, TopologyError> 
                 let id = u32::from(bytes[offset + 3]);
                 Some((id, read_u32(bytes, offset + 4)?))
             }
-            9 if record_length >= 16 => Some((
-                read_u32(bytes, offset + 4)?,
-                read_u32(bytes, offset + 8)?,
-            )),
+            9 if record_length >= 16 => {
+                Some((read_u32(bytes, offset + 4)?, read_u32(bytes, offset + 8)?))
+            }
             0 | 9 => return Err(TopologyError::InvalidRecord),
             _ => None,
         };

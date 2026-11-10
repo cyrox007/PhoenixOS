@@ -159,9 +159,11 @@ impl CoverageLedger {
         {
             return Err(EvidenceError::MissingProcessor);
         }
-        if expected_apic_ids.iter().enumerate().any(|(index, id)| {
-            expected_apic_ids[..index].contains(id)
-        }) {
+        if expected_apic_ids
+            .iter()
+            .enumerate()
+            .any(|(index, id)| expected_apic_ids[..index].contains(id))
+        {
             return Err(EvidenceError::DuplicateExpectedProcessor);
         }
         if expected_apic_ids.iter().any(|required| {
@@ -247,9 +249,20 @@ mod tests {
         }
         ledger.add_root(root(0x1000, 11, true)).unwrap();
         ledger.add_root(root(0x2000, 11, true)).unwrap();
-        assert_eq!(ledger.verify(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], &[0x1000, 0x2000], Some(11)), Ok(()));
         assert_eq!(
-            ledger.verify(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], &[0x1000, 0x2000], Some(12)),
+            ledger.verify(
+                &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+                &[0x1000, 0x2000],
+                Some(11)
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            ledger.verify(
+                &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+                &[0x1000, 0x2000],
+                Some(12)
+            ),
             Err(EvidenceError::StaleGeneration)
         );
     }

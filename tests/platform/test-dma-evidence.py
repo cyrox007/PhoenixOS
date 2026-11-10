@@ -16,6 +16,7 @@ GOOD = """[INFO] PhoenixOS physical diagnostic
 [INFO] diagnostic aliases: complete=true leaves=1300 other_pages=1 conflicts=0 unknown=0 scope=current-cr3
 [INFO] diagnostic IOMMU: ivhd=1 structural_ok=true runtime=unverified domain=unverified
 [INFO] diagnostic IOMMU MMIO: observed=false reason=no-ivhd domain=unverified
+[INFO] diagnostic CPU APIC IDs: enabled=12 online_capable=0 ids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] measured=false
 [INFO] diagnostic CPU cores: MADT=12 msr_consensus=unverified BSP_only=true
 [INFO] diagnostic DMA gate: authorized=false reason=Some(OtherAddressSpaces) readonly=1
 [INFO] diagnostic complete: OK
@@ -29,9 +30,31 @@ class EvidenceTests(unittest.TestCase):
         self.assertTrue(result["direct_ram_checked"])
         self.assertTrue(result["current_cr3_checked"])
         self.assertTrue(result["diagnostic_dma_blocked"])
+        self.assertTrue(result["cpu_topology_consistent"])
+        self.assertEqual(result["enabled_apic_ids"], list(range(12)))
+        self.assertFalse(result["cpu_other_cores_checked"])
         self.assertFalse(result["criterion_16_accepted"])
         self.assertFalse(result["criterion_17_accepted"])
         self.assertFalse(result["source_is_real_hardware_verified"])
+
+    def test_topology_with_duplicate_or_missing_apic_id_is_rejected(self):
+        duplicated = GOOD.replace(
+            "ids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]",
+            "ids=[0, 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]",
+        )
+        self.assertFalse(module.evaluate(duplicated)["cpu_topology_consistent"])
+        self.assertFalse(module.evaluate(GOOD.replace(
+            "enabled=12 online_capable=0", "enabled=11 online_capable=0"
+        ))["cpu_topology_consistent"])
+        self.assertFalse(module.evaluate(GOOD.replace(
+            "measured=false", "measured=true"
+        ))["cpu_topology_consistent"])
+        self.assertFalse(module.evaluate(GOOD.replace(
+            "[INFO] diagnostic CPU APIC IDs:", "[WARN] diagnostic CPU APIC IDs:"
+        ))["cpu_topology_consistent"])
+        self.assertFalse(module.evaluate(GOOD.replace(
+            "MADT=12", "MADT=11"
+        ))["cpu_topology_consistent"])
 
     def test_control_register_observation_never_proves_iommu_domain(self):
         transcript = GOOD.replace(

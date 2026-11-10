@@ -790,6 +790,12 @@ fn read_acpi(
                             ivrs.dma_remap_reported,
                             ivrs.first_iommu_base
                         );
+                        log!(
+                            out,
+                            "[INFO] diagnostic IVMD: protected={} ambiguous_iommu={} device_scope=unverified",
+                            ivrs.protected_count,
+                            ivrs.ambiguous_iommu_base
+                        );
                     }
                     Err(error) => {
                         ivrs_invalid = true;

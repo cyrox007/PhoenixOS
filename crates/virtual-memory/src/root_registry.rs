@@ -119,6 +119,18 @@ impl RootRegistry {
         Ok(())
     }
 
+    /// Первый наблюдаемый корень считается системным; последующие должны
+    /// уже существовать в реестре, в том числе корни процессов.
+    pub fn observe_current(&mut self, address: u64) -> Result<(), RootError> {
+        if self.boot.is_none() {
+            return self.register_boot(address);
+        }
+        if self.contains(address) {
+            return Ok(());
+        }
+        Err(RootError::MissingRoot)
+    }
+
     pub fn register_process(&mut self, address: u64) -> Result<(), RootError> {
         if self.boot.is_none() {
             return Err(RootError::MissingBootRoot);
@@ -212,6 +224,10 @@ pub fn register_boot_root(address: u64) -> Result<(), RootError> {
 }
 
 /// Все процессы ядра должны проходить через этот путь создания CR3.
+pub fn observe_current_root(address: u64) -> Result<(), RootError> {
+    REGISTRY.access(|state| state.observe_current(address))
+}
+
 pub fn register_process_root(address: u64) -> Result<(), RootError> {
     REGISTRY.access(|state| state.register_process(address))
 }
@@ -256,6 +272,19 @@ mod tests {
         assert_eq!(snapshot.boot_root(), 0x1000);
         assert_eq!(snapshot.roots(), &[0x1000, 0x3000]);
         assert!(!snapshot.physical_coverage_verified());
+    }
+
+    #[test]
+    fn current_process_root_is_not_misidentified_as_boot_root() {
+        let mut registry = RootRegistry::new();
+        registry.observe_current(0x1000).unwrap();
+        registry.register_process(0x2000).unwrap();
+        registry.observe_current(0x2000).unwrap();
+        assert_eq!(
+            registry.observe_current(0x3000),
+            Err(RootError::MissingRoot)
+        );
+        assert_eq!(registry.snapshot(Some(2)).unwrap().boot_root(), 0x1000);
     }
 
     #[test]

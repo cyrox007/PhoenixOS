@@ -13,6 +13,11 @@ pub struct IvrsSummary {
     pub first_pci_segment: Option<u16>,
     pub first_device_id: Option<u16>,
     pub dma_remap_reported: bool,
+    /// Диапазоны IVMD, которые нельзя использовать для будущего DMA-буфера.
+    pub protected: [(u64, u64); MAX_IVRS_BLOCKS],
+    pub protected_count: usize,
+    /// Несколько разных адресов IOMMU запрещают чтение первого наугад.
+    pub ambiguous_iommu_base: bool,
 }
 
 fn u16_at(data: &[u8], start: usize) -> u16 {
@@ -57,6 +62,9 @@ pub fn parse_ivrs(bytes: &[u8]) -> Result<IvrsSummary, AcpiError> {
         first_pci_segment: None,
         first_device_id: None,
         dma_remap_reported: ivinfo & (1 << 1) != 0,
+        protected: [(0, 0); MAX_IVRS_BLOCKS],
+        protected_count: 0,
+        ambiguous_iommu_base: false,
     };
     let mut cursor = first;
     let mut blocks = 0;
@@ -81,6 +89,9 @@ pub fn parse_ivrs(bytes: &[u8]) -> Result<IvrsSummary, AcpiError> {
                     return Err(AcpiError::InvalidLength);
                 }
                 summary.hardware_blocks += 1;
+                if summary.first_iommu_base.is_some_and(|previous| previous != base) {
+                    summary.ambiguous_iommu_base = true;
+                }
                 if summary.first_iommu_base.is_none() {
                     summary.first_iommu_base = Some(base);
                     summary.first_device_id = Some(u16_at(block, 4));
@@ -91,6 +102,16 @@ pub fn parse_ivrs(bytes: &[u8]) -> Result<IvrsSummary, AcpiError> {
                 if size < 32 {
                     return Err(AcpiError::InvalidLength);
                 }
+                // Поля IVMD: start_address=16, memory_length=24.
+                // Консервативно защищаем любые IVMD, независимо от флагов.
+                let start = u64_at(block, 16);
+                let length = u64_at(block, 24);
+                let end = start.checked_add(length).ok_or(AcpiError::InvalidLength)?;
+                if length == 0 || start & 4095 != 0 || length & 4095 != 0 {
+                    return Err(AcpiError::InvalidLength);
+                }
+                summary.protected[summary.protected_count] = (start, end);
+                summary.protected_count += 1;
                 summary.memory_reservations += 1;
             }
             _ => summary.unsupported_blocks += 1,
@@ -98,7 +119,30 @@ pub fn parse_ivrs(bytes: &[u8]) -> Result<IvrsSummary, AcpiError> {
         blocks += 1;
         cursor += size;
     }
+    if summary.ambiguous_iommu_base {
+        summary.first_iommu_base = None;
+    }
     Ok(summary)
+}
+
+impl IvrsSummary {
+    /// Проверка пересечения с IVMD НЕ является разрешением DMA.
+    pub fn conflicts_with_protected_memory(&self, start: u64, length: u64) -> bool {
+        let Some(end) = start.checked_add(length) else {
+            return true;
+        };
+        if length == 0 {
+            return true;
+        }
+        self.protected[..self.protected_count]
+            .iter()
+            .any(|&(first, last)| start < last && first < end)
+    }
+
+    /// Сопоставление PCI-функции с отдельным IOMMU-доменом не реализовано.
+    pub const fn device_scope_verified(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -152,4 +196,60 @@ mod tests {
         assert_eq!(x.hardware_blocks, 0);
         assert_eq!(x.unsupported_blocks, 1);
     }
+
+    #[test]
+    fn ivmd_ranges_are_recorded_and_cannot_be_used_as_dma_buffers() {
+        let mut t = ivrs().to_vec();
+        let mut m = [0u8; 32];
+        m[0] = 0x20;
+        m[2..4].copy_from_slice(&32u16.to_le_bytes());
+        m[16..24].copy_from_slice(&0x3000u64.to_le_bytes());
+        m[24..32].copy_from_slice(&0x2000u64.to_le_bytes());
+        t.extend_from_slice(&m);
+        let length = t.len() as u32;
+        t[4..8].copy_from_slice(&length.to_le_bytes());
+        seal(&mut t);
+        let parsed = parse_ivrs(&t).unwrap();
+        assert_eq!(parsed.protected_count, 1);
+        assert_eq!(parsed.protected[0], (0x3000, 0x5000));
+        assert!(parsed.conflicts_with_protected_memory(0x4000, 4096));
+        assert!(!parsed.conflicts_with_protected_memory(0x5000, 4096));
+        assert!(parsed.conflicts_with_protected_memory(u64::MAX, 4096));
+        assert!(!parsed.device_scope_verified());
+    }
+
+    #[test]
+    fn invalid_ivmd_sizes_fail_closed() {
+        for size in [0u64, 1u64, 4097u64] {
+            let mut t = ivrs().to_vec();
+            let mut m = [0u8; 32];
+            m[0] = 0x22;
+            m[2..4].copy_from_slice(&32u16.to_le_bytes());
+            m[16..24].copy_from_slice(&0x3000u64.to_le_bytes());
+            m[24..32].copy_from_slice(&size.to_le_bytes());
+            t.extend_from_slice(&m);
+            let length = t.len() as u32;
+            t[4..8].copy_from_slice(&length.to_le_bytes());
+            seal(&mut t);
+            assert_eq!(parse_ivrs(&t), Err(AcpiError::InvalidLength));
+        }
+    }
+
+    #[test]
+    fn multiple_distinct_iommu_bases_do_not_select_first() {
+        let mut t = ivrs().to_vec();
+        let mut second = [0u8; 24];
+        second[0] = 0x10;
+        second[2..4].copy_from_slice(&24u16.to_le_bytes());
+        second[8..16].copy_from_slice(&0xfed9_0000u64.to_le_bytes());
+        t.extend_from_slice(&second);
+        let length = t.len() as u32;
+        t[4..8].copy_from_slice(&length.to_le_bytes());
+        seal(&mut t);
+        let parsed = parse_ivrs(&t).unwrap();
+        assert_eq!(parsed.hardware_blocks, 2);
+        assert!(parsed.ambiguous_iommu_base);
+        assert_eq!(parsed.first_iommu_base, None);
+    }
+
 }

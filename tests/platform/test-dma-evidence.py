@@ -57,7 +57,7 @@ class EvidenceTests(unittest.TestCase):
         ))["cpu_topology_consistent"])
         extra = GOOD.replace(
             "[INFO] diagnostic CPU cores: MADT=12",
-            "[INFO] diagnostic CPU APIC IDs: enabled=1 online_capable=0 ids=[0] measured=false\\n[INFO] diagnostic CPU cores: MADT=12",
+            "[INFO] diagnostic CPU APIC IDs: enabled=1 online_capable=0 ids=[0] measured=false\n[INFO] diagnostic CPU cores: MADT=12",
         )
         self.assertFalse(module.evaluate(extra)["cpu_topology_consistent"])
 

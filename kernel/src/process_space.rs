@@ -46,7 +46,7 @@ impl<const CAPACITY: usize> ProcessAddressSpace<CAPACITY> {
         allocator: &mut A,
     ) -> Result<Self, ProcessAddressSpaceError>
     where
-        A: FrameAllocator<Size4KiB>,
+        A: FrameAllocator<Size4KiB> + FrameDeallocator<Size4KiB>,
     {
         let mut page_table = unsafe { InactivePageTable::new(physical_memory_offset, allocator)? };
         unsafe {

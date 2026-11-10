@@ -3,9 +3,13 @@
 //! При любой ошибке глобальный экземпляр необратимо запрещает доверять снимкам.
 
 use core::cell::UnsafeCell;
+use core::hint::spin_loop;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::dma_evidence::{MAX_ROOTS, current_mapping_epoch};
+
+// Ограничение ожидания исключает бесконечное зависание при неисправном владельце.
+const MAX_LOCK_ATTEMPTS: usize = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RootKind {
@@ -183,7 +187,7 @@ struct SharedRegistry {
 }
 
 // Доступ к UnsafeCell выдаётся только после исключительного захвата locked.
-// Повторный/прерванный вход не ожидает освобождения блокировки, а запрещает допуск.
+// На физическом ядре прерывания отключаются на время короткой операции реестра.
 unsafe impl Sync for SharedRegistry {}
 
 impl SharedRegistry {
@@ -191,24 +195,46 @@ impl SharedRegistry {
         &self,
         operation: impl FnOnce(&mut RootRegistry) -> Result<T, RootError>,
     ) -> Result<T, RootError> {
+        #[cfg(target_os = "none")]
+        {
+            x86_64::instructions::interrupts::without_interrupts(|| self.access_locked(operation))
+        }
+        #[cfg(not(target_os = "none"))]
+        {
+            self.access_locked(operation)
+        }
+    }
+
+    fn access_locked<T>(
+        &self,
+        operation: impl FnOnce(&mut RootRegistry) -> Result<T, RootError>,
+    ) -> Result<T, RootError> {
         if self.compromised.load(Ordering::Acquire) {
             return Err(RootError::Compromised);
         }
-        if self
-            .locked
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            self.compromised.store(true, Ordering::Release);
-            return Err(RootError::ConcurrentAccess);
+
+        for _ in 0..MAX_LOCK_ATTEMPTS {
+            if self
+                .locked
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
+                // Все изменения под исключительной блокировкой.
+                // Ошибка структуры необратимо запрещает доверие; обычное
+                // соперничество процессоров само по себе структуру не портит.
+                let result = operation(unsafe { &mut *self.state.get() });
+                if result.is_err() {
+                    self.compromised.store(true, Ordering::Release);
+                }
+                self.locked.store(false, Ordering::Release);
+                return result;
+            }
+            spin_loop();
         }
-        // Все доступы под locked; при панике ядро останавливается.
-        let result = operation(unsafe { &mut *self.state.get() });
-        if result.is_err() {
-            self.compromised.store(true, Ordering::Release);
-        }
-        self.locked.store(false, Ordering::Release);
-        result
+
+        // Вызов отклонён без изменений реестра. Его вызывающий код обязан
+        // сохранить владение памятью и не выдавать допуск физическому DMA.
+        Err(RootError::ConcurrentAccess)
     }
 }
 
@@ -247,6 +273,44 @@ pub fn snapshot() -> Result<RootSnapshot, RootError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contention_does_not_irreversibly_poison_registry() {
+        let registry = SharedRegistry {
+            locked: AtomicBool::new(true),
+            compromised: AtomicBool::new(false),
+            state: UnsafeCell::new(RootRegistry::new()),
+        };
+        assert_eq!(
+            registry.access(|state| state.register_boot(0x1000)),
+            Err(RootError::ConcurrentAccess)
+        );
+        assert!(!registry.compromised.load(Ordering::Acquire));
+
+        registry.locked.store(false, Ordering::Release);
+        registry
+            .access(|state| state.register_boot(0x1000))
+            .unwrap();
+        assert!(registry.access(|state| Ok(state.contains(0x1000))).unwrap());
+    }
+
+    #[test]
+    fn structural_error_still_blocks_further_registry_access() {
+        let registry = SharedRegistry {
+            locked: AtomicBool::new(false),
+            compromised: AtomicBool::new(false),
+            state: UnsafeCell::new(RootRegistry::new()),
+        };
+        registry.access(|state| state.register_boot(0x1000)).unwrap();
+        assert_eq!(
+            registry.access(|state| state.register_process(0x1000)),
+            Err(RootError::DuplicateRoot)
+        );
+        assert_eq!(
+            registry.access(|state| Ok(state.contains(0x1000))),
+            Err(RootError::Compromised)
+        );
+    }
 
     #[test]
     fn lifecycle_of_boot_and_process_roots_is_exact() {

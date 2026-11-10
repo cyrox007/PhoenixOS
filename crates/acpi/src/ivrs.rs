@@ -89,7 +89,10 @@ pub fn parse_ivrs(bytes: &[u8]) -> Result<IvrsSummary, AcpiError> {
                     return Err(AcpiError::InvalidLength);
                 }
                 summary.hardware_blocks += 1;
-                if summary.first_iommu_base.is_some_and(|previous| previous != base) {
+                if summary
+                    .first_iommu_base
+                    .is_some_and(|previous| previous != base)
+                {
                     summary.ambiguous_iommu_base = true;
                 }
                 if summary.first_iommu_base.is_none() {
@@ -251,5 +254,4 @@ mod tests {
         assert!(parsed.ambiguous_iommu_base);
         assert_eq!(parsed.first_iommu_base, None);
     }
-
 }

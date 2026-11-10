@@ -525,11 +525,7 @@ mod tests {
             Ok(crate::CpuVirtualAddress::new(0x4000))
         }
 
-        fn unmap_cpu(
-            &mut self,
-            _: crate::CpuVirtualAddress,
-            _: DmaLayout,
-        ) -> Result<(), DmaError> {
+        fn unmap_cpu(&mut self, _: crate::CpuVirtualAddress, _: DmaLayout) -> Result<(), DmaError> {
             self.mapped = false;
             Ok(())
         }
@@ -559,7 +555,10 @@ mod tests {
         let mut buffer = DmaBuffer::reserve(&mut platform, layout()).unwrap();
         buffer.map_cpu(&mut platform).unwrap();
         assert!(buffer.map_device(&mut platform).is_err());
-        assert_eq!(buffer.close(&mut platform), Err(DmaBufferError::DeviceActive));
+        assert_eq!(
+            buffer.close(&mut platform),
+            Err(DmaBufferError::DeviceActive)
+        );
         drop(platform);
         assert_eq!(memory.freed, 0);
         assert_eq!(domain.quarantined_count(), 1);
@@ -601,7 +600,10 @@ mod tests {
         assert_eq!(domain.quarantined_count(), 1);
         // Пока IOMMU не подтвердил снятие отображения, страницы удерживаются.
         let mut platform = SplitDmaPlatform::new(&mut memory, &mut domain);
-        assert_eq!(buffer.close(&mut platform), Err(DmaBufferError::DeviceActive));
+        assert_eq!(
+            buffer.close(&mut platform),
+            Err(DmaBufferError::DeviceActive)
+        );
         drop(platform);
         domain.engine.fail_remove = false;
         domain.recover_quarantined().unwrap();
@@ -610,5 +612,4 @@ mod tests {
         drop(platform);
         assert_eq!(memory.freed, 1);
     }
-
 }

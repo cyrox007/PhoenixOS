@@ -67,6 +67,7 @@ pub enum EvidenceError {
     InvalidRoot,
     InconsistentRegisters,
     MissingProcessor,
+    DuplicateExpectedProcessor,
     MissingRoot,
     UnsafeAlias,
     StaleGeneration,
@@ -140,21 +141,35 @@ impl CoverageLedger {
         Ok(())
     }
 
-    /// expected_* получает только доверенный реестр работающих процессоров
-    /// и созданных корней. Эти числа не могут выводиться из отчёта Windows.
+    /// Список APIC ID берётся из проверенной топологии, сверенной с реальным
+    /// запуском процессоров, а список CR3 — из доверенного реестра ядра.
+    /// Простое совпадение количества не подтверждает покрытие оборудования.
     pub fn verify(
         &self,
-        expected_processors: usize,
+        expected_apic_ids: &[u32],
         expected_roots: &[u64],
         current_epoch: Option<u64>,
     ) -> Result<(), EvidenceError> {
         if current_epoch != Some(self.generation) {
             return Err(EvidenceError::StaleGeneration);
         }
-        if expected_processors == 0
-            || expected_processors > MAX_PROCESSORS
-            || self.processor_count != expected_processors
+        if expected_apic_ids.is_empty()
+            || expected_apic_ids.len() > MAX_PROCESSORS
+            || self.processor_count != expected_apic_ids.len()
         {
+            return Err(EvidenceError::MissingProcessor);
+        }
+        if expected_apic_ids.iter().enumerate().any(|(index, id)| {
+            expected_apic_ids[..index].contains(id)
+        }) {
+            return Err(EvidenceError::DuplicateExpectedProcessor);
+        }
+        if expected_apic_ids.iter().any(|required| {
+            !self.processors[..self.processor_count]
+                .iter()
+                .flatten()
+                .any(|found| found.logical_apic_id == *required)
+        }) {
             return Err(EvidenceError::MissingProcessor);
         }
         if expected_roots.is_empty()
@@ -232,9 +247,9 @@ mod tests {
         }
         ledger.add_root(root(0x1000, 11, true)).unwrap();
         ledger.add_root(root(0x2000, 11, true)).unwrap();
-        assert_eq!(ledger.verify(12, &[0x1000, 0x2000], Some(11)), Ok(()));
+        assert_eq!(ledger.verify(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], &[0x1000, 0x2000], Some(11)), Ok(()));
         assert_eq!(
-            ledger.verify(12, &[0x1000, 0x2000], Some(12)),
+            ledger.verify(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], &[0x1000, 0x2000], Some(12)),
             Err(EvidenceError::StaleGeneration)
         );
     }
@@ -254,7 +269,7 @@ mod tests {
             Err(EvidenceError::InconsistentRegisters)
         );
         assert_eq!(
-            ledger.verify(12, &[0x1000], Some(3)),
+            ledger.verify(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], &[0x1000], Some(3)),
             Err(EvidenceError::MissingProcessor)
         );
     }
@@ -279,7 +294,7 @@ mod tests {
             Err(EvidenceError::DuplicateRoot)
         );
         assert_eq!(
-            ledger.verify(1, &[0x2000], Some(3)),
+            ledger.verify(&[0], &[0x2000], Some(3)),
             Err(EvidenceError::MissingRoot)
         );
     }
@@ -291,7 +306,7 @@ mod tests {
         ledger.add_root(root(0x1000, 3, true)).unwrap();
         ledger.add_root(root(0x2000, 3, true)).unwrap();
         assert_eq!(
-            ledger.verify(1, &[0x1000, 0x1000], Some(3)),
+            ledger.verify(&[0], &[0x1000, 0x1000], Some(3)),
             Err(EvidenceError::DuplicateRoot)
         );
     }
@@ -306,9 +321,26 @@ mod tests {
         ledger.add_processor(processor(0, before)).unwrap();
         ledger.add_root(root(0x1000, before, true)).unwrap();
         assert_eq!(
-            ledger.verify(1, &[0x1000], current_mapping_epoch()),
+            ledger.verify(&[0], &[0x1000], current_mapping_epoch()),
             Err(EvidenceError::StaleGeneration)
         );
+    }
+
+    #[test]
+    fn same_count_with_wrong_apic_ids_must_fail() {
+        let mut ledger = CoverageLedger::new(12);
+        ledger.add_processor(processor(0, 12)).unwrap();
+        ledger.add_processor(processor(1, 12)).unwrap();
+        ledger.add_root(root(0x1000, 12, true)).unwrap();
+        assert_eq!(
+            ledger.verify(&[0, 2], &[0x1000], Some(12)),
+            Err(EvidenceError::MissingProcessor)
+        );
+        assert_eq!(
+            ledger.verify(&[0, 0], &[0x1000], Some(12)),
+            Err(EvidenceError::DuplicateExpectedProcessor)
+        );
+        assert_eq!(ledger.verify(&[0, 1], &[0x1000], Some(12)), Ok(()));
     }
 
     #[test]

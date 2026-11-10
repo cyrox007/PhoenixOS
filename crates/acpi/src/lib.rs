@@ -1,6 +1,7 @@
 #![no_std]
 
 pub mod iommu_observation;
+pub mod madt_topology;
 pub mod ivhd_scope;
 pub mod ivrs;
 

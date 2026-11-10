@@ -39,13 +39,13 @@ pub struct DmaSafetyEvidence {
 pub fn verify_coverage(
     evidence: &mut DmaSafetyEvidence,
     ledger: &CoverageLedger,
-    expected_processors: usize,
+    expected_apic_ids: &[u32],
     expected_roots: &[u64],
 ) -> Result<(), EvidenceError> {
     evidence.all_processors_checked = false;
     evidence.all_address_spaces_checked = false;
     ledger.verify(
-        expected_processors,
+        expected_apic_ids,
         expected_roots,
         crate::dma_evidence::current_mapping_epoch(),
     )?;
@@ -60,18 +60,19 @@ pub fn verify_coverage(
 pub fn blocking_reason_with_current_coverage(
     e: &DmaSafetyEvidence,
     ledger: &CoverageLedger,
-    expected_processors: usize,
+    expected_apic_ids: &[u32],
     expected_roots: &[u64],
 ) -> Option<DmaBlockReason> {
     if let Err(reason) = ledger.verify(
-        expected_processors,
+        expected_apic_ids,
         expected_roots,
         crate::dma_evidence::current_mapping_epoch(),
     ) {
         return Some(match reason {
             EvidenceError::MissingProcessor
             | EvidenceError::DuplicateCpu
-            | EvidenceError::InconsistentRegisters => DmaBlockReason::OtherProcessors,
+            | EvidenceError::InconsistentRegisters
+            | EvidenceError::DuplicateExpectedProcessor => DmaBlockReason::OtherProcessors,
             _ => DmaBlockReason::OtherAddressSpaces,
         });
     }
@@ -131,7 +132,7 @@ mod tests {
         };
         let ledger = CoverageLedger::new(0);
         assert_eq!(
-            verify_coverage(&mut evidence, &ledger, 12, &[0x1000]),
+            verify_coverage(&mut evidence, &ledger, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], &[0x1000]),
             Err(EvidenceError::StaleGeneration)
         );
         assert!(!evidence.all_processors_checked);
@@ -154,12 +155,12 @@ mod tests {
         };
         let stale = CoverageLedger::new(0);
         assert_eq!(
-            blocking_reason_with_current_coverage(&evidence, &stale, 12, &[0x1000]),
+            blocking_reason_with_current_coverage(&evidence, &stale, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], &[0x1000]),
             Some(DmaBlockReason::OtherAddressSpaces)
         );
         let current = CoverageLedger::new(crate::dma_evidence::current_mapping_epoch().unwrap());
         assert_eq!(
-            blocking_reason_with_current_coverage(&evidence, &current, 12, &[0x1000]),
+            blocking_reason_with_current_coverage(&evidence, &current, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], &[0x1000]),
             Some(DmaBlockReason::OtherProcessors)
         );
     }

@@ -332,8 +332,7 @@ impl InactivePageTable {
     /// уничтожения guard, обязаны быть отображены в новом адресном пространстве.
     pub unsafe fn activate(&self) -> AddressSpaceActivation<'_> {
         assert!(
-            root_registry::contains_root(self.root_frame.start_address().as_u64())
-                .unwrap_or(false),
+            root_registry::contains_root(self.root_frame.start_address().as_u64()).unwrap_or(false),
             "нельзя активировать неучтённое адресное пространство"
         );
         dma_evidence::invalidate_mappings();

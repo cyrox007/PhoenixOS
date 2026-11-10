@@ -699,9 +699,39 @@ fn acpi_and_pci(
             }
             if function.class_code == 1 {
                 storage = storage.saturating_add(1);
+                let bdf = (u16::from(function.bus) << 8)
+                    | (u16::from(function.device) << 3)
+                    | u16::from(function.function);
+                let scope = scopes
+                    .as_ref()
+                    .map(|map| map.query(entry.segment_group, bdf));
+                log!(
+                    out,
+                    "[INFO] diagnostic PCI storage: {:02x}:{:02x}.{} vendor={:04x} device={:04x} iommu_scope={scope:?} protected=true DMA-approved=false",
+                    function.bus,
+                    function.device,
+                    function.function,
+                    function.vendor_id,
+                    function.device_id
+                );
             }
             if function.class_code == 0xc && function.subclass == 3 {
                 usb = usb.saturating_add(1);
+                let bdf = (u16::from(function.bus) << 8)
+                    | (u16::from(function.device) << 3)
+                    | u16::from(function.function);
+                let scope = scopes
+                    .as_ref()
+                    .map(|map| map.query(entry.segment_group, bdf));
+                log!(
+                    out,
+                    "[INFO] diagnostic PCI USB: {:02x}:{:02x}.{} vendor={:04x} device={:04x} iommu_scope={scope:?} protected=true DMA-approved=false",
+                    function.bus,
+                    function.device,
+                    function.function,
+                    function.vendor_id,
+                    function.device_id
+                );
             }
             if function.class_code == 2 {
                 network = network.saturating_add(1);
@@ -772,6 +802,7 @@ fn read_acpi(
     let mut ivrs_invalid = false;
     let mut first_iommu_base = None;
     let mut device_scopes = None;
+    let mut ivrs_tables = 0u8;
     let mut processor_count = None;
     for physical in xsdt.iter() {
         let bytes = memory.table(physical)?;
@@ -785,6 +816,7 @@ fn read_acpi(
             }
             b"IVRS" => {
                 iommu_kind = "AMD-IVRS";
+                ivrs_tables = ivrs_tables.saturating_add(1);
                 match phoenix_acpi::ivrs::parse_ivrs(bytes) {
                     Ok(ivrs) => {
                         match phoenix_acpi::ivhd_scope::parse_ivhd_scopes(bytes) {
@@ -796,7 +828,11 @@ fn read_acpi(
                                     scopes.unknown_entries,
                                     scopes.hardware_blocks
                                 );
-                                device_scopes = Some(scopes);
+                                if ivrs_tables == 1 {
+                                    device_scopes = Some(scopes);
+                                } else {
+                                    device_scopes = None;
+                                }
                             }
                             Err(error) => log!(out, "[WARN] diagnostic IVHD scope: {error:?}"),
                         }
@@ -831,6 +867,13 @@ fn read_acpi(
             },
             _ => {}
         }
+    }
+    if ivrs_tables > 1 {
+        log!(
+            out,
+            "[WARN] diagnostic IVHD scope: multiple IVRS tables, device mapping incomplete"
+        );
+        device_scopes = None;
     }
     log!(
         out,

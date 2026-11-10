@@ -55,6 +55,11 @@ class EvidenceTests(unittest.TestCase):
         self.assertFalse(module.evaluate(GOOD.replace(
             "MADT=12", "MADT=11"
         ))["cpu_topology_consistent"])
+        extra = GOOD.replace(
+            "[INFO] diagnostic CPU cores: MADT=12",
+            "[INFO] diagnostic CPU APIC IDs: enabled=1 online_capable=0 ids=[0] measured=false\\n[INFO] diagnostic CPU cores: MADT=12",
+        )
+        self.assertFalse(module.evaluate(extra)["cpu_topology_consistent"])
 
     def test_control_register_observation_never_proves_iommu_domain(self):
         transcript = GOOD.replace(

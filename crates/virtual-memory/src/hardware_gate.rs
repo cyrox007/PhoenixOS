@@ -157,9 +157,7 @@ mod tests {
             blocking_reason_with_current_coverage(&evidence, &stale, 12, &[0x1000]),
             Some(DmaBlockReason::OtherAddressSpaces)
         );
-        let current = CoverageLedger::new(
-            crate::dma_evidence::current_mapping_epoch().unwrap()
-        );
+        let current = CoverageLedger::new(crate::dma_evidence::current_mapping_epoch().unwrap());
         assert_eq!(
             blocking_reason_with_current_coverage(&evidence, &current, 12, &[0x1000]),
             Some(DmaBlockReason::OtherProcessors)

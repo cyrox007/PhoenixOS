@@ -47,6 +47,9 @@ jobs:
       - name: Проверить изоляцию отдельного DMA-образа
         run: python3 tests/platform/test-dma-qemu-profile.py
 
+      - name: Проверить сведения ASUS и совместимость PowerShell 5.1
+        run: python3 tests/platform/test-asus-inventory.py
+
       - name: Проверить форматирование
         run: cargo fmt --all -- --check
 

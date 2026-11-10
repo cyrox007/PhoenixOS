@@ -590,17 +590,20 @@ mod tests {
 
         domain.engine.fail_remove = true;
         let mut platform = SplitDmaPlatform::new(&mut memory, &mut domain);
-        assert_eq!(buffer.close(&mut platform), Err(DmaBufferError::DeviceActive));
+        assert_eq!(
+            buffer.close(&mut platform),
+            Err(DmaBufferError::Mapping(
+                crate::mapping::DmaMappingError::Backend(DmaError::Unaddressable)
+            ))
+        );
         drop(platform);
         assert_eq!(memory.freed, 0);
-        // До восстановления закрытие намеренно заблокировано даже
-        // после фактической остановки устройства.
-        domain.engine.fail_remove = false;
-        domain.recover_quarantined().unwrap_err();
-        // Ошибка при закрытии до снятия mapping не переводит его в карантин.
+        assert_eq!(domain.quarantined_count(), 1);
+        // Пока IOMMU не подтвердил снятие отображения, страницы удерживаются.
         let mut platform = SplitDmaPlatform::new(&mut memory, &mut domain);
-        assert!(buffer.close(&mut platform).is_err());
+        assert_eq!(buffer.close(&mut platform), Err(DmaBufferError::DeviceActive));
         drop(platform);
+        domain.engine.fail_remove = false;
         domain.recover_quarantined().unwrap();
         let mut platform = SplitDmaPlatform::new(&mut memory, &mut domain);
         buffer.close(&mut platform).unwrap();

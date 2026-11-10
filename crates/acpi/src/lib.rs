@@ -1,8 +1,8 @@
 #![no_std]
 
 pub mod iommu_observation;
-pub mod ivrs;
 pub mod ivhd_scope;
+pub mod ivrs;
 
 pub const SDT_HEADER_SIZE: usize = 36;
 pub const RSDP_V2_SIZE: usize = 36;

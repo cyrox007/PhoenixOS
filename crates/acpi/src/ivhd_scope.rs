@@ -140,7 +140,11 @@ fn parse_ivhd_entries(
                     return Err(AcpiError::InvalidLength);
                 }
                 out.insert(IvhdDeviceRange {
-                    segment, first: 0, last: u16::MAX, iommu_base: base, alias: None,
+                    segment,
+                    first: 0,
+                    last: u16::MAX,
+                    iommu_base: base,
+                    alias: None,
                 })?;
             }
             0x02 | 0x46 => {
@@ -148,7 +152,11 @@ fn parse_ivhd_entries(
                     return Err(AcpiError::InvalidLength);
                 }
                 out.insert(IvhdDeviceRange {
-                    segment, first: bdf, last: bdf, iommu_base: base, alias: None,
+                    segment,
+                    first: bdf,
+                    last: bdf,
+                    iommu_base: base,
+                    alias: None,
                 })?;
             }
             0x42 => {
@@ -156,7 +164,10 @@ fn parse_ivhd_entries(
                     return Err(AcpiError::InvalidLength);
                 }
                 out.insert(IvhdDeviceRange {
-                    segment, first: bdf, last: bdf, iommu_base: base,
+                    segment,
+                    first: bdf,
+                    last: bdf,
+                    iommu_base: base,
                     alias: Some(word(entry, 5)),
                 })?;
             }
@@ -166,7 +177,11 @@ fn parse_ivhd_entries(
                 }
                 pending = Some(Pending {
                     start: bdf,
-                    alias: if kind == 0x43 { Some(word(entry, 5)) } else { None },
+                    alias: if kind == 0x43 {
+                        Some(word(entry, 5))
+                    } else {
+                        None
+                    },
                 });
             }
             0x04 => {
@@ -291,10 +306,7 @@ mod tests {
     fn incompatible_alias_and_duplicate_controllers_fail() {
         let a = select(0x0110);
         let b = select(0x0110);
-        let ivrs = fixture(&[
-            (0xfed8_0000, 0, &a),
-            (0xfed9_0000, 0, &b),
-        ]);
+        let ivrs = fixture(&[(0xfed8_0000, 0, &a), (0xfed9_0000, 0, &b)]);
         assert_eq!(
             parse_ivhd_scopes(&ivrs).unwrap().query(0, 0x0110),
             Err(ScopeError::Ambiguous)
@@ -302,7 +314,11 @@ mod tests {
         let alias = [0x42, 0x10, 0x01, 0, 0, 0x20, 0x01, 0];
         let ivrs = fixture(&[(0xfed8_0000, 0, &alias)]);
         assert_eq!(
-            parse_ivhd_scopes(&ivrs).unwrap().query(0, 0x0110).unwrap().alias,
+            parse_ivhd_scopes(&ivrs)
+                .unwrap()
+                .query(0, 0x0110)
+                .unwrap()
+                .alias,
             Some(0x0120)
         );
     }
@@ -322,9 +338,15 @@ mod tests {
             Err(ScopeError::IncompleteTopology)
         );
         let unterminated = fixture(&[(0xfed8_0000, 0, &[0x03, 0, 0, 0])]);
-        assert_eq!(parse_ivhd_scopes(&unterminated).unwrap_err(), AcpiError::InvalidLength);
+        assert_eq!(
+            parse_ivhd_scopes(&unterminated).unwrap_err(),
+            AcpiError::InvalidLength
+        );
         let truncated_alias = fixture(&[(0xfed8_0000, 0, &[0x42, 0, 0, 0])]);
-        assert_eq!(parse_ivhd_scopes(&truncated_alias).unwrap_err(), AcpiError::InvalidLength);
+        assert_eq!(
+            parse_ivhd_scopes(&truncated_alias).unwrap_err(),
+            AcpiError::InvalidLength
+        );
     }
 
     #[test]

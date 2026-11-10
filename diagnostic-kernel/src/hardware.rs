@@ -708,9 +708,9 @@ fn acpi_and_pci(
                 let bdf = (u16::from(function.bus) << 8)
                     | (u16::from(function.device) << 3)
                     | u16::from(function.function);
-                let scope = scopes.as_ref().map(|map| {
-                    map.query(entry.segment_group, bdf)
-                });
+                let scope = scopes
+                    .as_ref()
+                    .map(|map| map.query(entry.segment_group, bdf));
                 log!(
                     out,
                     "[INFO] diagnostic PCI network: {:02x}:{:02x}.{} vendor={:04x} device={:04x} busmaster={} iommu_scope={scope:?} DMA-approved=false",

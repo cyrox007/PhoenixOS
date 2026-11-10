@@ -57,7 +57,7 @@ def evaluate(text):
                 and enabled == len(apic_ids)
                 and len(set(apic_ids)) == enabled
                 and all(0 <= apic_id <= 0xFFFFFFFF for apic_id in apic_ids)
-                and cpus.get("MADT") == str(enabled + available)
+                and cpus.get("MADT") in (str(enabled + available), f"Some({enabled + available})")
             )
 
     ram_ok = (

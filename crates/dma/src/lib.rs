@@ -5,8 +5,8 @@
 //! механизмом. Сам этот модуль не выделяет память и не включает DMA.
 
 pub mod buffer;
-pub mod leases;
 pub mod iommu_domain;
+pub mod leases;
 pub mod mapping;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

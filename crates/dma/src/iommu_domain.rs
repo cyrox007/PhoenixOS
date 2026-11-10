@@ -64,7 +64,12 @@ pub trait IommuEngine {
     fn translation_active(&self) -> bool;
     fn device_in_private_domain(&self) -> bool;
     fn device_stopped(&mut self) -> Result<bool, DomainFault>;
-    fn install_mapping(&mut self, address: u64, physical: u64, length: u64) -> Result<(), DomainFault>;
+    fn install_mapping(
+        &mut self,
+        address: u64,
+        physical: u64,
+        length: u64,
+    ) -> Result<(), DomainFault>;
     fn remove_mapping(&mut self, address: u64, length: u64) -> Result<(), DomainFault>;
     /// Возвращает Ok только после фактического завершения сброса IOTLB.
     fn invalidate_and_wait(&mut self) -> Result<(), DomainFault>;
@@ -105,11 +110,17 @@ impl<E: IommuEngine, const N: usize> IsolatedIommuDomain<E, N> {
     }
 
     pub fn active_count(&self) -> usize {
-        self.slots.iter().filter(|slot| slot.phase == SlotPhase::Active).count()
+        self.slots
+            .iter()
+            .filter(|slot| slot.phase == SlotPhase::Active)
+            .count()
     }
 
     pub fn quarantined_count(&self) -> usize {
-        self.slots.iter().filter(|slot| slot.phase == SlotPhase::Quarantined).count()
+        self.slots
+            .iter()
+            .filter(|slot| slot.phase == SlotPhase::Quarantined)
+            .count()
     }
 
     fn ready(&mut self) -> Result<(), DomainFault> {
@@ -143,7 +154,9 @@ impl<E: IommuEngine, const N: usize> IsolatedIommuDomain<E, N> {
             return Err(DmaError::AddressOverflow);
         }
         self.ready().map_err(|_| DmaError::Unaddressable)?;
-        let physical_end = physical.checked_add(length).ok_or(DmaError::AddressOverflow)?;
+        let physical_end = physical
+            .checked_add(length)
+            .ok_or(DmaError::AddressOverflow)?;
         if self.slots.iter().any(|slot| {
             slot.phase != SlotPhase::Free
                 && physical < slot.physical.saturating_add(slot.length)
@@ -174,7 +187,10 @@ impl<E: IommuEngine, const N: usize> IsolatedIommuDomain<E, N> {
             };
         }
         let address = address.ok_or(DmaError::Unaddressable)?;
-        let index = self.slots.iter().position(|slot| slot.phase == SlotPhase::Free)
+        let index = self
+            .slots
+            .iter()
+            .position(|slot| slot.phase == SlotPhase::Free)
             .ok_or(DmaError::Unaddressable)?;
         self.slots[index] = Entry {
             phase: SlotPhase::Installing,
@@ -199,11 +215,15 @@ impl<E: IommuEngine, const N: usize> IsolatedIommuDomain<E, N> {
     }
 
     fn unmap_internal(&mut self, address: u64, length: u64) -> Result<(), DmaError> {
-        let index = self.slots.iter().position(|slot| {
-            (slot.phase == SlotPhase::Active || slot.phase == SlotPhase::RecoveredPendingClose)
-                && slot.address == address
-                && slot.length == length
-        }).ok_or(DmaError::InvalidRange)?;
+        let index = self
+            .slots
+            .iter()
+            .position(|slot| {
+                (slot.phase == SlotPhase::Active || slot.phase == SlotPhase::RecoveredPendingClose)
+                    && slot.address == address
+                    && slot.length == length
+            })
+            .ok_or(DmaError::InvalidRange)?;
         self.stopped().map_err(|_| DmaError::Unaddressable)?;
         if self.slots[index].phase == SlotPhase::RecoveredPendingClose {
             self.slots[index] = Entry::EMPTY;
@@ -240,7 +260,10 @@ impl<E: IommuEngine, const N: usize> IsolatedIommuDomain<E, N> {
             self.engine.remove_mapping(entry.address, entry.length)?;
             self.engine.invalidate_and_wait()?;
             self.slots[index] = if entry.from_active {
-                Entry { phase: SlotPhase::RecoveredPendingClose, ..entry }
+                Entry {
+                    phase: SlotPhase::RecoveredPendingClose,
+                    ..entry
+                }
             } else {
                 Entry::EMPTY
             };
@@ -279,7 +302,10 @@ impl<E: IommuEngine, const N: usize> DmaMappingBackend for IsolatedIommuDomain<E
         self.slots.iter().any(|slot| {
             slot.physical == physical.value()
                 && slot.length == length
-                && matches!(slot.phase, SlotPhase::Installing | SlotPhase::Removing | SlotPhase::Quarantined)
+                && matches!(
+                    slot.phase,
+                    SlotPhase::Installing | SlotPhase::Removing | SlotPhase::Quarantined
+                )
         })
     }
 }
@@ -303,41 +329,60 @@ mod tests {
     }
 
     impl IommuEngine for FakeEngine {
-        fn translation_active(&self) -> bool { self.active }
-        fn device_in_private_domain(&self) -> bool { self.isolated }
-        fn device_stopped(&mut self) -> Result<bool, DomainFault> { Ok(self.stopped) }
+        fn translation_active(&self) -> bool {
+            self.active
+        }
+        fn device_in_private_domain(&self) -> bool {
+            self.isolated
+        }
+        fn device_stopped(&mut self) -> Result<bool, DomainFault> {
+            Ok(self.stopped)
+        }
         fn install_mapping(&mut self, _: u64, _: u64, _: u64) -> Result<(), DomainFault> {
-            if self.fail_install { return Err(DomainFault::InstallFailed); }
+            if self.fail_install {
+                return Err(DomainFault::InstallFailed);
+            }
             self.installed += 1;
             Ok(())
         }
         fn remove_mapping(&mut self, _: u64, _: u64) -> Result<(), DomainFault> {
-            if self.fail_remove { return Err(DomainFault::RemovalFailed); }
+            if self.fail_remove {
+                return Err(DomainFault::RemovalFailed);
+            }
             self.removed += 1;
             Ok(())
         }
         fn invalidate_and_wait(&mut self) -> Result<(), DomainFault> {
-            if self.fail_invalidate { return Err(DomainFault::CacheInvalidationFailed); }
+            if self.fail_invalidate {
+                return Err(DomainFault::CacheInvalidationFailed);
+            }
             self.invalidated += 1;
             Ok(())
         }
     }
 
     fn engine() -> FakeEngine {
-        FakeEngine { active: true, isolated: true, stopped: true, ..FakeEngine::default() }
+        FakeEngine {
+            active: true,
+            isolated: true,
+            stopped: true,
+            ..FakeEngine::default()
+        }
     }
 
     fn domain() -> IsolatedIommuDomain<FakeEngine, 2> {
         IsolatedIommuDomain::new(engine(), 0x8000_0000, 0x8000_4000).unwrap()
     }
 
-    fn layout() -> DmaLayout { DmaLayout::new(4096, 4096).unwrap() }
+    fn layout() -> DmaLayout {
+        DmaLayout::new(4096, 4096).unwrap()
+    }
 
     #[test]
     fn real_device_address_is_distinct_from_physical() {
         let mut d = domain();
-        let mut map = DeviceMapping::establish(&mut d, PhysicalAddress::new(0x4000), layout())
-            .unwrap();
+        let mut map =
+            DeviceMapping::establish(&mut d, PhysicalAddress::new(0x4000), layout()).unwrap();
         assert_eq!(map.device_address().value(), 0x8000_0000);
         assert_eq!(d.active_count(), 1);
         assert_eq!(d.engine().installed, 1);
@@ -355,7 +400,9 @@ mod tests {
             e.active = active;
             e.isolated = isolated;
             let mut d = IsolatedIommuDomain::<_, 2>::new(e, 0x8000_0000, 0x8000_4000).unwrap();
-            assert!(DeviceMapping::establish(&mut d, PhysicalAddress::new(0x4000), layout()).is_err());
+            assert!(
+                DeviceMapping::establish(&mut d, PhysicalAddress::new(0x4000), layout()).is_err()
+            );
             assert_eq!(d.engine().installed, 0);
             assert!(d.fault().is_some());
         }
@@ -368,7 +415,8 @@ mod tests {
         assert!(DeviceMapping::establish(&mut d, PhysicalAddress::new(0x4000), layout()).is_err());
         assert_eq!(d.engine().installed, 0);
         d.engine.stopped = true;
-        let mut map = DeviceMapping::establish(&mut d, PhysicalAddress::new(0x4000), layout()).unwrap();
+        let mut map =
+            DeviceMapping::establish(&mut d, PhysicalAddress::new(0x4000), layout()).unwrap();
         d.engine.stopped = false;
         assert!(map.close(&mut d).is_err());
         assert!(map.is_mapped());
@@ -380,13 +428,16 @@ mod tests {
     #[test]
     fn separate_windows_do_not_overlap_and_reuse_only_after_invalidation() {
         let mut d = domain();
-        let mut a = DeviceMapping::establish(&mut d, PhysicalAddress::new(0x4000), layout()).unwrap();
-        let mut b = DeviceMapping::establish(&mut d, PhysicalAddress::new(0x5000), layout()).unwrap();
+        let mut a =
+            DeviceMapping::establish(&mut d, PhysicalAddress::new(0x4000), layout()).unwrap();
+        let mut b =
+            DeviceMapping::establish(&mut d, PhysicalAddress::new(0x5000), layout()).unwrap();
         assert_ne!(a.device_address(), b.device_address());
         assert_eq!(d.active_count(), 2);
         a.close(&mut d).unwrap();
         b.close(&mut d).unwrap();
-        let mut c = DeviceMapping::establish(&mut d, PhysicalAddress::new(0x6000), layout()).unwrap();
+        let mut c =
+            DeviceMapping::establish(&mut d, PhysicalAddress::new(0x6000), layout()).unwrap();
         assert_eq!(c.device_address().value(), 0x8000_0000);
         c.close(&mut d).unwrap();
     }
@@ -402,7 +453,8 @@ mod tests {
         d.recover_quarantined().unwrap();
         assert_eq!(d.quarantined_count(), 0);
         assert_eq!(d.fault(), None);
-        let mut map = DeviceMapping::establish(&mut d, PhysicalAddress::new(0x4000), layout()).unwrap();
+        let mut map =
+            DeviceMapping::establish(&mut d, PhysicalAddress::new(0x4000), layout()).unwrap();
         map.close(&mut d).unwrap();
     }
 
@@ -413,7 +465,10 @@ mod tests {
         assert!(DeviceMapping::establish(&mut d, PhysicalAddress::new(0x4000), layout()).is_err());
         assert_eq!(d.quarantined_count(), 1);
         assert!(d.fault().is_some());
-        assert_eq!(d.recover_quarantined(), Err(DomainFault::CacheInvalidationFailed));
+        assert_eq!(
+            d.recover_quarantined(),
+            Err(DomainFault::CacheInvalidationFailed)
+        );
         assert_eq!(d.quarantined_count(), 1);
         d.engine.fail_invalidate = false;
         d.recover_quarantined().unwrap();
@@ -423,7 +478,8 @@ mod tests {
     #[test]
     fn failed_unmap_preserves_ownership_and_cannot_reuse_iova() {
         let mut d = domain();
-        let mut map = DeviceMapping::establish(&mut d, PhysicalAddress::new(0x4000), layout()).unwrap();
+        let mut map =
+            DeviceMapping::establish(&mut d, PhysicalAddress::new(0x4000), layout()).unwrap();
         d.engine.fail_remove = true;
         assert!(map.close(&mut d).is_err());
         assert!(map.is_mapped());
@@ -440,9 +496,7 @@ mod tests {
     #[test]
     fn rejects_bad_ranges_before_hardware_call() {
         let mut d = domain();
-        assert!(DeviceMapping::establish(
-            &mut d, PhysicalAddress::new(0x4001), layout()
-        ).is_err());
+        assert!(DeviceMapping::establish(&mut d, PhysicalAddress::new(0x4001), layout()).is_err());
         assert_eq!(d.engine().installed, 0);
         assert!(IsolatedIommuDomain::<_, 0>::new(engine(), 0x1000, 0x2000).is_err());
         assert!(IsolatedIommuDomain::<_, 2>::new(engine(), 0x1001, 0x2000).is_err());

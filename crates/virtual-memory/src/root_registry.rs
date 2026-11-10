@@ -301,7 +301,9 @@ mod tests {
             compromised: AtomicBool::new(false),
             state: UnsafeCell::new(RootRegistry::new()),
         };
-        registry.access(|state| state.register_boot(0x1000)).unwrap();
+        registry
+            .access(|state| state.register_boot(0x1000))
+            .unwrap();
         assert_eq!(
             registry.access(|state| state.register_process(0x1000)),
             Err(RootError::DuplicateRoot)

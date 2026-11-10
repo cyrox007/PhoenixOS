@@ -37,6 +37,13 @@ pub trait DmaMappingBackend {
 
     /// При ошибке отображение считается действующим до устранения причины.
     fn unmap(&mut self, device: DeviceAddress, layout: DmaLayout) -> Result<(), DmaError>;
+
+    /// Защита памяти после неопределённого результата map/unmap.
+    /// Пока реальная аппаратная запись или IOTLB не подтверждены как
+    /// очищенные, физические страницы нельзя вернуть распределителю.
+    fn has_unresolved_mapping(&self, _physical: PhysicalAddress, _layout: DmaLayout) -> bool {
+        false
+    }
 }
 
 /// Действующее отображение, которым владеет вызывающая сторона.

@@ -103,6 +103,10 @@ impl<M: DmaMemoryBackend, B: DmaMappingBackend> DmaMappingBackend for SplitDmaPl
     fn unmap(&mut self, device: DeviceAddress, layout: DmaLayout) -> Result<(), DmaError> {
         self.device_mapper.unmap(device, layout)
     }
+
+    fn has_unresolved_mapping(&self, physical: PhysicalAddress, layout: DmaLayout) -> bool {
+        self.device_mapper.has_unresolved_mapping(physical, layout)
+    }
 }
 
 impl<M: DmaMemoryBackend, B: DmaMappingBackend> DmaBufferPlatform for SplitDmaPlatform<'_, M, B> {
@@ -227,7 +231,7 @@ impl DmaBuffer {
         if !self.reserved {
             return Err(DmaBufferError::NotReady);
         }
-        if self.active {
+        if self.active || platform.has_unresolved_mapping(self.physical, self.layout) {
             return Err(DmaBufferError::DeviceActive);
         }
 

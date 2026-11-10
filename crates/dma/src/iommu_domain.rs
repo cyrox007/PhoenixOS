@@ -27,6 +27,7 @@ pub enum SlotPhase {
     Active,
     Removing,
     Quarantined,
+    RecoveredPendingClose,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +36,7 @@ struct Entry {
     physical: u64,
     address: u64,
     length: u64,
+    from_active: bool,
 }
 
 impl Entry {
@@ -43,6 +45,7 @@ impl Entry {
         physical: 0,
         address: 0,
         length: 0,
+        from_active: false,
     };
 
     fn overlaps(self, start: u64, end: u64) -> bool {
@@ -140,8 +143,19 @@ impl<E: IommuEngine, const N: usize> IsolatedIommuDomain<E, N> {
             return Err(DmaError::AddressOverflow);
         }
         self.ready().map_err(|_| DmaError::Unaddressable)?;
+        let physical_end = physical.checked_add(length).ok_or(DmaError::AddressOverflow)?;
+        if self.slots.iter().any(|slot| {
+            slot.phase != SlotPhase::Free
+                && physical < slot.physical.saturating_add(slot.length)
+                && slot.physical < physical_end
+        }) {
+            return Err(DmaError::InvalidRange);
+        }
         self.stopped().map_err(|_| DmaError::Unaddressable)?;
 
+        if !self.slots.iter().any(|slot| slot.phase == SlotPhase::Free) {
+            return Err(DmaError::Unaddressable);
+        }
         // Распределение IOVA ограничено заданным окном, никогда не даёт
         // произвольный физический адрес или доступ к соседней странице.
         let mut candidate = self.aperture_start;
@@ -167,6 +181,7 @@ impl<E: IommuEngine, const N: usize> IsolatedIommuDomain<E, N> {
             physical,
             address,
             length,
+            from_active: false,
         };
 
         if let Err(reason) = self.engine.install_mapping(address, physical, length) {
@@ -185,9 +200,16 @@ impl<E: IommuEngine, const N: usize> IsolatedIommuDomain<E, N> {
 
     fn unmap_internal(&mut self, address: u64, length: u64) -> Result<(), DmaError> {
         let index = self.slots.iter().position(|slot| {
-            slot.phase == SlotPhase::Active && slot.address == address && slot.length == length
+            (slot.phase == SlotPhase::Active || slot.phase == SlotPhase::RecoveredPendingClose)
+                && slot.address == address
+                && slot.length == length
         }).ok_or(DmaError::InvalidRange)?;
         self.stopped().map_err(|_| DmaError::Unaddressable)?;
+        if self.slots[index].phase == SlotPhase::RecoveredPendingClose {
+            self.slots[index] = Entry::EMPTY;
+            return Ok(());
+        }
+        self.slots[index].from_active = true;
         self.slots[index].phase = SlotPhase::Removing;
         if let Err(reason) = self.engine.remove_mapping(address, length) {
             self.slots[index].phase = SlotPhase::Quarantined;
@@ -217,7 +239,11 @@ impl<E: IommuEngine, const N: usize> IsolatedIommuDomain<E, N> {
             let entry = self.slots[index];
             self.engine.remove_mapping(entry.address, entry.length)?;
             self.engine.invalidate_and_wait()?;
-            self.slots[index] = Entry::EMPTY;
+            self.slots[index] = if entry.from_active {
+                Entry { phase: SlotPhase::RecoveredPendingClose, ..entry }
+            } else {
+                Entry::EMPTY
+            };
         }
         if self.quarantined_count() == 0
             && self.engine.translation_active()
@@ -246,6 +272,15 @@ impl<E: IommuEngine, const N: usize> DmaMappingBackend for IsolatedIommuDomain<E
     fn unmap(&mut self, device: DeviceAddress, layout: DmaLayout) -> Result<(), DmaError> {
         let length = u64::try_from(layout.length()).map_err(|_| DmaError::Unaddressable)?;
         self.unmap_internal(device.value(), length)
+    }
+
+    fn has_unresolved_mapping(&self, physical: PhysicalAddress, layout: DmaLayout) -> bool {
+        let length = u64::try_from(layout.length()).unwrap_or(u64::MAX);
+        self.slots.iter().any(|slot| {
+            slot.physical == physical.value()
+                && slot.length == length
+                && matches!(slot.phase, SlotPhase::Installing | SlotPhase::Removing | SlotPhase::Quarantined)
+        })
     }
 }
 
@@ -397,6 +432,9 @@ mod tests {
         d.recover_quarantined().unwrap();
         assert_eq!(d.quarantined_count(), 0);
         assert!(map.is_mapped());
+        // Слот остаётся зарезервированным до закрытия старого владельца.
+        assert_eq!(d.active_count(), 0);
+        map.close(&mut d).unwrap();
     }
 
     #[test]

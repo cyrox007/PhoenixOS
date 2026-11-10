@@ -38,7 +38,7 @@ use core::alloc::Layout;
 use phoenix_framebuffer::route::{DisplayRoute, FirmwarePurpose};
 use phoenix_framebuffer::{draw_boot_banner, draw_emergency_banner, firmware_sample};
 use phoenix_memory::{MemorySummary, SystemFrameAllocator};
-use phoenix_vm::{ActivePageTable, InactivePageTable};
+use phoenix_vm::{ActivePageTable, InactivePageTable, root_registry};
 use qemu::ExitCode;
 use x86_64::VirtAddr;
 use x86_64::structures::paging::{Page, PageTableFlags, Size4KiB};
@@ -2044,9 +2044,18 @@ fn inactive_page_table_self_test(
     frames: &mut SystemFrameAllocator<SYSTEM_MEMORY_RANGE_CAPACITY>,
 ) {
     let free_before = frames.free_frames();
-
+    let before = root_registry::snapshot().expect("не удалось прочитать реестр CR3");
     let mut root = unsafe { InactivePageTable::new(physical_memory_offset, frames) }
         .expect("не удалось выделить корень таблиц страниц процесса");
+    let root_address = root.root_frame().start_address().as_u64();
+    let during = root_registry::snapshot().expect("новый CR3 не зарегистрирован");
+    if during.roots().len() != before.roots().len() + 1
+        || !during.roots().contains(&root_address)
+        || during.boot_root() != before.boot_root()
+        || during.physical_coverage_verified()
+    {
+        panic!("реестр CR3 неверно зарегистрировал новое адресное пространство");
+    }
 
     if root.is_active() {
         panic!("новый корень адресного пространства неожиданно стал активным");
@@ -2109,6 +2118,14 @@ fn inactive_page_table_self_test(
 
     root.release_empty(frames)
         .expect("не удалось освободить пустой корень адресного пространства");
+
+    let after = root_registry::snapshot().expect("не удалось проверить освобождение CR3");
+    if after.roots().len() != before.roots().len()
+        || after.roots().contains(&root_address)
+        || after.boot_root() != before.boot_root()
+    {
+        panic!("освобождённый CR3 остался в доверенном реестре");
+    }
 
     if frames.free_frames() != free_before {
         panic!("корень адресного пространства не вернул физическую страницу");

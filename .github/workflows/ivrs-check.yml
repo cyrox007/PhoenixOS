@@ -1,0 +1,24 @@
+name: Проверка защищённых областей IVRS
+on:
+  push:
+    branches: [develop]
+  pull_request:
+    branches: [develop]
+
+permissions:
+  contents: read
+
+jobs:
+  ivrs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v5
+      - name: Подготовить инструментарий Rust
+        run: rustup show
+      - name: Проверить форматирование
+        run: cargo fmt --all -- --check
+      - name: Проверить IVRS, IVMD и отказные сценарии
+        run: cargo test -p phoenix-acpi
+      - name: Проверить консервативный разбор отчётов
+        run: python3 tests/platform/test-dma-evidence.py

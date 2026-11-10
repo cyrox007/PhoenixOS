@@ -54,6 +54,30 @@ pub fn verify_coverage(
     Ok(())
 }
 
+/// Аппаратная граница обязана пересчитать доказательства при каждом допуске.
+/// Обычный blocking_reason применяется к модельным проверкам и не заменяет
+/// этот метод на физическом IOMMU-контроллере.
+pub fn blocking_reason_with_current_coverage(
+    e: &DmaSafetyEvidence,
+    ledger: &CoverageLedger,
+    expected_processors: usize,
+    expected_roots: &[u64],
+) -> Option<DmaBlockReason> {
+    if let Err(reason) = ledger.verify(
+        expected_processors,
+        expected_roots,
+        crate::dma_evidence::current_mapping_epoch(),
+    ) {
+        return Some(match reason {
+            EvidenceError::MissingProcessor
+            | EvidenceError::DuplicateCpu
+            | EvidenceError::InconsistentRegisters => DmaBlockReason::OtherProcessors,
+            _ => DmaBlockReason::OtherAddressSpaces,
+        });
+    }
+    blocking_reason(e)
+}
+
 pub fn blocking_reason(e: &DmaSafetyEvidence) -> Option<DmaBlockReason> {
     if !e.memory_map_valid {
         return Some(DmaBlockReason::MemoryMap);
@@ -112,6 +136,34 @@ mod tests {
         );
         assert!(!evidence.all_processors_checked);
         assert!(!evidence.all_address_spaces_checked);
+    }
+
+    #[test]
+    fn live_coverage_gate_rejects_stale_or_empty_cpu_and_cr3_reports() {
+        let evidence = DmaSafetyEvidence {
+            memory_map_valid: true,
+            direct_mapping_valid: true,
+            current_cr3_aliases_clear: true,
+            all_address_spaces_checked: true,
+            all_processors_checked: true,
+            iommu_translation_active: true,
+            device_in_isolated_domain: true,
+            buffer_is_owned: true,
+            rollback_verified: true,
+            operator_approved: true,
+        };
+        let stale = CoverageLedger::new(0);
+        assert_eq!(
+            blocking_reason_with_current_coverage(&evidence, &stale, 12, &[0x1000]),
+            Some(DmaBlockReason::OtherAddressSpaces)
+        );
+        let current = CoverageLedger::new(
+            crate::dma_evidence::current_mapping_epoch().unwrap()
+        );
+        assert_eq!(
+            blocking_reason_with_current_coverage(&evidence, &current, 12, &[0x1000]),
+            Some(DmaBlockReason::OtherProcessors)
+        );
     }
 
     #[test]

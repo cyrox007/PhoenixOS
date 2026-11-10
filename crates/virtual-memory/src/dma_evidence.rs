@@ -163,6 +163,13 @@ impl CoverageLedger {
         {
             return Err(EvidenceError::MissingRoot);
         }
+        if expected_roots
+            .iter()
+            .enumerate()
+            .any(|(index, root)| expected_roots[..index].contains(root))
+        {
+            return Err(EvidenceError::DuplicateRoot);
+        }
         if expected_roots.iter().any(|required| {
             !self.roots[..self.root_count]
                 .iter()
@@ -274,6 +281,18 @@ mod tests {
         assert_eq!(
             ledger.verify(1, &[0x2000], Some(3)),
             Err(EvidenceError::MissingRoot)
+        );
+    }
+
+    #[test]
+    fn repeated_required_root_never_substitutes_an_unchecked_root() {
+        let mut ledger = CoverageLedger::new(3);
+        ledger.add_processor(processor(0, 3)).unwrap();
+        ledger.add_root(root(0x1000, 3, true)).unwrap();
+        ledger.add_root(root(0x2000, 3, true)).unwrap();
+        assert_eq!(
+            ledger.verify(1, &[0x1000, 0x1000], Some(3)),
+            Err(EvidenceError::DuplicateRoot)
         );
     }
 

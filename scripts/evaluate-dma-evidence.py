@@ -33,10 +33,13 @@ def evaluate(text):
     iommu_control = record(lines, "[INFO] diagnostic IOMMU MMIO:")
     cpus = record(lines, "[INFO] diagnostic CPU cores:")
     gate = record(lines, "[INFO] diagnostic DMA gate:")
-    topology_line = next(
-        (line for line in reversed(lines) if line.startswith("[INFO] diagnostic CPU APIC IDs:")),
-        "",
-    )
+    topology_lines = [
+        line for line in lines if line.startswith("[INFO] diagnostic CPU APIC IDs:")
+    ]
+    cores_lines = [
+        line for line in lines if line.startswith("[INFO] diagnostic CPU cores:")
+    ]
+    topology_line = topology_lines[0] if len(topology_lines) == 1 else ""
     apic_match = APIC_IDS.fullmatch(topology_line)
     apic_ids = []
     topology_ok = False
@@ -49,6 +52,7 @@ def evaluate(text):
             available = int(apic_match.group(2))
             topology_ok = (
                 complete
+                and len(cores_lines) == 1
                 and 0 < enabled <= 64
                 and enabled == len(apic_ids)
                 and len(set(apic_ids)) == enabled
@@ -103,11 +107,11 @@ def evaluate(text):
         "missing": (
             ([] if topology_ok else ["Неполная или противоречивая топология APIC"])
             + [
-            "Измерение MSR всех процессорных ядер",
-            "Проверка всех иных адресных пространств",
-            "Действующее преобразование IOMMU и выделенный домен",
-            "Выбор безопасного контроллера и реальная DMA-передача",
-            "Аппаратно подтверждённые остановка и освобождение",
+                "Измерение MSR всех процессорных ядер",
+                "Проверка всех иных адресных пространств",
+                "Действующее преобразование IOMMU и выделенный домен",
+                "Выбор безопасного контроллера и реальная DMA-передача",
+                "Аппаратно подтверждённые остановка и освобождение",
             ]
         ),
     }

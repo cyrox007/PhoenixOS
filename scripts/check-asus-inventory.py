@@ -8,7 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PROFILE = ROOT / "config" / "asus-m6500qh-hardware.json"
-PCI = re.compile(r"^PCI VEN=([0-9a-fA-F]{4}) DEV=([0-9a-fA-F]{4})\\b", re.MULTILINE)
+PCI = re.compile(r"^PCI VEN=([0-9a-fA-F]{4}) DEV=([0-9a-fA-F]{4})\b", re.MULTILINE)
 
 
 def load_profile(path=PROFILE):

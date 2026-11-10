@@ -31,7 +31,7 @@ class MappingCoverageSourceTests(unittest.TestCase):
 
     def test_both_root_lifetime_paths_are_registered(self):
         self.assertIn("pub mod root_registry;", self.vm)
-        self.assertIn("root_registry::register_boot_root(", self.vm)
+        self.assertIn("root_registry::observe_current_root(", self.vm)
         self.assertIn("root_registry::register_process_root(", self.vm)
         self.assertIn("root_registry::unregister_process_root(", self.vm)
         self.assertIn("root_registry::contains_root(", self.vm)

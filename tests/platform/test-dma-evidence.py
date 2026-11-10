@@ -17,7 +17,7 @@ GOOD = """[INFO] PhoenixOS physical diagnostic
 [INFO] diagnostic IOMMU: ivhd=1 structural_ok=true runtime=unverified domain=unverified
 [INFO] diagnostic IOMMU MMIO: observed=false reason=no-ivhd domain=unverified
 [INFO] diagnostic CPU APIC IDs: enabled=12 online_capable=0 ids=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] measured=false
-[INFO] diagnostic CPU cores: MADT=12 msr_consensus=unverified BSP_only=true
+[INFO] diagnostic CPU cores: MADT=Some(12) msr_consensus=unverified BSP_only=true
 [INFO] diagnostic DMA gate: authorized=false reason=Some(OtherAddressSpaces) readonly=1
 [INFO] diagnostic complete: OK
 """
@@ -53,13 +53,17 @@ class EvidenceTests(unittest.TestCase):
             "[INFO] diagnostic CPU APIC IDs:", "[WARN] diagnostic CPU APIC IDs:"
         ))["cpu_topology_consistent"])
         self.assertFalse(module.evaluate(GOOD.replace(
-            "MADT=12", "MADT=11"
+            "MADT=Some(12)", "MADT=Some(11)"
         ))["cpu_topology_consistent"])
         extra = GOOD.replace(
-            "[INFO] diagnostic CPU cores: MADT=12",
-            "[INFO] diagnostic CPU APIC IDs: enabled=1 online_capable=0 ids=[0] measured=false\n[INFO] diagnostic CPU cores: MADT=12",
+            "[INFO] diagnostic CPU cores: MADT=Some(12)",
+            "[INFO] diagnostic CPU APIC IDs: enabled=1 online_capable=0 ids=[0] measured=false\n[INFO] diagnostic CPU cores: MADT=Some(12)",
         )
         self.assertFalse(module.evaluate(extra)["cpu_topology_consistent"])
+
+    def test_legacy_numeric_madt_format_is_also_supported(self):
+        old_format = GOOD.replace("MADT=Some(12)", "MADT=12")
+        self.assertTrue(module.evaluate(old_format)["cpu_topology_consistent"])
 
     def test_control_register_observation_never_proves_iommu_domain(self):
         transcript = GOOD.replace(

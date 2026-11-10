@@ -3,6 +3,8 @@
 //! Диагностическая загрузка намеренно не выдаёт разрешение.
 //! Проверки должны выполняться заново для каждого устройства и буфера.
 
+use crate::dma_evidence::{CoverageLedger, EvidenceError};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DmaBlockReason {
     MemoryMap,
@@ -29,6 +31,51 @@ pub struct DmaSafetyEvidence {
     pub buffer_is_owned: bool,
     pub rollback_verified: bool,
     pub operator_approved: bool,
+}
+
+/// Сверить оба требования с фактически заполненным журналом, а не с
+/// предполагаемым числом ядер или одной текущей CR3.
+/// При ошибке оба признака сбрасываются, включая ранее положительные.
+pub fn verify_coverage(
+    evidence: &mut DmaSafetyEvidence,
+    ledger: &CoverageLedger,
+    expected_processors: usize,
+    expected_roots: &[u64],
+) -> Result<(), EvidenceError> {
+    evidence.all_processors_checked = false;
+    evidence.all_address_spaces_checked = false;
+    ledger.verify(
+        expected_processors,
+        expected_roots,
+        crate::dma_evidence::current_mapping_epoch(),
+    )?;
+    evidence.all_processors_checked = true;
+    evidence.all_address_spaces_checked = true;
+    Ok(())
+}
+
+/// Аппаратная граница обязана пересчитать доказательства при каждом допуске.
+/// Обычный blocking_reason применяется к модельным проверкам и не заменяет
+/// этот метод на физическом IOMMU-контроллере.
+pub fn blocking_reason_with_current_coverage(
+    e: &DmaSafetyEvidence,
+    ledger: &CoverageLedger,
+    expected_processors: usize,
+    expected_roots: &[u64],
+) -> Option<DmaBlockReason> {
+    if let Err(reason) = ledger.verify(
+        expected_processors,
+        expected_roots,
+        crate::dma_evidence::current_mapping_epoch(),
+    ) {
+        return Some(match reason {
+            EvidenceError::MissingProcessor
+            | EvidenceError::DuplicateCpu
+            | EvidenceError::InconsistentRegisters => DmaBlockReason::OtherProcessors,
+            _ => DmaBlockReason::OtherAddressSpaces,
+        });
+    }
+    blocking_reason(e)
 }
 
 pub fn blocking_reason(e: &DmaSafetyEvidence) -> Option<DmaBlockReason> {
@@ -74,6 +121,48 @@ pub fn diagnostic_dma_authorized(_: &DmaSafetyEvidence) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_ledger_cannot_leave_positive_coverage_flags() {
+        let mut evidence = DmaSafetyEvidence {
+            all_processors_checked: true,
+            all_address_spaces_checked: true,
+            ..DmaSafetyEvidence::default()
+        };
+        let ledger = CoverageLedger::new(0);
+        assert_eq!(
+            verify_coverage(&mut evidence, &ledger, 12, &[0x1000]),
+            Err(EvidenceError::StaleGeneration)
+        );
+        assert!(!evidence.all_processors_checked);
+        assert!(!evidence.all_address_spaces_checked);
+    }
+
+    #[test]
+    fn live_coverage_gate_rejects_stale_or_empty_cpu_and_cr3_reports() {
+        let evidence = DmaSafetyEvidence {
+            memory_map_valid: true,
+            direct_mapping_valid: true,
+            current_cr3_aliases_clear: true,
+            all_address_spaces_checked: true,
+            all_processors_checked: true,
+            iommu_translation_active: true,
+            device_in_isolated_domain: true,
+            buffer_is_owned: true,
+            rollback_verified: true,
+            operator_approved: true,
+        };
+        let stale = CoverageLedger::new(0);
+        assert_eq!(
+            blocking_reason_with_current_coverage(&evidence, &stale, 12, &[0x1000]),
+            Some(DmaBlockReason::OtherAddressSpaces)
+        );
+        let current = CoverageLedger::new(crate::dma_evidence::current_mapping_epoch().unwrap());
+        assert_eq!(
+            blocking_reason_with_current_coverage(&evidence, &current, 12, &[0x1000]),
+            Some(DmaBlockReason::OtherProcessors)
+        );
+    }
 
     #[test]
     fn empty_evidence_blocks_first_prerequisite() {

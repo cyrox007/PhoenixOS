@@ -50,6 +50,9 @@ jobs:
       - name: Проверить сведения ASUS и совместимость PowerShell 5.1
         run: python3 tests/platform/test-asus-inventory.py
 
+      - name: Проверить инвалидирование аппаратных доказательств
+        run: python3 tests/platform/test-dma-mapping-coverage.py
+
       - name: Проверить форматирование
         run: cargo fmt --all -- --check
 

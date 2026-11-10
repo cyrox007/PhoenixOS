@@ -1,6 +1,7 @@
 #![no_std]
 
 pub mod dma_cache;
+pub mod dma_evidence;
 pub mod dma_window;
 pub mod hardware_gate;
 pub mod kernel_reservations;
@@ -182,6 +183,7 @@ impl ActivePageTable {
     where
         A: FrameAllocator<Size4KiB>,
     {
+        dma_evidence::invalidate_mappings();
         let flags = flags | PageTableFlags::PRESENT;
         let flush = unsafe { self.mapper.map_to(page, frame, flags, allocator)? };
         flush.flush();
@@ -189,6 +191,7 @@ impl ActivePageTable {
     }
 
     pub fn unmap_4k(&mut self, page: Page<Size4KiB>) -> Result<PhysFrame<Size4KiB>, UnmapError> {
+        dma_evidence::invalidate_mappings();
         let (frame, flush) = self.mapper.unmap(page)?;
         flush.flush();
         Ok(frame)
@@ -257,6 +260,7 @@ impl AddressSpaceActivation<'_> {
 
 impl Drop for AddressSpaceActivation<'_> {
     fn drop(&mut self) {
+        dma_evidence::invalidate_mappings();
         unsafe {
             Cr3::write(self.previous_root, self.previous_flags);
         }
@@ -277,6 +281,7 @@ impl InactivePageTable {
     where
         A: FrameAllocator<Size4KiB>,
     {
+        dma_evidence::invalidate_mappings();
         let root_frame = allocator
             .allocate_frame()
             .ok_or(InactivePageTableError::NoPhysicalFrame)?;
@@ -308,6 +313,7 @@ impl InactivePageTable {
     /// Код, текущий стек и все данные, к которым выполняется доступ до
     /// уничтожения guard, обязаны быть отображены в новом адресном пространстве.
     pub unsafe fn activate(&self) -> AddressSpaceActivation<'_> {
+        dma_evidence::invalidate_mappings();
         let (previous_root, previous_flags) = Cr3::read();
         unsafe {
             Cr3::write(self.root_frame, previous_flags);
@@ -332,6 +338,7 @@ impl InactivePageTable {
     /// Вызывающая сторона должна гарантировать, что P4[0] не содержит системных
     /// отображений, необходимых во время работы под процессным CR3.
     pub unsafe fn inherit_kernel_mappings(&mut self, physical_memory_offset: VirtAddr) {
+        dma_evidence::invalidate_mappings();
         let active = unsafe { active_level_4_table(physical_memory_offset) };
         let target = unsafe { &mut *self.root_table };
 
@@ -374,6 +381,7 @@ impl InactivePageTable {
             return Err(InactivePageTableError::NotUserAddress);
         }
 
+        dma_evidence::invalidate_mappings();
         let frame = allocator
             .allocate_frame()
             .ok_or(InactivePageTableError::NoPhysicalFrame)?;
@@ -516,6 +524,7 @@ impl InactivePageTable {
             return Err(InactivePageTableError::NotUserAddress);
         }
 
+        dma_evidence::invalidate_mappings();
         let (frame, flush) = unsafe { self.mapper() }
             .unmap(page)
             .map_err(|_| InactivePageTableError::UnmappingFailed)?;
@@ -538,6 +547,7 @@ impl InactivePageTable {
     where
         A: FrameDeallocator<Size4KiB>,
     {
+        dma_evidence::invalidate_mappings();
         let mut released = 0_u64;
         let p4 = unsafe { &mut *self.root_table };
 
@@ -630,6 +640,7 @@ impl InactivePageTable {
     /// Дочерние таблицы не освобождаются: ими владеет системное адресное
     /// пространство.
     pub unsafe fn clear_shared_kernel_mappings(&mut self) {
+        dma_evidence::invalidate_mappings();
         let table = unsafe { &mut *self.root_table };
         for index in USER_P4_ENTRY_COUNT..512 {
             table[index].set_unused();

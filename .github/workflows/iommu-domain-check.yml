@@ -1,0 +1,26 @@
+name: Проверка изолированного домена IOMMU
+on:
+  pull_request:
+    branches: [develop]
+  push:
+    branches: [develop]
+
+permissions:
+  contents: read
+
+jobs:
+  domain:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v5
+      - name: Выбрать Rust
+        run: rustup show
+      - name: Проверить форматирование Rust
+        run: cargo fmt --all -- --check
+      - name: Проверить DMA и обратную совместимость
+        run: cargo test -p phoenix-dma
+      - name: Проверить запрет физического DMA
+        run: cargo test -p phoenix-dma-acceptance
+      - name: Проверить безопасные профили
+        run: python3 tests/platform/test-dma-qemu-profile.py

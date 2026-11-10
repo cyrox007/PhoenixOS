@@ -657,5 +657,4 @@ mod tests {
         d.recover_quarantined().unwrap();
         map.close(&mut d).unwrap();
     }
-
 }

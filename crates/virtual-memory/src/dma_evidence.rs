@@ -151,12 +151,14 @@ impl CoverageLedger {
         if current_epoch != Some(self.generation) {
             return Err(EvidenceError::StaleGeneration);
         }
-        if expected_processors == 0 || expected_processors > MAX_PROCESSORS
+        if expected_processors == 0
+            || expected_processors > MAX_PROCESSORS
             || self.processor_count != expected_processors
         {
             return Err(EvidenceError::MissingProcessor);
         }
-        if expected_roots.is_empty() || expected_roots.len() > MAX_ROOTS
+        if expected_roots.is_empty()
+            || expected_roots.len() > MAX_ROOTS
             || self.root_count != expected_roots.len()
         {
             return Err(EvidenceError::MissingRoot);
@@ -185,7 +187,7 @@ impl CoverageLedger {
 mod tests {
     use super::*;
 
-    fn register() -> ProcessorCacheRegisters {
+    fn registers() -> ProcessorCacheRegisters {
         ProcessorCacheRegisters {
             pat: 0x0007_0406_0007_0406,
             mtrr_cap: 8,
@@ -200,7 +202,19 @@ mod tests {
     }
 
     fn processor(id: u32, epoch: u64) -> ProcessorReport {
-        ProcessorReport { logical_apic_id: id, registers: register(), observed_epoch: epoch }
+        ProcessorReport {
+            logical_apic_id: id,
+            registers: registers(),
+            observed_epoch: epoch,
+        }
+    }
+
+    fn root(cr3: u64, epoch: u64, clear: bool) -> AddressSpaceReport {
+        AddressSpaceReport {
+            cr3,
+            aliases_clear: clear,
+            observed_epoch: epoch,
+        }
     }
 
     #[test]
@@ -209,21 +223,33 @@ mod tests {
         for index in 0..12 {
             ledger.add_processor(processor(index, 11)).unwrap();
         }
-        ledger.add_root(AddressSpaceReport { cr3: 0x1000, aliases_clear: true, observed_epoch: 11 }).unwrap();
-        ledger.add_root(AddressSpaceReport { cr3: 0x2000, aliases_clear: true, observed_epoch: 11 }).unwrap();
+        ledger.add_root(root(0x1000, 11, true)).unwrap();
+        ledger.add_root(root(0x2000, 11, true)).unwrap();
         assert_eq!(ledger.verify(12, &[0x1000, 0x2000], Some(11)), Ok(()));
-        assert_eq!(ledger.verify(12, &[0x1000, 0x2000], Some(12)), Err(EvidenceError::StaleGeneration));
+        assert_eq!(
+            ledger.verify(12, &[0x1000, 0x2000], Some(12)),
+            Err(EvidenceError::StaleGeneration)
+        );
     }
 
     #[test]
     fn missing_duplicate_or_inconsistent_cpu_is_never_counted_twice() {
         let mut ledger = CoverageLedger::new(3);
         ledger.add_processor(processor(0, 3)).unwrap();
-        assert_eq!(ledger.add_processor(processor(0, 3)), Err(EvidenceError::DuplicateCpu));
+        assert_eq!(
+            ledger.add_processor(processor(0, 3)),
+            Err(EvidenceError::DuplicateCpu)
+        );
         let mut other = processor(1, 3);
         other.registers.pat ^= 1;
-        assert_eq!(ledger.add_processor(other), Err(EvidenceError::InconsistentRegisters));
-        assert_eq!(ledger.verify(12, &[0x1000], Some(3)), Err(EvidenceError::MissingProcessor));
+        assert_eq!(
+            ledger.add_processor(other),
+            Err(EvidenceError::InconsistentRegisters)
+        );
+        assert_eq!(
+            ledger.verify(12, &[0x1000], Some(3)),
+            Err(EvidenceError::MissingProcessor)
+        );
     }
 
     #[test]
@@ -231,12 +257,24 @@ mod tests {
         let mut ledger = CoverageLedger::new(3);
         ledger.add_processor(processor(0, 3)).unwrap();
         for cr3 in [0, 0x1001] {
-            assert_eq!(ledger.add_root(AddressSpaceReport { cr3, aliases_clear: true, observed_epoch: 3 }), Err(EvidenceError::InvalidRoot));
+            assert_eq!(
+                ledger.add_root(root(cr3, 3, true)),
+                Err(EvidenceError::InvalidRoot)
+            );
         }
-        assert_eq!(ledger.add_root(AddressSpaceReport { cr3: 0x1000, aliases_clear: false, observed_epoch: 3 }), Err(EvidenceError::UnsafeAlias));
-        ledger.add_root(AddressSpaceReport { cr3: 0x1000, aliases_clear: true, observed_epoch: 3 }).unwrap();
-        assert_eq!(ledger.add_root(AddressSpaceReport { cr3: 0x1000, aliases_clear: true, observed_epoch: 3 }), Err(EvidenceError::DuplicateRoot));
-        assert_eq!(ledger.verify(1, &[0x2000], Some(3)), Err(EvidenceError::MissingRoot));
+        assert_eq!(
+            ledger.add_root(root(0x1000, 3, false)),
+            Err(EvidenceError::UnsafeAlias)
+        );
+        ledger.add_root(root(0x1000, 3, true)).unwrap();
+        assert_eq!(
+            ledger.add_root(root(0x1000, 3, true)),
+            Err(EvidenceError::DuplicateRoot)
+        );
+        assert_eq!(
+            ledger.verify(1, &[0x2000], Some(3)),
+            Err(EvidenceError::MissingRoot)
+        );
     }
 
     #[test]
@@ -247,14 +285,23 @@ mod tests {
         assert!(after > before);
         let mut ledger = CoverageLedger::new(before);
         ledger.add_processor(processor(0, before)).unwrap();
-        ledger.add_root(AddressSpaceReport { cr3: 0x1000, aliases_clear: true, observed_epoch: before }).unwrap();
-        assert_eq!(ledger.verify(1, &[0x1000], current_mapping_epoch()), Err(EvidenceError::StaleGeneration));
+        ledger.add_root(root(0x1000, before, true)).unwrap();
+        assert_eq!(
+            ledger.verify(1, &[0x1000], current_mapping_epoch()),
+            Err(EvidenceError::StaleGeneration)
+        );
     }
 
     #[test]
     fn stale_observations_are_rejected_at_insertion() {
         let mut ledger = CoverageLedger::new(8);
-        assert_eq!(ledger.add_processor(processor(1, 7)), Err(EvidenceError::StaleGeneration));
-        assert_eq!(ledger.add_root(AddressSpaceReport { cr3: 0x1000, aliases_clear: true, observed_epoch: 9 }), Err(EvidenceError::StaleGeneration));
+        assert_eq!(
+            ledger.add_processor(processor(1, 7)),
+            Err(EvidenceError::StaleGeneration)
+        );
+        assert_eq!(
+            ledger.add_root(root(0x1000, 9, true)),
+            Err(EvidenceError::StaleGeneration)
+        );
     }
 }

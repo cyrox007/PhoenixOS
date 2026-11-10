@@ -6,6 +6,7 @@ use bootloader_api::BootInfo;
 use bootloader_api::info::MemoryRegionKind;
 use core::arch::x86_64::__cpuid;
 use phoenix_acpi::iommu_observation::{ReadOnlyIommuState, validate_passive_read};
+use phoenix_acpi::ivhd_scope::IvhdScopes;
 use phoenix_acpi::{McfgInfo, RSDP_V2_SIZE, Rsdp, SDT_HEADER_SIZE, SdtHeader, Xsdt};
 use phoenix_pcie::{ConfigAccess, EcamSegment};
 use phoenix_vm::ActivePageTable;
@@ -655,7 +656,7 @@ fn acpi_and_pci(
     out: &mut Report<'_>,
 ) {
     let outcome = read_acpi(rsdp_address, memory, context, cache, out);
-    let Ok(mcfg) = outcome else {
+    let Ok((mcfg, scopes)) = outcome else {
         log!(out, "[WARN] diagnostic ACPI: {:?}", outcome.err());
         return;
     };
@@ -704,9 +705,15 @@ fn acpi_and_pci(
             }
             if function.class_code == 2 {
                 network = network.saturating_add(1);
+                let bdf = (u16::from(function.bus) << 8)
+                    | (u16::from(function.device) << 3)
+                    | u16::from(function.function);
+                let scope = scopes.as_ref().map(|map| {
+                    map.query(entry.segment_group, bdf)
+                });
                 log!(
                     out,
-                    "[INFO] diagnostic PCI network: {:02x}:{:02x}.{} vendor={:04x} device={:04x} busmaster={} DMA-approved=false",
+                    "[INFO] diagnostic PCI network: {:02x}:{:02x}.{} vendor={:04x} device={:04x} busmaster={} iommu_scope={scope:?} DMA-approved=false",
                     function.bus,
                     function.device,
                     function.function,
@@ -754,7 +761,7 @@ fn read_acpi(
     context: &HardwareContext,
     cache: Option<&DmaCacheSnapshot>,
     out: &mut Report<'_>,
-) -> Result<Option<McfgInfo>, ReadError> {
+) -> Result<(Option<McfgInfo>, Option<IvhdScopes>), ReadError> {
     let rsdp =
         Rsdp::parse(memory.bytes(physical, RSDP_V2_SIZE)?).map_err(|_| ReadError::InvalidAcpi)?;
     let xsdt_bytes = memory.table(rsdp.xsdt_address)?;
@@ -764,6 +771,7 @@ fn read_acpi(
     let mut ivrs_hardware = 0u16;
     let mut ivrs_invalid = false;
     let mut first_iommu_base = None;
+    let mut device_scopes = None;
     let mut processor_count = None;
     for physical in xsdt.iter() {
         let bytes = memory.table(physical)?;
@@ -779,6 +787,19 @@ fn read_acpi(
                 iommu_kind = "AMD-IVRS";
                 match phoenix_acpi::ivrs::parse_ivrs(bytes) {
                     Ok(ivrs) => {
+                        match phoenix_acpi::ivhd_scope::parse_ivhd_scopes(bytes) {
+                            Ok(scopes) => {
+                                log!(
+                                    out,
+                                    "[INFO] diagnostic IVHD scope: ranges={} unknown={} iommu_blocks={} domain=unverified",
+                                    scopes.ranges_count(),
+                                    scopes.unknown_entries,
+                                    scopes.hardware_blocks
+                                );
+                                device_scopes = Some(scopes);
+                            }
+                            Err(error) => log!(out, "[WARN] diagnostic IVHD scope: {error:?}"),
+                        }
                         ivrs_hardware = ivrs.hardware_blocks;
                         first_iommu_base = ivrs.first_iommu_base;
                         log!(
@@ -829,7 +850,7 @@ fn read_acpi(
         out,
         "[INFO] diagnostic CPU cores: MADT={processor_count:?} msr_consensus=unverified BSP_only=true"
     );
-    Ok(mcfg)
+    Ok((mcfg, device_scopes))
 }
 
 /// Никаких записей MMIO: только два поля известного контроллера,

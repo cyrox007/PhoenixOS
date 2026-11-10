@@ -1,0 +1,21 @@
+{
+  "profile": "asus-vivobook-m6500qh-observed",
+  "observed_on": "2026-11-10",
+  "computer_model": "M6500QH",
+  "uefi_observed": "M6500QH.311",
+  "processor": "AMD Ryzen 5 5600H",
+  "cores": 6,
+  "threads": 12,
+  "pci_required": {
+    "1C5C:174A": "internal NVMe (exclude from all active experiments)",
+    "1022:7901": "SATA AHCI (exclude)",
+    "10DE:1F9D": "NVIDIA GPU (exclude)",
+    "1002:1638": "AMD integrated GPU (exclude)",
+    "14C3:7961": "MediaTek wireless (exclude)"
+  },
+  "disk_model_protected": "HFM512GD3JX013N",
+  "hardware_dma_allowed": false,
+  "iommu_domain_verified": false,
+  "candidate_for_physical_dma": null,
+  "notes": "Windows inventory is observational; PCI vendor/device IDs do not identify a verified isolated DMA domain."
+}

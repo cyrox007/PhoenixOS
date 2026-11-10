@@ -110,6 +110,8 @@ pub fn parse_madt_topology(bytes: &[u8]) -> Result<MadtTopology, TopologyError> 
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use super::*;
 
     fn table(records: &[u8]) -> std::vec::Vec<u8> {

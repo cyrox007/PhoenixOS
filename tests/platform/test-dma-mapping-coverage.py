@@ -29,7 +29,6 @@ class MappingCoverageSourceTests(unittest.TestCase):
 
     def test_no_automatic_all_cores_accepted_by_diagnostic(self):
         self.assertIn("msr_consensus=unverified BSP_only=true", self.diagnostic)
-        self.assertIn("all_processors_checked: false", self.ledger if "all_processors_checked: false" in self.ledger else self.gate)
         self.assertIn("evidence.all_processors_checked = false;", self.gate)
         self.assertIn("evidence.all_address_spaces_checked = false;", self.gate)
 

@@ -7,6 +7,7 @@ pub mod hardware_gate;
 pub mod kernel_reservations;
 pub mod page_walk;
 pub mod ram_audit;
+pub mod root_registry;
 
 use x86_64::registers::control::{Cr3, Cr3Flags};
 use x86_64::structures::paging::mapper::{MapToError, TranslateResult, UnmapError};
@@ -151,6 +152,9 @@ impl ActivePageTable {
     /// - активная CR3 относится к текущему адресному пространству ядра;
     /// - для этой P4 не существует другого одновременного изменяемого владельца.
     pub unsafe fn from_current(physical_memory_offset: VirtAddr) -> Self {
+        let (root_frame, _) = Cr3::read();
+        root_registry::register_boot_root(root_frame.start_address().as_u64())
+            .expect("нельзя доверять текущему корню CR3 без реестра");
         let level_4_table = unsafe { active_level_4_table(physical_memory_offset) };
         let mapper = unsafe { OffsetPageTable::new(level_4_table, physical_memory_offset) };
 
@@ -226,6 +230,8 @@ impl ActivePageTable {
 pub enum InactivePageTableError {
     NoPhysicalFrame,
     NotEmpty,
+    StillActive,
+    RootRegistryUnsafe,
     NotUserAddress,
     UnmappedUserAddress,
     MappingFailed,
@@ -260,6 +266,11 @@ impl AddressSpaceActivation<'_> {
 
 impl Drop for AddressSpaceActivation<'_> {
     fn drop(&mut self) {
+        assert!(
+            root_registry::contains_root(self.previous_root.start_address().as_u64())
+                .unwrap_or(false),
+            "нельзя вернуть неучтённый корень CR3"
+        );
         dma_evidence::invalidate_mappings();
         unsafe {
             Cr3::write(self.previous_root, self.previous_flags);
@@ -279,7 +290,7 @@ impl InactivePageTable {
         allocator: &mut A,
     ) -> Result<Self, InactivePageTableError>
     where
-        A: FrameAllocator<Size4KiB>,
+        A: FrameAllocator<Size4KiB> + FrameDeallocator<Size4KiB>,
     {
         dma_evidence::invalidate_mappings();
         let root_frame = allocator
@@ -291,6 +302,13 @@ impl InactivePageTable {
 
         unsafe {
             root_table.write(PageTable::new());
+        }
+
+        if root_registry::register_process_root(root_frame.start_address().as_u64()).is_err() {
+            unsafe {
+                allocator.deallocate_frame(root_frame);
+            }
+            return Err(InactivePageTableError::RootRegistryUnsafe);
         }
 
         Ok(Self {
@@ -313,6 +331,11 @@ impl InactivePageTable {
     /// Код, текущий стек и все данные, к которым выполняется доступ до
     /// уничтожения guard, обязаны быть отображены в новом адресном пространстве.
     pub unsafe fn activate(&self) -> AddressSpaceActivation<'_> {
+        assert!(
+            root_registry::contains_root(self.root_frame.start_address().as_u64())
+                .unwrap_or(false),
+            "нельзя активировать неучтённое адресное пространство"
+        );
         dma_evidence::invalidate_mappings();
         let (previous_root, previous_flags) = Cr3::read();
         unsafe {
@@ -666,10 +689,18 @@ impl InactivePageTable {
     where
         A: FrameDeallocator<Size4KiB>,
     {
+        if self.is_active() {
+            return Err(InactivePageTableError::StillActive);
+        }
         if !self.is_empty() {
             return Err(InactivePageTableError::NotEmpty);
         }
 
+        // Не возвращаем физическую страницу, если её CR3 невозможно
+        // исключить из доверенного реестра. Запись в таблицах уже не нужна.
+        dma_evidence::invalidate_mappings();
+        root_registry::unregister_process_root(self.root_frame.start_address().as_u64())
+            .map_err(|_| InactivePageTableError::RootRegistryUnsafe)?;
         unsafe {
             allocator.deallocate_frame(self.root_frame);
         }

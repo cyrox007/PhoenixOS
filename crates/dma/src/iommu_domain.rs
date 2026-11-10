@@ -224,6 +224,17 @@ impl<E: IommuEngine, const N: usize> IsolatedIommuDomain<E, N> {
                     && slot.length == length
             })
             .ok_or(DmaError::InvalidRange)?;
+        if !self.engine.translation_active() || !self.engine.device_in_private_domain() {
+            let reason = if !self.engine.translation_active() {
+                DomainFault::EngineUnavailable
+            } else {
+                DomainFault::DeviceNotIsolated
+            };
+            self.slots[index].from_active = true;
+            self.slots[index].phase = SlotPhase::Quarantined;
+            self.fault = Some(reason);
+            return Err(DmaError::Unaddressable);
+        }
         self.stopped().map_err(|_| DmaError::Unaddressable)?;
         if self.slots[index].phase == SlotPhase::RecoveredPendingClose {
             self.slots[index] = Entry::EMPTY;
@@ -249,6 +260,12 @@ impl<E: IommuEngine, const N: usize> IsolatedIommuDomain<E, N> {
     /// остаётся занятым. Пользователь обязан сохранить владение страницами.
     /// Ни восстановление, ни отсутствие ошибок не разрешают физический DMA.
     pub fn recover_quarantined(&mut self) -> Result<(), DomainFault> {
+        if !self.engine.translation_active() {
+            return Err(DomainFault::EngineUnavailable);
+        }
+        if !self.engine.device_in_private_domain() {
+            return Err(DomainFault::DeviceNotIsolated);
+        }
         self.stopped()?;
         // Даже при fault нельзя освобождать память, пока трансляция
         // или частично созданные записи могут оставаться активными.
@@ -612,4 +629,33 @@ mod tests {
         drop(platform);
         assert_eq!(memory.freed, 1);
     }
+    #[test]
+    fn lost_iommu_blocks_release_and_recovery_until_translation_is_verified() {
+        let mut d = domain();
+        let mut map =
+            DeviceMapping::establish(&mut d, PhysicalAddress::new(0x4000), layout()).unwrap();
+        d.engine.active = false;
+        assert!(map.close(&mut d).is_err());
+        assert_eq!(d.quarantined_count(), 1);
+        assert_eq!(d.recover_quarantined(), Err(DomainFault::EngineUnavailable));
+        assert_eq!(d.quarantined_count(), 1);
+        d.engine.active = true;
+        d.recover_quarantined().unwrap();
+        map.close(&mut d).unwrap();
+    }
+
+    #[test]
+    fn lost_private_domain_blocks_release_after_successful_mapping() {
+        let mut d = domain();
+        let mut map =
+            DeviceMapping::establish(&mut d, PhysicalAddress::new(0x4000), layout()).unwrap();
+        d.engine.isolated = false;
+        assert!(map.close(&mut d).is_err());
+        assert_eq!(d.quarantined_count(), 1);
+        assert_eq!(d.recover_quarantined(), Err(DomainFault::DeviceNotIsolated));
+        d.engine.isolated = true;
+        d.recover_quarantined().unwrap();
+        map.close(&mut d).unwrap();
+    }
+
 }

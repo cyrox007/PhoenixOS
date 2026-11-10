@@ -150,6 +150,8 @@ impl IvrsSummary {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use super::*;
     use crate::checksum;
 

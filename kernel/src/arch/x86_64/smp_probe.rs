@@ -75,10 +75,13 @@ global_asm!(
     "phoenix_ap_trampoline_lm64:",
     "movl %esi, %esi",
     "movq 0xF20(%rsi), %rsp",
+    // Адрес точки входа нужно получить до перезаписи RSI адресом CR3.
+    "movq 0xF28(%rsi), %rax",
     "movq 0xF30(%rsi), %rdi",
     "movq 0xF38(%rsi), %rsi",
-    "movq 0xF28(%rsi), %rax",
     "xorq %rbp, %rbp",
+    // Соответствие ABI: функция входит с RSP mod 16 = 8.
+    "pushq $0",
     "jmpq *%rax",
     "phoenix_ap_trampoline_end:",
     ".text",

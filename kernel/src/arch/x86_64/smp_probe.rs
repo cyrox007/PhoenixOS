@@ -518,6 +518,11 @@ pub fn run<const N: usize>(
     }
     let temporary_root = prepare_tables(frames, offset, kernel_root)?;
     write_trampoline(trampoline, offset, temporary_root, kernel_root)?;
+    crate::serial::line(
+        &mut crate::serial::console(),
+        "INFO",
+        format_args!("kernel AP stage: trampoline={trampoline:#x} temporary_cr3={temporary_root:#x} kernel_cr3={kernel_root:#x} bsp={bsp_id}"),
+    );
 
     OBSERVED[bsp_slot].publish(snapshot());
     let data = (offset + trampoline).as_mut_ptr::<u8>();
@@ -534,6 +539,11 @@ pub fn run<const N: usize>(
             ptr::write_unaligned(data.add(AP_SLOT).cast::<u64>(), slot as u64);
         }
 
+        crate::serial::line(
+            &mut crate::serial::console(),
+            "INFO",
+            format_args!("kernel AP stage: launching apic={id} slot={slot}"),
+        );
         send_ipi(*id, 0xc500);
         delay_cycles(30_000_000);
         send_ipi(*id, 0x8500);
@@ -545,6 +555,11 @@ pub fn run<const N: usize>(
                 return Err(ProbeError::ApDidNotStart { apic_id: *id });
             }
         }
+        crate::serial::line(
+            &mut crate::serial::console(),
+            "INFO",
+            format_args!("kernel AP stage: observed apic={id} slot={slot}"),
+        );
     }
     verify(topology, kernel_root)
 }

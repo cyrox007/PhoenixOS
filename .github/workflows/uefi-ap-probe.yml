@@ -40,12 +40,20 @@ jobs:
         run: |
           mkdir -p artifacts
           sudo python3 scripts/run-uefi-ap-probe.py tools/uefi-ap-probe/target/x86_64-unknown-uefi/release/phoenix-uefi-ap-probe.efi artifacts/uefi-ap-probe-serial.log
+      - name: Измерить двенадцать логических процессоров QEMU
+        env:
+          PHOENIX_AP_PROBE_CPUS: "12"
+        run: |
+          sudo --preserve-env=PHOENIX_AP_PROBE_CPUS python3 scripts/run-uefi-ap-probe.py tools/uefi-ap-probe/target/x86_64-unknown-uefi/release/phoenix-uefi-ap-probe.efi artifacts/uefi-ap-probe-12-serial.log
       - name: Сохранить журнал при ошибке
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: phoenix-uefi-ap-probe-failure-log
-          path: artifacts/uefi-ap-probe-serial.log
+          path: |
+            artifacts/uefi-ap-probe-serial.log
+            artifacts/uefi-ap-probe-12-serial.log
+            artifacts/uefi-ap-probe-12-serial.log
           if-no-files-found: ignore
       - name: Сохранить проверенный QEMU-образ
         uses: actions/upload-artifact@v4

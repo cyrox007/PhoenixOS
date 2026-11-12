@@ -9,7 +9,6 @@ use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use core::time::Duration;
 use uefi::proto::pi::mp::MpServices;
 use uefi::{Status, boot};
 
@@ -326,7 +325,9 @@ fn execute() -> Status {
                 measure_ap,
                 core::ptr::null_mut(),
                 None,
-                Some(Duration::from_secs(12)),
+                // Завершаем вызов только после возвращения всех AP.
+                // Внешняя проверка QEMU ограничена 120 секундами.
+                None,
             )
             .is_err()
     {

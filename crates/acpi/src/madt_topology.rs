@@ -276,9 +276,11 @@ mod tests {
             verify_observed_processors(&topology, &[]).unwrap().missing,
             1
         );
-        assert!(!verify_observed_processors(&topology, &[])
-            .unwrap()
-            .identifiers_complete);
+        assert!(
+            !verify_observed_processors(&topology, &[])
+                .unwrap()
+                .identifiers_complete
+        );
     }
 
     #[test]

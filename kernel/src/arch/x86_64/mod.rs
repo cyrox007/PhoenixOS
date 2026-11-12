@@ -4,6 +4,7 @@ pub mod dma_cache;
 pub mod exceptions;
 mod gdt;
 pub mod syscall;
+pub mod smp_probe;
 
 pub fn init() {
     gdt::init();

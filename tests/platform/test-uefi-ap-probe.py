@@ -13,16 +13,16 @@ MODULE = util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
-def successful_trace():
+def successful_trace(count=4):
     lines = ["AP_PROBE mode=UEFI-QEMU readonly=true hardware_dma=false"]
-    for cpu in range(4):
+    for cpu in range(count):
         lines.append(
             f"AP_PROBE cpu={cpu} apic={cpu} cr3=0x1000 "
             "pat=0x7040600070406 mtrr_default=0xc00 "
             "mtrr_count=8 amd_observed=false valid=true"
         )
     lines.append(
-        "AP_PROBE result=OK total=4 enabled=4 captured=4 "
+        f"AP_PROBE result=OK total={count} enabled={count} captured={count} "
         "unique=true cache_consensus=true phase=uefi-before-exit "
         "kernel_cr3_verified=false dma_authorized=false"
     )
@@ -58,6 +58,7 @@ class FirmwareProbeSafetyTests(unittest.TestCase):
         command = MODULE.qemu_command("probe.img", "code.fd", "vars.fd")
         joined = " ".join(command)
         self.assertIn("-smp 4", joined)
+        self.assertIn("-smp 12", " ".join(MODULE.qemu_command("probe.img", "code.fd", "vars.fd", 12)))
         self.assertIn("file=probe.img,readonly=on", joined)
         self.assertIn("file=code.fd,readonly=on", joined)
         self.assertNotIn("file=probe.img,readonly=off", joined)
@@ -72,6 +73,15 @@ class FirmwareProbeSafetyTests(unittest.TestCase):
             del trace[index]
             with self.assertRaises(AssertionError):
                 MODULE.validate(trace)
+
+    def test_twelve_distinct_executed_processors_are_required(self):
+        trace = successful_trace(12)
+        MODULE.validate(trace, 12)
+        for index in (1, 6, 12):
+            incomplete = trace.copy()
+            del incomplete[index]
+            with self.assertRaises(AssertionError):
+                MODULE.validate(incomplete, 12)
 
     def test_duplicate_or_invalid_processor_is_rejected(self):
         trace = successful_trace()

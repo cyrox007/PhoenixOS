@@ -933,10 +933,7 @@ fn running_apic_id() -> Option<(u32, &'static str)> {
     let max_extended = __cpuid(0x8000_0000).eax;
     if max_extended >= 0x8000_001e {
         let vendor = __cpuid(0);
-        if vendor.ebx == 0x6874_7541
-            && vendor.edx == 0x6974_6e65
-            && vendor.ecx == 0x444d_4163
-        {
+        if vendor.ebx == 0x6874_7541 && vendor.edx == 0x6974_6e65 && vendor.ecx == 0x444d_4163 {
             return Some((__cpuid(0x8000_001e).eax, "amd-extended-cpuid"));
         }
     }
@@ -966,8 +963,8 @@ fn report_bsp_coverage(
     // CPUID.1 кодирует только восемь младших битов APIC.
     // При наличии расширенных идентификаторов считать такое измерение
     // полным недопустимо: могут существовать коллизии.
-    let id_unambiguous = source != "legacy8-cpuid"
-        || topology.enabled_apic_ids().iter().all(|id| *id < 256);
+    let id_unambiguous =
+        source != "legacy8-cpuid" || topology.enabled_apic_ids().iter().all(|id| *id < 256);
     let sample_valid = cache_measured && cr3_valid && id_unambiguous;
     let measured = if sample_valid { apic.as_slice() } else { &[] };
     let result = verify_observed_processors(topology, measured);

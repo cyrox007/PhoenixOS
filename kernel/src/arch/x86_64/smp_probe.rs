@@ -498,12 +498,22 @@ pub fn run<const N: usize>(
         return Err(ProbeError::InvalidTopology);
     };
 
-    let trampoline = frames
+    // Начальная страница 0 физической памяти никогда не используется
+    // как SIPI-вектор. Распределитель может считать её свободной,
+    // поэтому резервируем и пропускаем её без освобождения.
+    let mut trampoline = frames
         .allocate_contiguous_below_4k(1, 1, 0x0f_ffff)
         .ok_or(ProbeError::LowPageUnavailable)?
         .start_address()
         .as_u64();
-    if trampoline < 0x1000 || trampoline > 0xff000 {
+    if trampoline == 0 {
+        trampoline = frames
+            .allocate_contiguous_below_4k(1, 1, 0x0f_ffff)
+            .ok_or(ProbeError::LowPageUnavailable)?
+            .start_address()
+            .as_u64();
+    }
+    if !(0x1000..=0xff000).contains(&trampoline) {
         return Err(ProbeError::BadPhysicalAddress);
     }
     let temporary_root = prepare_tables(frames, offset, kernel_root)?;

@@ -185,6 +185,7 @@ def build_qemu_command(image, code, vars_path, nvme_image, path):
         # привязан к отдельному контроллеру NVMe, не к IDE/PATA.
         "-nodefaults",
         "-cpu", "host",
+        "-smp", "4",
         "-m", "512M",
         "-display", "none",
         "-serial", "stdio",

@@ -58,6 +58,19 @@ class CpuTopologyEvidenceTests(unittest.TestCase):
         ):
             self.assertIn(marker, self.diagnostic)
 
+    def test_kernel_trampoline_preserves_parameter_address(self):
+        kernel = read("kernel/src/arch/x86_64/smp_probe.rs")
+        point = kernel.index('    "phoenix_ap_trampoline_lm64:"')
+        entry = kernel.index('    "movq 0xF28(%rsi), %rax"', point)
+        kernel_cr3 = kernel.index('    "movq 0xF38(%rsi), %rsi"', point)
+        self.assertLess(entry, kernel_cr3)
+        self.assertIn('    "pushq $0"', kernel)
+        self.assertIn('    "jmpq *%rax"', kernel)
+        self.assertIn('    "movq 0xF20(%rsi), %rsp"', kernel)
+        self.assertIn("verify_observed_processors(topology,", kernel)
+        self.assertIn("kernel AP snapshot: OK", read("kernel/src/main.rs"))
+        self.assertIn("-smp", read("scripts/qemu-hotplug.py"))
+
     def test_diagnostic_is_read_only_and_does_not_claim_cores_measured(self):
         self.assertIn("parse_madt_topology(bytes)", self.diagnostic)
         self.assertIn("measured=false", self.diagnostic)

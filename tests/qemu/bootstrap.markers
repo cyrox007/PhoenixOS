@@ -2,6 +2,7 @@
 bootstrap: OK
 exception: breakpoint
 acpi platform discovery: OK
+kernel AP snapshot: OK measured=12 expected=12 distinct=true cache=true cr3=true physical_dma=false
 pcie ecam enumeration: OK
 modern pci policy: OK nvme=2 xhci=1
 reference edu driver: OK

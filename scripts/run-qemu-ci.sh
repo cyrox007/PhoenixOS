@@ -67,6 +67,7 @@ fi
 timeout -k 5s "$(( QEMU_TIMEOUT_SECONDS + 15 ))s" sudo env \
   "PHOENIXOS_QEMU_TIMEOUT_SECONDS=$QEMU_TIMEOUT_SECONDS" \
   "PHOENIXOS_QEMU_IDLE_TIMEOUT_SECONDS=$QEMU_IDLE_TIMEOUT_SECONDS" \
+  "PHOENIXOS_QEMU_FAULT_LOG=${PHOENIXOS_QEMU_FAULT_LOG:-}" \
   python3 scripts/qemu-hotplug.py "$IMAGE" "$OVMF_CODE" "$vars_copy" "$serial_log"
 status=$?
 set -e

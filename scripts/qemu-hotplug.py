@@ -178,13 +178,14 @@ class Qmp:
 
 def build_qemu_command(image, code, vars_path, nvme_image, path):
     """Явный набор UEFI и современных виртуальных устройств."""
-    return [
+    command = [
         "qemu-system-x86_64",
         "-machine", "q35,accel=kvm",
         # Не создавать старые устройства по умолчанию: загрузочный диск
         # привязан к отдельному контроллеру NVMe, не к IDE/PATA.
         "-nodefaults",
         "-cpu", "host",
+        "-smp", "12",
         "-m", "512M",
         "-display", "none",
         "-serial", "stdio",
@@ -207,6 +208,10 @@ def build_qemu_command(image, code, vars_path, nvme_image, path):
         "-drive", f"if=none,id=phoenix-boot,format=raw,file={image},readonly=on",
         "-device", "nvme,id=phoenix-boot-nvme,serial=PhoenixBoot01,drive=phoenix-boot,bootindex=1",
     ]
+    fault_log = os.environ.get("PHOENIXOS_QEMU_FAULT_LOG")
+    if fault_log:
+        command.extend(["-d", "guest_errors,int,cpu_reset", "-D", fault_log])
+    return command
 
 
 def validate_modern_qemu_profile(arguments):

@@ -75,12 +75,14 @@ class DiagnosticIsolationTests(unittest.TestCase):
         self.assertNotIn("qemu-xhci", joined)
         self.assertNotIn("edu,", joined)
         self.assertEqual(joined.count("file=diag.img"), 1)
+        self.assertIn("-smp 4", joined)
 
     def test_report_is_required_for_success(self):
         required = set(self.runner.MARKERS)
         self.assertIn("diagnostic mode: OK readonly=1", required)
         self.assertIn("device DMA: disabled", required)
         self.assertIn("diagnostic CPU: OK", required)
+        self.assertIn("diagnostic CPU coverage: expected=4 measured=1 missing=3 ids_complete=false", required)
         self.assertIn("diagnostic memory map:", required)
         self.assertIn("diagnostic cache: OK", required)
         self.assertIn("diagnostic cache sample: phys=", required)

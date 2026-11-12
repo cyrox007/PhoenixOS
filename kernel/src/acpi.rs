@@ -1,4 +1,5 @@
 use phoenix_acpi::{AcpiError, MadtInfo, McfgInfo, Rsdp, SDT_HEADER_SIZE, SdtHeader, Xsdt};
+use phoenix_acpi::madt_topology::{MadtTopology, parse_madt_topology};
 use x86_64::VirtAddr;
 
 const MAX_ACPI_TABLE_BYTES: usize = 1024 * 1024;
@@ -10,6 +11,7 @@ pub enum PlatformAcpiError {
     TableTooLarge,
     MissingMadt,
     MissingMcfg,
+    InvalidTopology,
 }
 
 impl From<AcpiError> for PlatformAcpiError {
@@ -21,6 +23,7 @@ impl From<AcpiError> for PlatformAcpiError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlatformAcpi {
     pub madt: MadtInfo,
+    pub topology: MadtTopology,
     pub mcfg: McfgInfo,
 }
 
@@ -38,6 +41,7 @@ pub fn discover(
     let xsdt = Xsdt::parse(xsdt_bytes)?;
 
     let mut madt = None;
+    let mut topology = None;
     let mut mcfg = None;
 
     for table_address in xsdt.iter() {
@@ -48,6 +52,7 @@ pub fn discover(
             b"APIC" => {
                 let table = mapped_table(table_address, physical_memory_offset)?;
                 madt = Some(phoenix_acpi::parse_madt(table)?);
+                topology = Some(parse_madt_topology(table).map_err(|_| PlatformAcpiError::InvalidTopology)?);
             }
             b"MCFG" => {
                 let table = mapped_table(table_address, physical_memory_offset)?;
@@ -59,6 +64,7 @@ pub fn discover(
 
     Ok(PlatformAcpi {
         madt: madt.ok_or(PlatformAcpiError::MissingMadt)?,
+        topology: topology.ok_or(PlatformAcpiError::InvalidTopology)?,
         mcfg: mcfg.ok_or(PlatformAcpiError::MissingMcfg)?,
     })
 }

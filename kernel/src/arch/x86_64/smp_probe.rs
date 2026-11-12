@@ -521,7 +521,9 @@ pub fn run<const N: usize>(
     crate::serial::line(
         &mut crate::serial::console(),
         "INFO",
-        format_args!("kernel AP stage: trampoline={trampoline:#x} temporary_cr3={temporary_root:#x} kernel_cr3={kernel_root:#x} bsp={bsp_id}"),
+        format_args!(
+            "kernel AP stage: trampoline={trampoline:#x} temporary_cr3={temporary_root:#x} kernel_cr3={kernel_root:#x} bsp={bsp_id}"
+        ),
     );
 
     OBSERVED[bsp_slot].publish(snapshot());

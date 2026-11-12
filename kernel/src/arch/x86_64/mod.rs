@@ -3,8 +3,8 @@ pub mod context;
 pub mod dma_cache;
 pub mod exceptions;
 mod gdt;
-pub mod syscall;
 pub mod smp_probe;
+pub mod syscall;
 
 pub fn init() {
     gdt::init();

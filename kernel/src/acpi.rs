@@ -1,5 +1,5 @@
-use phoenix_acpi::{AcpiError, MadtInfo, McfgInfo, Rsdp, SDT_HEADER_SIZE, SdtHeader, Xsdt};
 use phoenix_acpi::madt_topology::{MadtTopology, parse_madt_topology};
+use phoenix_acpi::{AcpiError, MadtInfo, McfgInfo, Rsdp, SDT_HEADER_SIZE, SdtHeader, Xsdt};
 use x86_64::VirtAddr;
 
 const MAX_ACPI_TABLE_BYTES: usize = 1024 * 1024;
@@ -52,7 +52,9 @@ pub fn discover(
             b"APIC" => {
                 let table = mapped_table(table_address, physical_memory_offset)?;
                 madt = Some(phoenix_acpi::parse_madt(table)?);
-                topology = Some(parse_madt_topology(table).map_err(|_| PlatformAcpiError::InvalidTopology)?);
+                topology = Some(
+                    parse_madt_topology(table).map_err(|_| PlatformAcpiError::InvalidTopology)?,
+                );
             }
             b"MCFG" => {
                 let table = mapped_table(table_address, physical_memory_offset)?;

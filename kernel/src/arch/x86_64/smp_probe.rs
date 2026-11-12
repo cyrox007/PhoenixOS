@@ -5,8 +5,8 @@
 //! чтения регистров остаются остановленными с выключенными прерываниями.
 //! Снимок текущей CR3 не заменяет аудит остальных адресных пространств.
 
-use core::arch::{asm, global_asm};
 use core::arch::x86_64::{__cpuid, __cpuid_count};
+use core::arch::{asm, global_asm};
 use core::cell::UnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -390,9 +390,7 @@ fn prepare_tables<const N: usize>(
     if root == 0 || root & 4095 != 0 {
         return Err(ProbeError::BadPhysicalAddress);
     }
-    let pointer = |physical: u64| -> *mut u64 {
-        (offset + physical).as_mut_ptr::<u64>()
-    };
+    let pointer = |physical: u64| -> *mut u64 { (offset + physical).as_mut_ptr::<u64>() };
     unsafe {
         ptr::copy_nonoverlapping(pointer(kernel_root), pointer(root), 512);
         ptr::write_bytes(pointer(root + 4096), 0, 512);
@@ -404,18 +402,29 @@ fn prepare_tables<const N: usize>(
     Ok(root)
 }
 
-fn write_trampoline(base: u64, offset: VirtAddr, temporary_root: u64, kernel_root: u64) -> Result<(), ProbeError> {
+fn write_trampoline(
+    base: u64,
+    offset: VirtAddr,
+    temporary_root: u64,
+    kernel_root: u64,
+) -> Result<(), ProbeError> {
     let start = ptr::addr_of!(phoenix_ap_trampoline_begin) as usize;
     let end = ptr::addr_of!(phoenix_ap_trampoline_end) as usize;
-    let length = end.checked_sub(start).ok_or(ProbeError::TrampolineTooLarge)?;
+    let length = end
+        .checked_sub(start)
+        .ok_or(ProbeError::TrampolineTooLarge)?;
     if length == 0 || length >= GDT_PTR {
         return Err(ProbeError::TrampolineTooLarge);
     }
 
     let relative = |symbol: *const u8| -> Result<u32, ProbeError> {
-        let location = (symbol as usize).checked_sub(start).ok_or(ProbeError::TrampolineTooLarge)?;
+        let location = (symbol as usize)
+            .checked_sub(start)
+            .ok_or(ProbeError::TrampolineTooLarge)?;
         let location = u32::try_from(location).map_err(|_| ProbeError::TrampolineTooLarge)?;
-        u32::try_from(base).ok().and_then(|addr| addr.checked_add(location))
+        u32::try_from(base)
+            .ok()
+            .and_then(|addr| addr.checked_add(location))
             .ok_or(ProbeError::BadPhysicalAddress)
     };
     let pm32 = relative(ptr::addr_of!(phoenix_ap_trampoline_pm32))?;
@@ -425,7 +434,10 @@ fn write_trampoline(base: u64, offset: VirtAddr, temporary_root: u64, kernel_roo
         ptr::write_bytes(dest, 0, 4096);
         ptr::copy_nonoverlapping(start as *const u8, dest, length);
         ptr::write_unaligned(dest.add(GDT_PTR).cast::<u16>(), 31);
-        ptr::write_unaligned(dest.add(GDT_PTR + 2).cast::<u32>(), base as u32 + GDT as u32);
+        ptr::write_unaligned(
+            dest.add(GDT_PTR + 2).cast::<u32>(),
+            base as u32 + GDT as u32,
+        );
         ptr::write_unaligned(dest.add(FAR32).cast::<u32>(), pm32);
         ptr::write_unaligned(dest.add(FAR32 + 4).cast::<u16>(), 8);
         ptr::write_unaligned(dest.add(FAR64).cast::<u32>(), lm64);
@@ -438,7 +450,10 @@ fn write_trampoline(base: u64, offset: VirtAddr, temporary_root: u64, kernel_roo
             0x00cf_9a00_0000_ffff,
             0x00cf_9200_0000_ffff,
             0x00af_9a00_0000_ffff,
-        ].into_iter().enumerate() {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             ptr::write_unaligned(dest.add(GDT + index * 8).cast::<u64>(), descriptor);
         }
     }

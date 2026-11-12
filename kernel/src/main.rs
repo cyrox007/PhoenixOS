@@ -252,12 +252,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // Фактическая многоядерная проверка выполняется уже ПОСЛЕ выхода
     // из UEFI. Штатное ядро предназначено только для испытаний QEMU;
     // диагностический образ ASUS этот код не включает.
-    let ap_probe = arch::x86_64::smp_probe::run(
-        &platform_acpi.topology,
-        &mut frames,
-        physical_memory_offset,
-    )
-    .expect("не удалось запустить и проверить вспомогательные процессоры в QEMU");
+    let ap_probe =
+        arch::x86_64::smp_probe::run(&platform_acpi.topology, &mut frames, physical_memory_offset)
+            .expect("не удалось запустить и проверить вспомогательные процессоры в QEMU");
     serial::line(
         &mut out,
         "INFO",

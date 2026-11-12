@@ -38,6 +38,48 @@ impl MadtTopology {
     }
 }
 
+/// Результат сверки именно измеренных идентификаторов процессоров с ACPI.
+/// Сверка идентификаторов не заменяет чтение MSR, CR3 и аппаратную приёмку.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessorIdCoverage {
+    pub expected: usize,
+    pub observed: usize,
+    pub missing: usize,
+    pub identifiers_complete: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservationError {
+    TooManyObservations,
+    UnknownProcessor,
+    DuplicateObservation,
+}
+
+/// Учитываются только идентификаторы, полученные кодом, реально
+/// выполнившимся на процессоре. Список MADT не является измерением.
+pub fn verify_observed_processors(
+    topology: &MadtTopology,
+    measured_ids: &[u32],
+) -> Result<ProcessorIdCoverage, ObservationError> {
+    if measured_ids.len() > MAX_TOPOLOGY_PROCESSORS {
+        return Err(ObservationError::TooManyObservations);
+    }
+    for (index, id) in measured_ids.iter().enumerate() {
+        if !topology.enabled_apic_ids().contains(id) {
+            return Err(ObservationError::UnknownProcessor);
+        }
+        if measured_ids[..index].contains(id) {
+            return Err(ObservationError::DuplicateObservation);
+        }
+    }
+    Ok(ProcessorIdCoverage {
+        expected: topology.enabled_count,
+        observed: measured_ids.len(),
+        missing: topology.enabled_count - measured_ids.len(),
+        identifiers_complete: measured_ids.len() == topology.enabled_count,
+    })
+}
+
 /// Не включает процессоры и не обращается к регистрам оборудования.
 pub fn parse_madt_topology(bytes: &[u8]) -> Result<MadtTopology, TopologyError> {
     let header = SdtHeader::validate_table(bytes, *b"APIC")?;
@@ -191,6 +233,62 @@ mod tests {
         assert_eq!(
             parse_madt_topology(&data),
             Err(TopologyError::Acpi(AcpiError::InvalidChecksum))
+        );
+    }
+
+    #[test]
+    fn only_executed_processors_count_as_measured() {
+        let mut records = std::vec::Vec::new();
+        records.extend_from_slice(&lapic(0, 1));
+        records.extend_from_slice(&lapic(2, 1));
+        records.extend_from_slice(&x2apic(0x1234, 1));
+        let topology = parse_madt_topology(&table(&records)).unwrap();
+
+        let observation = verify_observed_processors(&topology, &[0]).unwrap();
+        assert_eq!(observation.expected, 3);
+        assert_eq!(observation.observed, 1);
+        assert_eq!(observation.missing, 2);
+        assert!(!observation.identifiers_complete);
+
+        assert_eq!(
+            verify_observed_processors(&topology, &[0, 0x1234, 2]).unwrap(),
+            ProcessorIdCoverage {
+                expected: 3,
+                observed: 3,
+                missing: 0,
+                identifiers_complete: true,
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_or_duplicate_apic_ids_fail_closed() {
+        let topology = parse_madt_topology(&table(&lapic(1, 1))).unwrap();
+        assert_eq!(
+            verify_observed_processors(&topology, &[1, 1]),
+            Err(ObservationError::DuplicateObservation)
+        );
+        assert_eq!(
+            verify_observed_processors(&topology, &[9]),
+            Err(ObservationError::UnknownProcessor)
+        );
+        assert_eq!(
+            verify_observed_processors(&topology, &[]).unwrap().missing,
+            1
+        );
+        assert!(
+            !verify_observed_processors(&topology, &[])
+                .unwrap()
+                .identifiers_complete
+        );
+    }
+
+    #[test]
+    fn excess_observations_never_extend_fixed_capacity() {
+        let topology = parse_madt_topology(&table(&lapic(1, 1))).unwrap();
+        assert_eq!(
+            verify_observed_processors(&topology, &[1; MAX_TOPOLOGY_PROCESSORS + 1]),
+            Err(ObservationError::TooManyObservations)
         );
     }
 

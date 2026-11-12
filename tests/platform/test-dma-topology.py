@@ -39,6 +39,25 @@ class CpuTopologyEvidenceTests(unittest.TestCase):
         self.assertNotIn("expected_processors: usize", self.ledger)
         self.assertIn("expected_apic_ids: &[u32]", self.gate)
 
+    def test_observed_cpu_ids_are_not_inferred_from_madt(self):
+        for marker in (
+            "verify_observed_processors(",
+            "identifiers_complete",
+            "DuplicateObservation",
+            "UnknownProcessor",
+            "only_executed_processors_count_as_measured",
+        ):
+            self.assertIn(marker, self.acpi)
+        for marker in (
+            "running_apic_id()",
+            "report_bsp_coverage(",
+            "diagnostic CPU coverage:",
+            "diagnostic CPU BSP:",
+            "cache_measured",
+            "msr_consensus=unverified BSP_only=true",
+        ):
+            self.assertIn(marker, self.diagnostic)
+
     def test_diagnostic_is_read_only_and_does_not_claim_cores_measured(self):
         self.assertIn("parse_madt_topology(bytes)", self.diagnostic)
         self.assertIn("measured=false", self.diagnostic)

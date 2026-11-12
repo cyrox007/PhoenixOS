@@ -16,6 +16,9 @@ MARKERS = (
     "device DMA: disabled",
     "diagnostic memory map:",
     "diagnostic CPU: OK",
+    "diagnostic CPU coverage: expected=4 measured=1 missing=3 ids_complete=false",
+    "msr_consensus=unverified BSP_only=true",
+    "diagnostic CPU BSP: apic=Some(0)",
     "diagnostic cache: OK",
     "diagnostic cache sample: phys=",
     "WB-candidate=true",
@@ -39,6 +42,9 @@ def build_command(image, code, vars_file):
         "-machine", "q35,accel=kvm",
         "-nodefaults",
         "-cpu", "host",
+        # Четыре логических процессора: только BSP исполняет диагностический
+        # код. Тест обязан доказать, что остальные три не засчитаны.
+        "-smp", "4",
         "-m", "512M",
         "-display", "none",
         "-serial", "stdio",

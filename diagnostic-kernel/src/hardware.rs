@@ -4,7 +4,7 @@
 use crate::screen::Report;
 use bootloader_api::BootInfo;
 use bootloader_api::info::MemoryRegionKind;
-use core::arch::x86_64::__cpuid;
+use core::arch::x86_64::{__cpuid, __cpuid_count};
 use phoenix_acpi::iommu_observation::{ReadOnlyIommuState, validate_passive_read};
 use phoenix_acpi::ivhd_scope::IvhdScopes;
 use phoenix_acpi::{McfgInfo, RSDP_V2_SIZE, Rsdp, SDT_HEADER_SIZE, SdtHeader, Xsdt};
@@ -867,13 +867,16 @@ fn read_acpi(
                     Err(error) => log!(out, "[WARN] diagnostic CPU topology: {error:?}"),
                 }
                 match phoenix_acpi::madt_topology::parse_madt_topology(bytes) {
-                    Ok(topology) => log!(
-                        out,
-                        "[INFO] diagnostic CPU APIC IDs: enabled={} online_capable={} ids={:?} measured=false",
-                        topology.enabled_count,
-                        topology.online_capable_count,
-                        topology.enabled_apic_ids()
-                    ),
+                    Ok(topology) => {
+                        log!(
+                            out,
+                            "[INFO] diagnostic CPU APIC IDs: enabled={} online_capable={} ids={:?} measured=false",
+                            topology.enabled_count,
+                            topology.online_capable_count,
+                            topology.enabled_apic_ids()
+                        );
+                        report_bsp_coverage(&topology, cache.is_some(), out);
+                    }
                     Err(error) => log!(
                         out,
                         "[WARN] diagnostic CPU APIC IDs: unverified reason={error:?}"
@@ -909,6 +912,81 @@ fn read_acpi(
         "[INFO] diagnostic CPU cores: MADT={processor_count:?} msr_consensus=unverified BSP_only=true"
     );
     Ok((mcfg, device_scopes))
+}
+
+/// Идентификатор непосредственно исполняющегося процессора по CPUID.
+/// Идентификаторы из MADT сами по себе не означают, что другие ядра запущены.
+fn running_apic_id() -> Option<(u32, &'static str)> {
+    let basic_max = __cpuid(0).eax;
+    for leaf in [0x1f, 0x0b] {
+        if basic_max < leaf {
+            continue;
+        }
+        let level = __cpuid_count(leaf, 0);
+        // Нулевое число логических процессоров означает недействительный
+        // уровень топологии, даже если числовой идентификатор равен нулю.
+        if level.ebx & 0xffff != 0 && (level.ecx >> 8) & 0xff != 0 {
+            return Some((level.edx, "x2apic-cpuid"));
+        }
+    }
+
+    let max_extended = __cpuid(0x8000_0000).eax;
+    if max_extended >= 0x8000_001e {
+        let vendor = __cpuid(0);
+        if vendor.ebx == 0x6874_7541 && vendor.edx == 0x6974_6e65 && vendor.ecx == 0x444d_4163 {
+            return Some((__cpuid(0x8000_001e).eax, "amd-extended-cpuid"));
+        }
+    }
+
+    let leaf1 = __cpuid(1);
+    if leaf1.edx & (1 << 9) != 0 {
+        return Some((leaf1.ebx >> 24, "legacy8-cpuid"));
+    }
+    None
+}
+
+/// Даже при верном измерении BSP остальные процессоры не проверены.
+/// Снимок предназначен только для аудита, не для аппаратного допуска DMA.
+fn report_bsp_coverage(
+    topology: &phoenix_acpi::madt_topology::MadtTopology,
+    cache_measured: bool,
+    out: &mut Report<'_>,
+) {
+    use phoenix_acpi::madt_topology::verify_observed_processors;
+
+    let (apic, source) = match running_apic_id() {
+        Some((id, source)) => (Some(id), source),
+        None => (None, "unavailable"),
+    };
+    let cr3 = Cr3::read().0.start_address().as_u64();
+    let cr3_valid = cr3 != 0 && cr3 & 4095 == 0;
+    // CPUID.1 кодирует только восемь младших битов APIC.
+    // При наличии расширенных идентификаторов считать такое измерение
+    // полным недопустимо: могут существовать коллизии.
+    let id_unambiguous =
+        source != "legacy8-cpuid" || topology.enabled_apic_ids().iter().all(|id| *id < 256);
+    let sample_valid = cache_measured && cr3_valid && id_unambiguous;
+    let measured = if sample_valid { apic.as_slice() } else { &[] };
+    let result = verify_observed_processors(topology, measured);
+    match result {
+        Ok(coverage) => log!(
+            out,
+            "[INFO] diagnostic CPU coverage: expected={} measured={} missing={} ids_complete={} msr_consensus=unverified BSP_only=true",
+            coverage.expected,
+            coverage.observed,
+            coverage.missing,
+            coverage.identifiers_complete
+        ),
+        Err(reason) => log!(
+            out,
+            "[WARN] diagnostic CPU coverage: expected={} measured=0 missing=unverified ids_complete=false reason={reason:?} BSP_only=true",
+            topology.enabled_count
+        ),
+    }
+    log!(
+        out,
+        "[INFO] diagnostic CPU BSP: apic={apic:?} source={source} cr3={cr3:#x} cache_measured={cache_measured} cr3_valid={cr3_valid} id_unambiguous={id_unambiguous}"
+    );
 }
 
 /// Никаких записей MMIO: только два поля известного контроллера,

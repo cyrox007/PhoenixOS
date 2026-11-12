@@ -30,12 +30,12 @@ def build_image(binary, image):
     )
 
 
-def qemu_command(image, code, variables):
+def qemu_command(image, code, variables, cpu_count=4):
     return [
         "qemu-system-x86_64",
         "-machine", "q35,accel=kvm",
         "-cpu", "host",
-        "-smp", "4",
+        "-smp", str(cpu_count),
         "-m", "512M",
         "-nodefaults",
         "-display", "none",
@@ -50,14 +50,14 @@ def qemu_command(image, code, variables):
     ]
 
 
-def validate(lines):
+def validate(lines, cpu_count=4):
     records = [item for item in lines if item.startswith("AP_PROBE cpu=")]
     result = [item for item in lines if item.startswith("AP_PROBE result=")]
     assert any(
         "AP_PROBE mode=UEFI-QEMU readonly=true hardware_dma=false" in line
         for line in lines
     ), "Отсутствует безопасный признак предзагрузочной диагностики"
-    assert len(records) == 4, f"Ожидалось четыре реальных снимка ЦП, получено {len(records)}"
+    assert len(records) == cpu_count, f"Ожидалось {cpu_count} реальных снимков ЦП, получено {len(records)}"
     ids = []
     for index, record in enumerate(records):
         parts = dict(token.split("=", 1) for token in record.split()[1:])
@@ -66,11 +66,11 @@ def validate(lines):
         assert int(parts["cr3"], 16) != 0, record
         assert int(parts["cr3"], 16) % 4096 == 0, record
         ids.append(int(parts["apic"]))
-    assert len(set(ids)) == 4, f"Идентификаторы процессоров повторяются: {ids}"
+    assert len(set(ids)) == cpu_count, f"Идентификаторы процессоров повторяются: {ids}"
     assert len(result) == 1, "Не найден единственный итоговый протокол"
     summary = result[0]
     for expected in (
-        "result=OK", "total=4", "enabled=4", "captured=4",
+        "result=OK", f"total={cpu_count}", f"enabled={cpu_count}", f"captured={cpu_count}",
         "unique=true", "cache_consensus=true",
         "phase=uefi-before-exit", "kernel_cr3_verified=false",
         "dma_authorized=false",
@@ -78,7 +78,7 @@ def validate(lines):
         assert expected in summary, f"Недостающий признак {expected}: {summary}"
 
 
-def execute(binary, output):
+def execute(binary, output, cpu_count=4):
     if not Path("/dev/kvm").exists():
         raise RuntimeError("Для изолированного испытания требуется KVM")
     code = find_firmware([
@@ -97,7 +97,7 @@ def execute(binary, output):
         vars_copy = root / "OVMF_VARS.fd"
         shutil.copyfile(firmware_vars, vars_copy)
         build_image(binary, image)
-        command = qemu_command(image, code, vars_copy)
+        command = qemu_command(image, code, vars_copy, cpu_count)
         started = time.monotonic()
         lines = []
         pending = bytearray()
@@ -132,8 +132,8 @@ def execute(binary, output):
                                 print(line, flush=True)
                                 lines.append(line)
                             if line.startswith("AP_PROBE result="):
-                                validate(lines)
-                                print("UEFI: все четыре процессора реально измерены", flush=True)
+                                validate(lines, cpu_count)
+                                print(f"UEFI: все {cpu_count} процессоров реально измерены", flush=True)
                                 return
                 raise TimeoutError("Превышен общий срок испытания UEFI")
             finally:
@@ -148,4 +148,7 @@ def execute(binary, output):
 if __name__ == "__main__":
     if len(sys.argv) != 3:
         raise SystemExit("Использование: run-uefi-ap-probe.py <файл EFI> <журнал>")
-    execute(Path(sys.argv[1]), Path(sys.argv[2]))
+    cpu_count = int(os.environ.get("PHOENIX_AP_PROBE_CPUS", "4"))
+    if cpu_count not in (4, 12):
+        raise ValueError("Допустимы только 4 или 12 процессоров QEMU")
+    execute(Path(sys.argv[1]), Path(sys.argv[2]), cpu_count)

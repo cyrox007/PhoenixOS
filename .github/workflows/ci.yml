@@ -117,7 +117,8 @@ jobs:
         if: failure()
         run: |
           if test -f artifacts/qemu-faults.log; then
-            tail -n 140 artifacts/qemu-faults.log
+            grep -n -E "check_exception|Triple fault|v=0[0-9a-f]|CPU Reset|EIP=|RIP=" artifacts/qemu-faults.log | tail -n 120 || true
+            tail -n 40 artifacts/qemu-faults.log
           fi
       - name: Сохранить журнал QEMU при ошибке
         if: failure()

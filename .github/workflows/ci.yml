@@ -113,6 +113,12 @@ jobs:
           PHOENIXOS_QEMU_FAULT_LOG: artifacts/qemu-faults.log
         run: bash scripts/run-qemu-ci.sh artifacts/phoenixos-uefi.img
 
+      - name: Вывести причины отказа запуска процессоров QEMU
+        if: failure()
+        run: |
+          if test -f artifacts/qemu-faults.log; then
+            tail -n 140 artifacts/qemu-faults.log
+          fi
       - name: Сохранить журнал QEMU при ошибке
         if: failure()
         uses: actions/upload-artifact@v4

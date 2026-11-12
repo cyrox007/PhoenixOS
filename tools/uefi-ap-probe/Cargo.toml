@@ -1,0 +1,17 @@
+[package]
+name = "phoenix-uefi-ap-probe"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+# Самостоятельный загрузочный инструмент; не входит в рабочее ядро.
+[workspace]
+resolver = "3"
+
+[dependencies]
+uefi = { version = "=0.41.0", default-features = false }
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1

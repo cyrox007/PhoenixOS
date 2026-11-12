@@ -110,6 +110,7 @@ jobs:
       - name: Проверить ядро в QEMU
         env:
           PHOENIXOS_MARKERS_FILE: tests/qemu/bootstrap.markers
+          PHOENIXOS_QEMU_FAULT_LOG: artifacts/qemu-faults.log
         run: bash scripts/run-qemu-ci.sh artifacts/phoenixos-uefi.img
 
       - name: Сохранить журнал QEMU при ошибке
@@ -117,7 +118,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: phoenixos-qemu-diagnostics
-          path: artifacts/qemu-serial.log
+          path: |
+            artifacts/qemu-serial.log
+            artifacts/qemu-faults.log
           if-no-files-found: warn
 
       - name: Собрать независимый диагностический образ UEFI

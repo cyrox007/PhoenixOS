@@ -3,8 +3,8 @@
 
 // Отдельная предзагрузочная диагностика. Никаких обращений к накопителям,
 // PCI, DMA или IOMMU; работа с дополнительными ядрами только через UEFI MP.
-use core::arch::x86_64::{__cpuid, __cpuid_count};
 use core::arch::asm;
+use core::arch::x86_64::{__cpuid, __cpuid_count};
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::fmt::{self, Write};
@@ -119,13 +119,17 @@ macro_rules! report {
 
 fn uart_write(port: u16, value: u8) {
     // SAFETY: выделенный последовательный порт виртуальной машины QEMU.
-    unsafe { asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack, preserves_flags)) }
+    unsafe {
+        asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack, preserves_flags))
+    }
 }
 
 fn uart_read(port: u16) -> u8 {
     let value: u8;
     // SAFETY: только чтение регистра состояния виртуального UART.
-    unsafe { asm!("in al, dx", in("dx") port, out("al") value, options(nomem, nostack, preserves_flags)) };
+    unsafe {
+        asm!("in al, dx", in("dx") port, out("al") value, options(nomem, nostack, preserves_flags))
+    };
     value
 }
 
@@ -280,7 +284,11 @@ fn execute() -> Status {
         }
     };
     if count.enabled == 0 || count.enabled > MAX_PROCESSORS || count.total > MAX_PROCESSORS {
-        report!("AP_PROBE error=capacity total={} enabled={}", count.total, count.enabled);
+        report!(
+            "AP_PROBE error=capacity total={} enabled={}",
+            count.total,
+            count.enabled
+        );
         return Status::ABORTED;
     }
 
@@ -368,7 +376,11 @@ fn execute() -> Status {
         unique,
         cache_consensus
     );
-    if complete { Status::SUCCESS } else { Status::ABORTED }
+    if complete {
+        Status::SUCCESS
+    } else {
+        Status::ABORTED
+    }
 }
 
 #[uefi::entry]

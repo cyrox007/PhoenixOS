@@ -41,6 +41,7 @@ pub trait AmdIommuIo {
     fn mmio_write(&mut self, offset: u64, value: u64);
     fn memory_read(&self, address: u64) -> u64;
     fn memory_write(&mut self, address: u64, value: u64);
+    fn checkpoint(&self, _stage: &'static str) {}
 }
 
 /// Источник подтверждения остановки устройства. Текущий статус PCI Bus Master
@@ -203,25 +204,33 @@ impl<B: AmdIommuIo, D: StoppedDevice> AmdV1Engine<B, D> {
             return Err(HardwareError::UnsafeExistingConfiguration);
         }
 
+        self.io.checkpoint("tables-before");
         self.build_tables();
+        self.io.checkpoint("tables-after");
         self.io
             .mmio_write(MMIO_DEVICE_TABLE, self.pages.device_table);
         self.io.mmio_write(
             MMIO_COMMAND_BASE,
             self.pages.command_buffer | COMMAND_SIZE_EXPONENT,
         );
+        self.io.checkpoint("controller-bases-set");
         self.io.mmio_write(MMIO_COMMAND_HEAD, 0);
         self.io.mmio_write(MMIO_COMMAND_TAIL, 0);
+        self.io.checkpoint("controller-control-before");
         self.io
             .mmio_write(MMIO_CONTROL, CONTROL_ENABLE | CONTROL_COMMAND_BUFFER_ENABLE);
+        self.io.checkpoint("controller-control-after");
         fence(Ordering::SeqCst);
 
+        self.io.checkpoint("controller-check-active");
         if !self.hardware_active() {
             self.poisoned = true;
             return Err(HardwareError::EngineInactive);
         }
         self.active = true;
+        self.io.checkpoint("controller-start-invalidation");
         self.issue_commands(&[(u64::from(self.device_id) | (2 << 60), 0)])?;
+        self.io.checkpoint("controller-invalidation-complete");
         Ok(())
     }
 
@@ -263,7 +272,9 @@ impl<B: AmdIommuIo, D: StoppedDevice> AmdV1Engine<B, D> {
         }
         self.submit((1 << 60) | self.pages.completion | 1, self.sequence);
         fence(Ordering::SeqCst);
+        self.io.checkpoint("command-tail-before");
         self.io.mmio_write(MMIO_COMMAND_TAIL, self.command_tail);
+        self.io.checkpoint("command-tail-after");
         for _ in 0..1_000_000 {
             fence(Ordering::Acquire);
             if self.io.memory_read(self.pages.completion) == self.sequence {

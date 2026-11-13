@@ -447,7 +447,11 @@ mod tests {
             if offset == MMIO_CONTROL {
                 self.regs.insert(
                     MMIO_STATUS,
-                    if value == 0 { 0 } else { STATUS_COMMAND_RUNNING },
+                    if value == 0 {
+                        0
+                    } else {
+                        STATUS_COMMAND_RUNNING
+                    },
                 );
             }
             if offset == MMIO_COMMAND_TAIL && self.complete {

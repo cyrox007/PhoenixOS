@@ -20,12 +20,12 @@ use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 
 #[path = "../../kernel/src/acpi.rs"]
 mod acpi;
+#[cfg(feature = "amd-iommu")]
+mod amd_iommu_test;
 #[path = "../../kernel/src/reference_edu.rs"]
 mod reference_edu;
 #[path = "../../kernel/src/serial.rs"]
 mod serial;
-#[cfg(feature = "amd-iommu")]
-mod amd_iommu_test;
 
 mod arch {
     pub mod x86_64 {
@@ -216,13 +216,13 @@ fn kernel_main(info: &'static mut BootInfo) -> ! {
 
     #[cfg(feature = "amd-iommu")]
     {
-        let mut frames = SystemFrameAllocator::<MAX_MEMORY_REGIONS>::from_regions(&info.memory_regions)
-            .expect("нет распределителя памяти для AMD IOMMU");
+        let mut frames =
+            SystemFrameAllocator::<MAX_MEMORY_REGIONS>::from_regions(&info.memory_regions)
+                .expect("нет распределителя памяти для AMD IOMMU");
         let mut page_table = unsafe { ActivePageTable::from_current(offset) };
-        let (bytes, blocked) = unsafe {
-            amd_iommu_test::verify(function, &mut page_table, &mut frames, offset)
-        }
-        .expect("AMD IOMMU не обеспечил преобразование и блокировку DMA");
+        let (bytes, blocked) =
+            unsafe { amd_iommu_test::verify(function, &mut page_table, &mut frames, offset) }
+                .expect("AMD IOMMU не обеспечил преобразование и блокировку DMA");
         serial::line(
             &mut out,
             "INFO",

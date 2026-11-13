@@ -5,9 +5,7 @@
 
 use core::sync::atomic::{Ordering, fence};
 
-use phoenix_dma::amd_iommu_v1::{
-    AmdIommuIo, AmdIommuPages, AmdV1Engine, StoppedDevice,
-};
+use phoenix_dma::amd_iommu_v1::{AmdIommuIo, AmdIommuPages, AmdV1Engine, StoppedDevice};
 use phoenix_dma::iommu_domain::IommuEngine;
 use phoenix_memory::SystemFrameAllocator;
 use phoenix_pcie::PcieFunction;
@@ -37,11 +35,19 @@ impl MMIO {
     }
 
     fn write64(&self, register: u64, value: u64) {
-        unsafe { (self.base + register).as_mut_ptr::<u64>().write_volatile(value) };
+        unsafe {
+            (self.base + register)
+                .as_mut_ptr::<u64>()
+                .write_volatile(value)
+        };
     }
 
     fn read32(&self, register: usize) -> u32 {
-        unsafe { (self.base + register as u64).as_ptr::<u32>().read_volatile() }
+        unsafe {
+            (self.base + register as u64)
+                .as_ptr::<u32>()
+                .read_volatile()
+        }
     }
 }
 
@@ -60,7 +66,11 @@ impl AmdIommuIo for HardwareBus {
     }
 
     fn memory_read(&self, physical: u64) -> u64 {
-        unsafe { (self.physical_memory_offset + physical).as_ptr::<u64>().read_volatile() }
+        unsafe {
+            (self.physical_memory_offset + physical)
+                .as_ptr::<u64>()
+                .read_volatile()
+        }
     }
 
     fn memory_write(&mut self, physical: u64, value: u64) {
@@ -83,14 +93,17 @@ impl QemuEduStop {
     }
 
     fn set_command(&self, value: u16) {
-        unsafe { self.config_command_address.as_mut_ptr::<u16>().write_volatile(value) };
+        unsafe {
+            self.config_command_address
+                .as_mut_ptr::<u16>()
+                .write_volatile(value)
+        };
     }
 }
 
 impl StoppedDevice for QemuEduStop {
     fn is_fully_stopped(&mut self) -> bool {
-        self.command() & 4 == 0
-            && self.edu_mmio.read64(edu::MMIO_DMA_COMMAND as u64) & 1 == 0
+        self.command() & 4 == 0 && self.edu_mmio.read64(edu::MMIO_DMA_COMMAND as u64) & 1 == 0
     }
 }
 
@@ -154,7 +167,11 @@ fn intact(address: VirtAddr, byte: u8) -> bool {
 fn pattern(address: VirtAddr) {
     for index in 0..edu::EDU_TRANSFER_BYTES {
         let byte = (index as u8).wrapping_mul(7).wrapping_add(11);
-        unsafe { (address + index as u64).as_mut_ptr::<u8>().write_volatile(byte) };
+        unsafe {
+            (address + index as u64)
+                .as_mut_ptr::<u8>()
+                .write_volatile(byte)
+        };
     }
     fence(Ordering::SeqCst);
 }
@@ -206,12 +223,18 @@ pub unsafe fn verify<const N: usize>(
 
     map_mmio(table, frames, IOMMU_MAP, IOMMU_QEMU_BASE, 3)?;
     map_mmio(table, frames, EDU_MAP, edu_base, 1)?;
-    let edu_mmio = MMIO { base: VirtAddr::new(EDU_MAP) };
+    let edu_mmio = MMIO {
+        base: VirtAddr::new(EDU_MAP),
+    };
     if edu_mmio.read32(edu::MMIO_IDENTIFICATION) & 0xff != 0xed {
         return Err("не распознан виртуальный EDU");
     }
     // Только доступ к регистрам; DMA остаётся выключенным до установки DTE.
-    unsafe { cmd_addr.as_mut_ptr::<u16>().write_volatile(original_command | 2) };
+    unsafe {
+        cmd_addr
+            .as_mut_ptr::<u16>()
+            .write_volatile(original_command | 2)
+    };
 
     // Восемь страниц таблиц и одна страница данных — все целиком
     // принадлежат этому испытанию и не возвращаются при незавершённой DMA.
@@ -259,13 +282,19 @@ pub unsafe fn verify<const N: usize>(
         edu_mmio,
     };
     let io = HardwareBus {
-        mmio: MMIO { base: VirtAddr::new(IOMMU_MAP) },
+        mmio: MMIO {
+            base: VirtAddr::new(IOMMU_MAP),
+        },
         physical_memory_offset: offset,
     };
     let mut iommu = AmdV1Engine::new(io, device, pages, device_id, 7, guards)
         .map_err(|_| "проверка исходной конфигурации AMD IOMMU не пройдена")?;
-    iommu.initialize().map_err(|_| "аппаратный AMD IOMMU не инициализирован")?;
-    iommu.add_page(guards, data).map_err(|_| "не создан аппаратный домен IOVA")?;
+    iommu
+        .initialize()
+        .map_err(|_| "аппаратный AMD IOMMU не инициализирован")?;
+    iommu
+        .add_page(guards, data)
+        .map_err(|_| "не создан аппаратный домен IOVA")?;
     if !iommu.translation_active() || !iommu.device_in_private_domain() {
         return Err("аппаратный домен не подтверждён");
     }
@@ -302,9 +331,7 @@ pub unsafe fn verify<const N: usize>(
     }
 
     iommu.device_mut().set_command(original_command & !4);
-    if iommu.device_mut().command() & 4 != 0
-        || edu.read64(edu::MMIO_DMA_COMMAND as u64) & 1 != 0
-    {
+    if iommu.device_mut().command() & 4 != 0 || edu.read64(edu::MMIO_DMA_COMMAND as u64) & 1 != 0 {
         return Err("устройство не остановилось");
     }
     iommu

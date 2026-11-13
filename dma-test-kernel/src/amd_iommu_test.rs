@@ -148,7 +148,7 @@ fn fill(address: VirtAddr, byte: u8) {
 }
 
 fn intact(address: VirtAddr, byte: u8) -> bool {
-    (0..PAGE).all(|index| unsafe { (address + index).as_ptr::<u8>().read_volatile() } == byte)
+    (0..PAGE).all(|index| (unsafe { (address + index).as_ptr::<u8>().read_volatile() }) == byte)
 }
 
 fn pattern(address: VirtAddr) {
@@ -162,7 +162,7 @@ fn pattern(address: VirtAddr) {
 fn pattern_matches(address: VirtAddr) -> bool {
     (0..edu::EDU_TRANSFER_BYTES).all(|index| {
         let expected = (index as u8).wrapping_mul(7).wrapping_add(11);
-        unsafe { (address + index as u64).as_ptr::<u8>().read_volatile() } == expected
+        (unsafe { (address + index as u64).as_ptr::<u8>().read_volatile() }) == expected
     })
 }
 

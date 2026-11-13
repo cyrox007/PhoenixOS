@@ -17,6 +17,7 @@ jobs:
         with:
           ref: feat/342-amd-iommu-hardware-engine
       - run: rustup show
+      # Запуск после исправления синтаксиса проверки памяти
       - name: Единое форматирование кода Rust
         run: cargo fmt --all
       - name: Зафиксировать оформление

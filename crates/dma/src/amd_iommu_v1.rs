@@ -457,7 +457,7 @@ mod tests {
             if offset == MMIO_COMMAND_TAIL && self.complete {
                 let written = self
                     .pages
-                    .get(&0x2000 + ((value + PAGE - 8) % PAGE))
+                    .get(&(0x2000 + ((value + PAGE - 8) % PAGE)))
                     .copied();
                 if let Some(sequence) = written {
                     self.pages.insert(0x7000, sequence);

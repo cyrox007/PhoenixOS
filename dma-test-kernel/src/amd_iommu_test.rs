@@ -24,6 +24,11 @@ const DMA_MASK: u64 = 0x0fff_ffff;
 const POLL_COUNT: usize = 10_000_000;
 const SENTINEL: u8 = 0xa5;
 
+fn stage(name: &'static str) {
+    let mut out = crate::serial::console();
+    crate::serial::line(&mut out, "INFO", format_args!("AMD IOMMU QEMU stage={name}"));
+}
+
 #[derive(Clone, Copy)]
 struct MMIO {
     base: VirtAddr,
@@ -220,14 +225,17 @@ pub unsafe fn verify<const N: usize>(
         return Err("пересечение виртуальных контроллеров");
     }
 
+    stage("map-amd-mmio");
     map_mmio(table, frames, IOMMU_MAP, IOMMU_QEMU_BASE, 3)?;
     map_mmio(table, frames, EDU_MAP, edu_base, 1)?;
+    stage("map-edu-done");
     let edu_mmio = MMIO {
         base: VirtAddr::new(EDU_MAP),
     };
     if edu_mmio.read32(edu::MMIO_IDENTIFICATION) & 0xff != 0xed {
         return Err("не распознан виртуальный EDU");
     }
+    stage("edu-identified");
     if edu_mmio.read64(edu::MMIO_DMA_COMMAND as u64) & 1 != 0 {
         return Err("виртуальный EDU выполняет незавершённую передачу");
     }
@@ -242,6 +250,7 @@ pub unsafe fn verify<const N: usize>(
         return Err("не удалось отключить PCI Bus Master до установки IOMMU");
     }
 
+    stage("edu-master-disabled");
     // Восемь страниц таблиц и одна страница данных — все целиком
     // принадлежат этому испытанию и не возвращаются при незавершённой DMA.
     let backing = frames
@@ -293,14 +302,18 @@ pub unsafe fn verify<const N: usize>(
         },
         physical_memory_offset: offset,
     };
+    stage("pages-prepared");
     let mut iommu = AmdV1Engine::new(io, device, pages, device_id, 7, guards)
         .map_err(|_| "проверка исходной конфигурации AMD IOMMU не пройдена")?;
+    stage("iommu-initialize");
     iommu
         .initialize()
         .map_err(|_| "аппаратный AMD IOMMU не инициализирован")?;
+    stage("iommu-initialized");
     iommu
         .add_page(guards, data)
         .map_err(|_| "не создан аппаратный домен IOVA")?;
+    stage("iova-mapped");
     if !iommu.translation_active() || !iommu.device_in_private_domain() {
         return Err("аппаратный домен не подтверждён");
     }
@@ -312,7 +325,9 @@ pub unsafe fn verify<const N: usize>(
         controller.edu_mmio
     };
 
+    stage("edu-first-transfer");
     transfer(&edu, guards, edu::EDU_INTERNAL_BUFFER, edu::EDU_DMA_START)?;
+    stage("edu-first-transfer-done");
     fill(buffer, 0);
     transfer(
         &edu,

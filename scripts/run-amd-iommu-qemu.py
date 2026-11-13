@@ -25,6 +25,10 @@ def build_command(image, firmware, variables):
     command[0] = os.environ.get("PHOENIX_QEMU_BINARY", "qemu-system-x86_64")
     pos = command.index("-device")
     command[pos:pos] = ["-device", "amd-iommu,dma-remap=on,intremap=off"]
+    command.extend([
+        "-d", "int,cpu_reset",
+        "-D", os.environ.get("PHOENIX_AMD_IOMMU_FAULTS", "artifacts/amd-iommu-faults.log"),
+    ])
     if command.count("-device") < 3:
         raise RuntimeError("Обязательный виртуальный AMD IOMMU не подключён")
     return command

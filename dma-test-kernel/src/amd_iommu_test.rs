@@ -26,7 +26,11 @@ const SENTINEL: u8 = 0xa5;
 
 fn stage(name: &'static str) {
     let mut out = crate::serial::console();
-    crate::serial::line(&mut out, "INFO", format_args!("AMD IOMMU QEMU stage={name}"));
+    crate::serial::line(
+        &mut out,
+        "INFO",
+        format_args!("AMD IOMMU QEMU stage={name}"),
+    );
 }
 
 #[derive(Clone, Copy)]

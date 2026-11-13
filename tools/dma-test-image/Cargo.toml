@@ -4,6 +4,9 @@ version = "0.0.1"
 edition = "2024"
 publish = false
 
+[features]
+amd-iommu = ["phoenix-dma-test-kernel/amd-iommu"]
+
 [build-dependencies]
 phoenix-dma-test-kernel = { path = "../../dma-test-kernel", artifact = "bin", target = "x86_64-unknown-none" }
 bootloader = "=0.11.17"

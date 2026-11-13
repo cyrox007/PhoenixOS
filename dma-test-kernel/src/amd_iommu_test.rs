@@ -66,6 +66,10 @@ struct HardwareBus {
 }
 
 impl AmdIommuIo for HardwareBus {
+    fn checkpoint(&self, point: &'static str) {
+        stage(point);
+    }
+
     fn mmio_read(&self, register: u64) -> u64 {
         self.mmio.read64(register)
     }

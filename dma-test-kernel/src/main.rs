@@ -224,7 +224,11 @@ fn kernel_main(info: &'static mut BootInfo) -> ! {
             match unsafe { amd_iommu_test::verify(function, &mut page_table, &mut frames, offset) } {
                 Ok(report) => report,
                 Err(reason) => {
-                    serial::line(&mut out, "ERROR", format_args!("AMD IOMMU QEMU stage failure: {reason}"));
+                    serial::line(
+                        &mut out,
+                        "ERROR",
+                        format_args!("AMD IOMMU QEMU stage failure: {reason}"),
+                    );
                     halt()
                 }
             };

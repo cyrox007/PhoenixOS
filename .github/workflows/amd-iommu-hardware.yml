@@ -67,6 +67,7 @@ jobs:
           name: phoenix-amd-iommu-hardware-qemu
           path: |
             artifacts/amd-iommu-serial.log
+            artifacts/amd-iommu-faults.log
           if-no-files-found: ignore
       - name: Сохранить подтверждённый виртуальный образ
         if: success()

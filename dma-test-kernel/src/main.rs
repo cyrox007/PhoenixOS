@@ -221,7 +221,8 @@ fn kernel_main(info: &'static mut BootInfo) -> ! {
                 .expect("нет распределителя памяти для AMD IOMMU");
         let mut page_table = unsafe { ActivePageTable::from_current(offset) };
         let (bytes, blocked) =
-            match unsafe { amd_iommu_test::verify(function, &mut page_table, &mut frames, offset) } {
+            match unsafe { amd_iommu_test::verify(function, &mut page_table, &mut frames, offset) }
+            {
                 Ok(report) => report,
                 Err(reason) => {
                     serial::line(

@@ -336,6 +336,34 @@ impl<B: AmdIommuIo, D: StoppedDevice> AmdV1Engine<B, D> {
         self.mapped.iter().filter(|entry| **entry).count()
     }
 
+    /// Позволяет вызывающей стороне включить и остановить только
+    /// заранее разрешённое устройство. Не даёт права на доступ к
+    /// чужим PCI-функциям.
+    pub fn device_mut(&mut self) -> &mut D {
+        &mut self.device
+    }
+
+    /// Отключение выполняется только после удаления всех отображений,
+    /// остановки контроллера и завершения аппаратной очереди.
+    /// Страницы таблиц остаются у вызывающей стороны до подтверждения.
+    pub fn shutdown(&mut self) -> Result<(), HardwareError> {
+        self.ensure_ready()?;
+        if self.mapping_count() != 0 {
+            return Err(HardwareError::Busy);
+        }
+        self.issue_commands(&[((3 << 60) | (u64::from(self.domain_id) << 32), 3)])?;
+        self.io.mmio_write(MMIO_CONTROL, 0);
+        fence(Ordering::SeqCst);
+        if self.io.mmio_read(MMIO_CONTROL) & (CONTROL_ENABLE | CONTROL_COMMAND_BUFFER_ENABLE) != 0
+            || self.io.mmio_read(MMIO_STATUS) & STATUS_COMMAND_RUNNING != 0
+        {
+            self.poisoned = true;
+            return Err(HardwareError::EngineInactive);
+        }
+        self.active = false;
+        Ok(())
+    }
+
     pub fn faulted(&self) -> bool {
         self.poisoned
     }
@@ -417,7 +445,10 @@ mod tests {
         fn mmio_write(&mut self, offset: u64, value: u64) {
             self.regs.insert(offset, value);
             if offset == MMIO_CONTROL {
-                self.regs.insert(MMIO_STATUS, STATUS_COMMAND_RUNNING);
+                self.regs.insert(
+                    MMIO_STATUS,
+                    if value == 0 { 0 } else { STATUS_COMMAND_RUNNING },
+                );
             }
             if offset == MMIO_COMMAND_TAIL && self.complete {
                 let written = self
@@ -485,6 +516,8 @@ mod tests {
         );
         engine.remove_page(0x4000_0000).unwrap();
         assert_eq!(engine.mapping_count(), 0);
+        engine.shutdown().unwrap();
+        assert!(!engine.translation_active());
     }
 
     #[test]

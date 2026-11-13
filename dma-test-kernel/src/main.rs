@@ -221,8 +221,13 @@ fn kernel_main(info: &'static mut BootInfo) -> ! {
                 .expect("нет распределителя памяти для AMD IOMMU");
         let mut page_table = unsafe { ActivePageTable::from_current(offset) };
         let (bytes, blocked) =
-            unsafe { amd_iommu_test::verify(function, &mut page_table, &mut frames, offset) }
-                .expect("AMD IOMMU не обеспечил преобразование и блокировку DMA");
+            match unsafe { amd_iommu_test::verify(function, &mut page_table, &mut frames, offset) } {
+                Ok(report) => report,
+                Err(reason) => {
+                    serial::line(&mut out, "ERROR", format_args!("AMD IOMMU QEMU stage failure: {reason}"));
+                    halt()
+                }
+            };
         serial::line(
             &mut out,
             "INFO",

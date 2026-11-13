@@ -177,9 +177,12 @@ impl<B: AmdIommuIo, D: StoppedDevice> AmdV1Engine<B, D> {
         let level4_entry = self.pages.level3 | ((3 << 9) | VALID | READ_WRITE);
         let level3_entry = self.pages.level2 | ((2 << 9) | VALID | READ_WRITE);
         let level2_entry = self.pages.level1 | ((1 << 9) | VALID | READ_WRITE);
-        self.io.memory_write(self.pages.root + index4 * 8, level4_entry);
-        self.io.memory_write(self.pages.level3 + index3 * 8, level3_entry);
-        self.io.memory_write(self.pages.level2 + index2 * 8, level2_entry);
+        self.io
+            .memory_write(self.pages.root + index4 * 8, level4_entry);
+        self.io
+            .memory_write(self.pages.level3 + index3 * 8, level3_entry);
+        self.io
+            .memory_write(self.pages.level2 + index2 * 8, level2_entry);
         let dte = self.pages.root | (4 << 9) | VALID | TRANSLATION_VALID | READ_WRITE;
         self.io.memory_write(self.entry_address(), dte);
         self.io
@@ -201,14 +204,16 @@ impl<B: AmdIommuIo, D: StoppedDevice> AmdV1Engine<B, D> {
         }
 
         self.build_tables();
-        self.io.mmio_write(MMIO_DEVICE_TABLE, self.pages.device_table);
-        self.io.mmio_write(MMIO_COMMAND_BASE, self.pages.command_buffer | COMMAND_SIZE_EXPONENT);
+        self.io
+            .mmio_write(MMIO_DEVICE_TABLE, self.pages.device_table);
+        self.io.mmio_write(
+            MMIO_COMMAND_BASE,
+            self.pages.command_buffer | COMMAND_SIZE_EXPONENT,
+        );
         self.io.mmio_write(MMIO_COMMAND_HEAD, 0);
         self.io.mmio_write(MMIO_COMMAND_TAIL, 0);
-        self.io.mmio_write(
-            MMIO_CONTROL,
-            CONTROL_ENABLE | CONTROL_COMMAND_BUFFER_ENABLE,
-        );
+        self.io
+            .mmio_write(MMIO_CONTROL, CONTROL_ENABLE | CONTROL_COMMAND_BUFFER_ENABLE);
         fence(Ordering::SeqCst);
 
         if !self.hardware_active() {
@@ -356,7 +361,12 @@ impl<B: AmdIommuIo, D: StoppedDevice> IommuEngine for AmdV1Engine<B, D> {
         Ok(self.device.is_fully_stopped())
     }
 
-    fn install_mapping(&mut self, address: u64, physical: u64, length: u64) -> Result<(), DomainFault> {
+    fn install_mapping(
+        &mut self,
+        address: u64,
+        physical: u64,
+        length: u64,
+    ) -> Result<(), DomainFault> {
         if length != PAGE {
             return Err(DomainFault::InstallFailed);
         }
@@ -368,7 +378,8 @@ impl<B: AmdIommuIo, D: StoppedDevice> IommuEngine for AmdV1Engine<B, D> {
         if length != PAGE {
             return Err(DomainFault::RemovalFailed);
         }
-        self.remove_page(address).map_err(|_| DomainFault::RemovalFailed)
+        self.remove_page(address)
+            .map_err(|_| DomainFault::RemovalFailed)
     }
 
     fn invalidate_and_wait(&mut self) -> Result<(), DomainFault> {
@@ -409,7 +420,10 @@ mod tests {
                 self.regs.insert(MMIO_STATUS, STATUS_COMMAND_RUNNING);
             }
             if offset == MMIO_COMMAND_TAIL && self.complete {
-                let written = self.pages.get(&0x2000 + ((value + PAGE - 8) % PAGE)).copied();
+                let written = self
+                    .pages
+                    .get(&0x2000 + ((value + PAGE - 8) % PAGE))
+                    .copied();
                 if let Some(sequence) = written {
                     self.pages.insert(0x7000, sequence);
                 }
@@ -446,7 +460,15 @@ mod tests {
     }
 
     fn engine(complete: bool) -> AmdV1Engine<Fake, Device> {
-        AmdV1Engine::new(Fake::new(complete), Device(true), pages(), 0x20, 7, 0x4000_0000).unwrap()
+        AmdV1Engine::new(
+            Fake::new(complete),
+            Device(true),
+            pages(),
+            0x20,
+            7,
+            0x4000_0000,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -475,7 +497,15 @@ mod tests {
 
     #[test]
     fn missing_stop_rejects_write_to_controller() {
-        let mut engine = AmdV1Engine::new(Fake::new(true), Device(false), pages(), 0x20, 7, 0x4000_0000).unwrap();
+        let mut engine = AmdV1Engine::new(
+            Fake::new(true),
+            Device(false),
+            pages(),
+            0x20,
+            7,
+            0x4000_0000,
+        )
+        .unwrap();
         assert_eq!(engine.initialize(), Err(HardwareError::Busy));
         assert!(!engine.translation_active());
     }
@@ -512,7 +542,11 @@ mod tests {
     fn existing_iommu_configuration_is_not_replaced() {
         let mut fake = Fake::new(true);
         fake.regs.insert(MMIO_CONTROL, CONTROL_ENABLE);
-        let mut engine = AmdV1Engine::new(fake, Device(true), pages(), 0x20, 7, 0x4000_0000).unwrap();
-        assert_eq!(engine.initialize(), Err(HardwareError::UnsafeExistingConfiguration));
+        let mut engine =
+            AmdV1Engine::new(fake, Device(true), pages(), 0x20, 7, 0x4000_0000).unwrap();
+        assert_eq!(
+            engine.initialize(),
+            Err(HardwareError::UnsafeExistingConfiguration)
+        );
     }
 }

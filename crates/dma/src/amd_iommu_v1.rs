@@ -348,7 +348,7 @@ impl<B: AmdIommuIo, D: StoppedDevice> IommuEngine for AmdV1Engine<B, D> {
     fn device_in_private_domain(&self) -> bool {
         self.translation_active()
             && self.io.memory_read(self.entry_address())
-                == self.pages.root | (4 << 9) | VALID | TRANSLATION_VALID | READ_WRITE
+                == (self.pages.root | (4 << 9) | VALID | TRANSLATION_VALID | READ_WRITE)
             && self.io.memory_read(self.entry_address() + 8) == u64::from(self.domain_id)
     }
 

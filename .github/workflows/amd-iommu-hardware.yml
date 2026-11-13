@@ -40,6 +40,12 @@ jobs:
         run: |
           cargo fmt --all -- --check
           cargo test --locked -p phoenix-dma
+      - name: Собрать образ только для виртуального AMD IOMMU
+        run: |
+          mkdir -p artifacts
+          IMAGE="$(cargo run --locked --release --quiet -p phoenixos-dma-test-image --features amd-iommu)"
+          test -f "$IMAGE"
+          cp "$IMAGE" artifacts/phoenixos-amd-iommu-qemu-only.img
       - name: Собрать QEMU с реализованным AMD-Vi
         run: |
           curl -fL --retry 3 --max-time 120 https://download.qemu.org/qemu-10.2.0.tar.xz -o /tmp/qemu.tar.xz
@@ -49,12 +55,6 @@ jobs:
           ./configure --target-list=x86_64-softmmu --disable-docs --disable-gtk --disable-sdl --disable-vnc --disable-slirp --disable-tools
           ninja -C build -j 4 qemu-system-x86_64
           build/qemu-system-x86_64 -device help | grep -F 'amd-iommu'
-      - name: Собрать образ только для виртуального AMD IOMMU
-        run: |
-          mkdir -p artifacts
-          IMAGE="$(cargo run --locked --release --quiet -p phoenixos-dma-test-image --features amd-iommu)"
-          test -f "$IMAGE"
-          cp "$IMAGE" artifacts/phoenixos-amd-iommu-qemu-only.img
       - name: Испытать разрешённую и запрещённую DMA-передачи
         env:
           PHOENIX_QEMU_BINARY: /tmp/phoenix-qemu/build/qemu-system-x86_64

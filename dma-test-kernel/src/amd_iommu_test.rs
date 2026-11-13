@@ -26,6 +26,7 @@ const DMA_MASK: u64 = 0x0fff_ffff;
 const POLL_COUNT: usize = 10_000_000;
 const SENTINEL: u8 = 0xa5;
 
+#[derive(Clone, Copy)]
 struct MMIO {
     base: VirtAddr,
 }
@@ -270,10 +271,11 @@ pub unsafe fn verify<const N: usize>(
     }
 
     // Переводим EDU в режим ведущего шины только при действующем домене.
-    let (bus, controller) = iommu.into_parts();
-    let _bus = bus; // Таблицы остаются закреплены до выключения QEMU.
-    controller.set_command(original_command | 2 | 4);
-    let edu = controller.edu_mmio;
+    let edu = {
+        let controller = iommu.device_mut();
+        controller.set_command(original_command | 2 | 4);
+        controller.edu_mmio
+    };
 
     transfer(&edu, guards, edu::EDU_INTERNAL_BUFFER, edu::EDU_DMA_START)?;
     fill(buffer, 0);
@@ -299,13 +301,20 @@ pub unsafe fn verify<const N: usize>(
         return Err("виртуальное устройство получило доступ вне домена");
     }
 
-    controller.set_command(original_command & !4);
-    if controller.command() & 4 != 0
+    iommu.device_mut().set_command(original_command & !4);
+    if iommu.device_mut().command() & 4 != 0
         || edu.read64(edu::MMIO_DMA_COMMAND as u64) & 1 != 0
     {
         return Err("устройство не остановилось");
     }
-    // Сведения остаются в гостевой RAM до выключения машины.
-    // Никакие контрольные или DMA-страницы не возвращаются при ошибке.
+    iommu
+        .remove_page(guards)
+        .map_err(|_| "не удалось удалить IOVA после остановки EDU")?;
+    iommu
+        .shutdown()
+        .map_err(|_| "не удалось подтвердить остановку IOMMU")?;
+
+    // Таблицы и данные остаются закреплены до полного выключения QEMU.
+    // В случае ошибки память сознательно не возвращается распределителю.
     Ok((edu::EDU_TRANSFER_BYTES, true))
 }

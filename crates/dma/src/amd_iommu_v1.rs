@@ -211,7 +211,7 @@ impl<B: AmdIommuIo, D: StoppedDevice> AmdV1Engine<B, D> {
             .mmio_write(MMIO_DEVICE_TABLE, self.pages.device_table);
         self.io.mmio_write(
             MMIO_COMMAND_BASE,
-            self.pages.command_buffer | COMMAND_SIZE_EXPONENT,
+            self.pages.command_buffer | (COMMAND_SIZE_EXPONENT << 56),
         );
         self.io.checkpoint("controller-bases-set");
         self.io.mmio_write(MMIO_COMMAND_HEAD, 0);
@@ -237,10 +237,13 @@ impl<B: AmdIommuIo, D: StoppedDevice> AmdV1Engine<B, D> {
     fn hardware_active(&self) -> bool {
         let control = self.io.mmio_read(MMIO_CONTROL);
         let status = self.io.mmio_read(MMIO_STATUS);
+        let command = self.io.mmio_read(MMIO_COMMAND_BASE);
         control & (CONTROL_ENABLE | CONTROL_COMMAND_BUFFER_ENABLE)
             == CONTROL_ENABLE | CONTROL_COMMAND_BUFFER_ENABLE
             && status & STATUS_COMMAND_RUNNING != 0
             && self.io.mmio_read(MMIO_DEVICE_TABLE) & MAX_PHYSICAL == self.pages.device_table
+            && command & MAX_PHYSICAL == self.pages.command_buffer
+            && (command >> 56) & 0xf == COMMAND_SIZE_EXPONENT
     }
 
     fn submit(&mut self, first: u64, second: u64) {
@@ -521,6 +524,10 @@ mod tests {
     fn full_lifecycle_requires_real_completion() {
         let mut engine = engine(true);
         engine.initialize().unwrap();
+        assert_eq!(
+            (engine.io.mmio_read(MMIO_COMMAND_BASE) >> 56) & 0xf,
+            COMMAND_SIZE_EXPONENT,
+        );
         assert!(engine.translation_active());
         assert!(engine.device_in_private_domain());
         engine.add_page(0x4000_0000, 0x9000).unwrap();

@@ -208,10 +208,9 @@ pub unsafe fn verify<const N: usize>(
 
     let config = offset + function.config_address;
     let cmd_addr = config + 4;
+    // OVMF может оставить Bus Master разрешённым, даже если EDU простаивает.
+    // Сам флаг PCI не подтверждает выполняющуюся DMA-передачу.
     let original_command = unsafe { cmd_addr.as_ptr::<u16>().read_volatile() };
-    if original_command & 4 != 0 {
-        return Err("устройство уже выполняет DMA");
-    }
     let bar = read_u32(config + 0x10);
     if bar & 0xf != 0 || bar & !0xfff == 0 {
         return Err("некорректная область EDU");
@@ -229,12 +228,19 @@ pub unsafe fn verify<const N: usize>(
     if edu_mmio.read32(edu::MMIO_IDENTIFICATION) & 0xff != 0xed {
         return Err("не распознан виртуальный EDU");
     }
-    // Только доступ к регистрам; DMA остаётся выключенным до установки DTE.
+    if edu_mmio.read64(edu::MMIO_DMA_COMMAND as u64) & 1 != 0 {
+        return Err("виртуальный EDU выполняет незавершённую передачу");
+    }
+    // До настройки таблицы устройства блокируем Bus Master, даже если
+    // прошивка QEMU разрешила его раньше. Проверяем результат PCI.
     unsafe {
         cmd_addr
             .as_mut_ptr::<u16>()
-            .write_volatile(original_command | 2)
+            .write_volatile((original_command & !4) | 2)
     };
+    if unsafe { cmd_addr.as_ptr::<u16>().read_volatile() } & 4 != 0 {
+        return Err("не удалось отключить PCI Bus Master до установки IOMMU");
+    }
 
     // Восемь страниц таблиц и одна страница данных — все целиком
     // принадлежат этому испытанию и не возвращаются при незавершённой DMA.

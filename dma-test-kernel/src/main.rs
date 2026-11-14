@@ -20,6 +20,8 @@ use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 
 #[path = "../../kernel/src/acpi.rs"]
 mod acpi;
+#[cfg(feature = "amd-iommu")]
+mod amd_iommu_test;
 #[path = "../../kernel/src/reference_edu.rs"]
 mod reference_edu;
 #[path = "../../kernel/src/serial.rs"]
@@ -212,6 +214,37 @@ fn kernel_main(info: &'static mut BootInfo) -> ! {
         ),
     );
 
+    #[cfg(feature = "amd-iommu")]
+    {
+        let mut frames =
+            SystemFrameAllocator::<MAX_MEMORY_REGIONS>::from_regions(&info.memory_regions)
+                .expect("нет распределителя памяти для AMD IOMMU");
+        let mut page_table = unsafe { ActivePageTable::from_current(offset) };
+        let (bytes, blocked) =
+            match unsafe { amd_iommu_test::verify(function, &mut page_table, &mut frames, offset) }
+            {
+                Ok(report) => report,
+                Err(reason) => {
+                    serial::line(
+                        &mut out,
+                        "ERROR",
+                        format_args!("AMD IOMMU QEMU stage failure: {reason}"),
+                    );
+                    halt()
+                }
+            };
+        serial::line(
+            &mut out,
+            "INFO",
+            format_args!(
+                "AMD IOMMU QEMU isolation: OK bytes={} translated=true forbidden_page_blocked={} shutdown=true physical_asus=denied",
+                bytes, blocked
+            ),
+        );
+        halt()
+    }
+
+    #[cfg(not(feature = "amd-iommu"))]
     initialize_edu_interrupt().expect("QEMU x2APIC/MSI not initialized");
     let mut frames = SystemFrameAllocator::<MAX_MEMORY_REGIONS>::from_regions(&info.memory_regions)
         .expect("no physical allocator");

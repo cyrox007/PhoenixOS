@@ -4,6 +4,10 @@
 //! Выделение и отображение страниц будут подключены отдельным серверным
 //! механизмом. Сам этот модуль не выделяет память и не включает DMA.
 
+#[cfg(test)]
+extern crate std;
+
+pub mod amd_iommu_v1;
 pub mod buffer;
 pub mod iommu_domain;
 pub mod leases;

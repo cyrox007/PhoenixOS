@@ -8,6 +8,9 @@ publish = false
 name = "phoenix-dma-test-kernel"
 path = "src/main.rs"
 
+[features]
+amd-iommu = []
+
 [dependencies]
 bootloader_api = "=0.11.17"
 lazy_static = { version = "1.5.0", features = ["spin_no_std"] }

@@ -1,0 +1,78 @@
+name: Реальное преобразование DMA через виртуальный AMD IOMMU
+
+on:
+  pull_request:
+    paths:
+      - crates/dma/**
+      - dma-test-kernel/**
+      - tools/dma-test-image/**
+      - scripts/run-amd-iommu-qemu.py
+      - scripts/run-dma-test-qemu.py
+      - tests/platform/test-amd-iommu-qemu.py
+      - .github/workflows/amd-iommu-hardware.yml
+  push:
+    branches: [develop]
+    paths:
+      - crates/dma/**
+      - dma-test-kernel/**
+      - tools/dma-test-image/**
+      - scripts/run-amd-iommu-qemu.py
+      - scripts/run-dma-test-qemu.py
+      - tests/platform/test-amd-iommu-qemu.py
+      - .github/workflows/amd-iommu-hardware.yml
+
+permissions:
+  contents: read
+
+jobs:
+  hardware:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+      - name: Установить прошивку и средства сборки QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ovmf libglib2.0-dev libpixman-1-dev libfdt-dev pkg-config ninja-build meson python3-venv xz-utils curl
+      - name: Проверить описание безопасной виртуальной машины
+        run: python3 tests/platform/test-amd-iommu-qemu.py
+      - name: Проверить форматирование и тесты исполнителя AMD IOMMU
+        run: |
+          cargo fmt --all -- --check
+          cargo test --locked -p phoenix-dma
+      - name: Собрать образ только для виртуального AMD IOMMU
+        run: |
+          mkdir -p artifacts
+          IMAGE="$(cargo run --locked --release --quiet -p phoenixos-dma-test-image --features amd-iommu)"
+          test -f "$IMAGE"
+          cp "$IMAGE" artifacts/phoenixos-amd-iommu-qemu-only.img
+      - name: Собрать QEMU с реализованным AMD-Vi
+        run: |
+          curl -fL --retry 3 --max-time 120 https://download.qemu.org/qemu-10.2.0.tar.xz -o /tmp/qemu.tar.xz
+          mkdir -p /tmp/phoenix-qemu
+          tar -xJf /tmp/qemu.tar.xz -C /tmp/phoenix-qemu --strip-components=1
+          cd /tmp/phoenix-qemu
+          ./configure --target-list=x86_64-softmmu --disable-docs --disable-gtk --disable-sdl --disable-vnc --disable-slirp --disable-tools
+          ninja -C build -j 4 qemu-system-x86_64
+          build/qemu-system-x86_64 -device help | grep -F 'amd-iommu'
+      - name: Испытать разрешённую и запрещённую DMA-передачи
+        env:
+          PHOENIX_QEMU_BINARY: /tmp/phoenix-qemu/build/qemu-system-x86_64
+        run: |
+          sudo --preserve-env=PHOENIX_QEMU_BINARY python3 scripts/run-amd-iommu-qemu.py artifacts/phoenixos-amd-iommu-qemu-only.img artifacts/amd-iommu-serial.log
+      - name: Сохранить протокол испытаний
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phoenix-amd-iommu-hardware-qemu
+          path: |
+            artifacts/amd-iommu-serial.log
+            artifacts/amd-iommu-faults.log
+          if-no-files-found: ignore
+      - name: Сохранить подтверждённый виртуальный образ
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phoenixos-amd-iommu-qemu-only
+          path: artifacts/phoenixos-amd-iommu-qemu-only.img
+          if-no-files-found: error

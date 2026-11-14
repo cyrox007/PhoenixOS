@@ -92,7 +92,8 @@ def execute(image, output):
                             buffer = bytearray(remaining)
                             line = raw.decode("utf-8", errors="replace")
                             print(line, flush=True)
-                            if "[PANIC]" in line or "DMA separate QEMU profile: denied" in line:
+                            if ("[PANIC]" in line or "DMA separate QEMU profile: denied" in line
+                                    or "AMD IOMMU QEMU stage failure:" in line):
                                 raise RuntimeError(f"Испытательный образ отклонил запуск: {line}")
                             for marker in MARKERS:
                                 if marker in line:

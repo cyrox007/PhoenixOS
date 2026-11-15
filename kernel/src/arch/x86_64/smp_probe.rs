@@ -1,7 +1,6 @@
-//! Запуск вспомогательных процессоров самим ядром, только в QEMU.
-//!
-//! Эта проверка намеренно НЕ используется диагностическим образом ASUS.
-//! Код не обращается к дискам и не запускает DMA. Процессоры после
+//! Запуск вспомогательных процессоров самим ядром: проверка QEMU и
+//! отдельный аппаратный диагностический образ. Активное DMA запрещено.
+//! Код не обращается к дискам. Процессоры после
 //! чтения регистров остаются остановленными с выключенными прерываниями.
 //! Снимок текущей CR3 не заменяет аудит остальных адресных пространств.
 
@@ -186,6 +185,7 @@ pub enum ProbeError {
     IncompleteMeasurements,
     ConflictingRegisters,
     WrongCr3,
+    UnsupportedPhysicalPlatform,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -195,6 +195,7 @@ pub struct ProbeResult {
     pub distinct: bool,
     pub cache_agrees: bool,
     pub cr3_agrees: bool,
+    pub amd_registers_measured: bool,
 }
 
 /// Код запуска никогда не вызывается на физической машине.
@@ -287,8 +288,19 @@ fn snapshot() -> CpuRegisters {
         }
     }
 
-    // AMD SYSCFG/TOPMEM2 намеренно не читаются в виртуализации:
-    // QEMU может не поддерживать это семейство MSR.
+    // AMD-специфичные регистры снимаются только на настоящем AMD.
+    // В QEMU они могут отсутствовать, и чтение привело бы к исключению.
+    if !is_qemu() {
+        let vendor = __cpuid(0);
+        let amd = vendor.ebx == 0x6874_7541
+            && vendor.edx == 0x6974_6e65
+            && vendor.ecx == 0x444d_4163;
+        if amd {
+            sample.amd_syscfg = unsafe { read_msr(0xc001_0010) };
+            sample.amd_topmem2 = unsafe { read_msr(0xc001_001d) };
+            sample.amd_observed = true;
+        }
+    }
     sample.valid = true;
     sample
 }
@@ -374,6 +386,7 @@ fn verify(topology: &MadtTopology, kernel_root: u64) -> Result<ProbeResult, Prob
         distinct: coverage.identifiers_complete,
         cache_agrees,
         cr3_agrees,
+        amd_registers_measured: first.amd_observed,
     })
 }
 
@@ -467,8 +480,7 @@ fn send_ipi(apic_id: u32, command: u32) {
     unsafe { write_msr(X2APIC_ICR, ((apic_id as u64) << 32) | command as u64) };
 }
 
-/// Запускает AP строго по одному в проверочном QEMU. Любое отсутствие
-/// измерения означает ошибку, а не частичный успех.
+/// Штатная многоядерная проверка остаётся строго ограничена QEMU.
 pub fn run<const N: usize>(
     topology: &MadtTopology,
     frames: &mut SystemFrameAllocator<N>,
@@ -477,6 +489,34 @@ pub fn run<const N: usize>(
     if !is_qemu() {
         return Err(ProbeError::NotQemu);
     }
+    run_internal(topology, frames, offset)
+}
+
+/// Только независимый аппаратный диагностический образ: допуск к чтению
+/// процессных регистров после UEFI, без периферийной DMA-передачи.
+#[cfg(feature = "hardware-diagnostic")]
+pub fn run_diagnostic<const N: usize>(
+    topology: &MadtTopology,
+    frames: &mut SystemFrameAllocator<N>,
+    offset: VirtAddr,
+) -> Result<ProbeResult, ProbeError> {
+    if !is_qemu() {
+        let vendor = __cpuid(0);
+        let amd = vendor.ebx == 0x6874_7541
+            && vendor.edx == 0x6974_6e65
+            && vendor.ecx == 0x444d_4163;
+        if !amd || topology.enabled_count != 12 || __cpuid(1).ecx & (1 << 21) == 0 {
+            return Err(ProbeError::UnsupportedPhysicalPlatform);
+        }
+    }
+    run_internal(topology, frames, offset)
+}
+
+fn run_internal<const N: usize>(
+    topology: &MadtTopology,
+    frames: &mut SystemFrameAllocator<N>,
+    offset: VirtAddr,
+) -> Result<ProbeResult, ProbeError> {
     let ids = topology.enabled_apic_ids();
     if ids.is_empty() || ids.len() > MAX_CPUS || ids.len() < 2 {
         return Err(ProbeError::InvalidTopology);
@@ -521,6 +561,7 @@ pub fn run<const N: usize>(
     }
     let temporary_root = prepare_tables(frames, offset, kernel_root)?;
     write_trampoline(trampoline, offset, temporary_root, kernel_root)?;
+    #[cfg(not(feature = "hardware-diagnostic"))]
     crate::serial::line(
         &mut crate::serial::console(),
         "INFO",
@@ -544,6 +585,7 @@ pub fn run<const N: usize>(
             ptr::write_unaligned(data.add(AP_SLOT).cast::<u64>(), slot as u64);
         }
 
+        #[cfg(not(feature = "hardware-diagnostic"))]
         crate::serial::line(
             &mut crate::serial::console(),
             "INFO",
@@ -560,6 +602,7 @@ pub fn run<const N: usize>(
                 return Err(ProbeError::ApDidNotStart { apic_id: *id });
             }
         }
+        #[cfg(not(feature = "hardware-diagnostic"))]
         crate::serial::line(
             &mut crate::serial::console(),
             "INFO",

@@ -27,7 +27,8 @@ class AsusAcceptanceImageTests(unittest.TestCase):
     def test_separate_passive_and_active_images(self):
         self.assertIn('asus-acceptance = ["dep:phoenix-memory"]', self.manifest)
         self.assertIn('#[cfg(feature = "asus-acceptance")]\nmod smp_probe;', self.kernel)
-        self.assertIn('#[cfg(feature = "asus-acceptance")]\n    run_processor_acceptance', self.kernel)
+        self.assertIn('fn run_processor_acceptance(', self.kernel)
+        self.assertIn('        run_processor_acceptance(&info.memory_regions, &context, &mut report)', self.kernel)
         self.assertIn('features = ["asus-acceptance"]', self.image)
         self.assertIn("phoenixos-asus-acceptance-uefi.img", self.builder)
         self.assertIn("phoenixos-asus-acceptance-uefi", self.ci)

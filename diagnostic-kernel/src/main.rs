@@ -8,6 +8,8 @@ use bootloader_api::config::{BootloaderConfig, Mapping};
 use bootloader_api::{BootInfo, entry_point};
 use core::panic::PanicInfo;
 use phoenix_diagnostic_journal::PageCycle;
+use phoenix_memory::SystemFrameAllocator;
+use x86_64::VirtAddr;
 
 macro_rules! log {
     ($report:expr, $($arg:tt)*) => {
@@ -17,6 +19,8 @@ macro_rules! log {
 
 mod hardware;
 mod screen;
+#[path = "../../kernel/src/arch/x86_64/smp_probe.rs"]
+mod smp_probe;
 
 pub static BOOTLOADER_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
@@ -38,12 +42,17 @@ fn kernel_main(info: &'static mut BootInfo) -> ! {
     log!(report, "[INFO] storage controllers: not initialized");
     log!(report, "[INFO] device DMA: disabled");
     hardware::run(&context, &mut report);
-    if report.journal_complete() {
+    let ap_complete = measure_secondary_processors(info, &context, &mut report);
+    log!(
+        report,
+        "[INFO] diagnostic acceptance: point16=pending-other-address-spaces point17=blocked-device-isolation dma_authorized=false"
+    );
+    if ap_complete && report.journal_complete() {
         log!(report, "[INFO] diagnostic complete: OK");
     } else {
         log!(
             report,
-            "[WARN] diagnostic complete: INCOMPLETE journal-overflow"
+            "[WARN] diagnostic complete: INCOMPLETE cpu-or-journal"
         );
     }
     // Просмотр запускается с первой страницы и автоматически обходит все.
@@ -91,6 +100,46 @@ fn kernel_main(info: &'static mut BootInfo) -> ! {
 }
 
 #[panic_handler]
+/// Собирает снимки регистров всех ядер в этом же образе.
+/// Физическая DMA-передача и управление накопителями не включены.
+fn measure_secondary_processors(
+    info: &BootInfo,
+    context: &hardware::HardwareContext,
+    report: &mut screen::Report<'_>,
+) -> bool {
+    let Some(topology) = hardware::processor_topology(context) else {
+        log!(report, "[WARN] diagnostic kernel AP: INCOMPLETE invalid-madt");
+        return false;
+    };
+    let Some(offset) = info.physical_memory_offset.into_option() else {
+        log!(report, "[WARN] diagnostic kernel AP: INCOMPLETE missing-physical-map");
+        return false;
+    };
+    let Ok(mut frames) = SystemFrameAllocator::<256>::from_regions(&info.memory_regions) else {
+        log!(report, "[WARN] diagnostic kernel AP: INCOMPLETE bad-memory-map");
+        return false;
+    };
+    match smp_probe::run_diagnostic(&topology, &mut frames, VirtAddr::new(offset)) {
+        Ok(result) => {
+            log!(
+                report,
+                "[INFO] diagnostic kernel AP: OK expected={} measured={} distinct={} cache={} cr3={} amd_msr={} dma_authorized=false",
+                result.expected,
+                result.measured,
+                result.distinct,
+                result.cache_agrees,
+                result.cr3_agrees,
+                result.amd_registers_measured
+            );
+            true
+        }
+        Err(error) => {
+            log!(report, "[WARN] diagnostic kernel AP: INCOMPLETE reason={error:?}");
+            false
+        }
+    }
+}
+
 fn panic(info: &PanicInfo<'_>) -> ! {
     screen::emergency(format_args!("{info}"));
     loop {

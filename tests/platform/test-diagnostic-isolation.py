@@ -27,6 +27,9 @@ class DiagnosticIsolationTests(unittest.TestCase):
             self.assertNotIn(forbidden, self.kernel)
             self.assertNotIn(forbidden, self.dependencies)
         self.assertIn("diagnostic complete: OK", self.kernel)
+        self.assertIn("measure_secondary_processors(info, &context, &mut report)", self.kernel)
+        self.assertIn("run_diagnostic(&topology, &mut frames", self.kernel)
+        self.assertIn("diagnostic acceptance: point16=pending-other-address-spaces", self.kernel)
 
     def test_no_write_to_device_config_or_control_registers(self):
         # Проверка помогает обнаружить случайное подключение опасного кода,
@@ -82,6 +85,8 @@ class DiagnosticIsolationTests(unittest.TestCase):
         self.assertIn("diagnostic mode: OK readonly=1", required)
         self.assertIn("device DMA: disabled", required)
         self.assertIn("diagnostic CPU: OK", required)
+        self.assertIn("diagnostic kernel AP: OK expected=4 measured=4", required)
+        self.assertIn("diagnostic acceptance: point16=pending-other-address-spaces", required)
         self.assertIn("diagnostic CPU coverage: expected=4 measured=1 missing=3 ids_complete=false", required)
         self.assertIn("diagnostic memory map:", required)
         self.assertIn("diagnostic cache: OK", required)

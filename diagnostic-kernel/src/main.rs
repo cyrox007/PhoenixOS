@@ -41,7 +41,10 @@ fn kernel_main(info: &'static mut BootInfo) -> ! {
     log!(report, "[INFO] device DMA: disabled");
     hardware::run(&context, &mut report);
     #[cfg(feature = "asus-acceptance")]
-    run_processor_acceptance(&info.memory_regions, &context, &mut report);
+    let acceptance_cpu_complete =
+        run_processor_acceptance(&info.memory_regions, &context, &mut report);
+    #[cfg(not(feature = "asus-acceptance"))]
+    let acceptance_cpu_complete = true;
     #[cfg(not(feature = "asus-acceptance"))]
     log!(
         report,
@@ -54,12 +57,12 @@ fn kernel_main(info: &'static mut BootInfo) -> ! {
         report,
         "[INFO] diagnostic acceptance 17/17: BLOCKED reason=no-verified-physical-controller-and-iommu-domain dma_authorized=false"
     );
-    if report.journal_complete() {
+    if report.journal_complete() && acceptance_cpu_complete {
         log!(report, "[INFO] diagnostic complete: OK");
     } else {
         log!(
             report,
-            "[WARN] diagnostic complete: INCOMPLETE journal-overflow"
+            "[WARN] diagnostic complete: INCOMPLETE journal-overflow-or-processor-coverage"
         );
     }
     // Просмотр запускается с первой страницы и автоматически обходит все.
@@ -114,34 +117,34 @@ fn run_processor_acceptance(
     regions: &[bootloader_api::info::MemoryRegion],
     context: &hardware::HardwareContext,
     report: &mut screen::Report<'_>,
-) {
+) -> bool {
     if !hardware::safe_for_smp(context) {
         log!(
             report,
             "[WARN] diagnostic AP snapshot: BLOCKED reason=invalid-memory-map"
         );
-        return;
+        return false;
     }
     let Some(topology) = hardware::processor_topology(context) else {
         log!(
             report,
             "[WARN] diagnostic AP snapshot: BLOCKED reason=missing-madt"
         );
-        return;
+        return false;
     };
     let Some(offset) = hardware::physical_offset(context) else {
         log!(
             report,
             "[WARN] diagnostic AP snapshot: BLOCKED reason=missing-direct-map"
         );
-        return;
+        return false;
     };
     let Ok(mut frames) = phoenix_memory::SystemFrameAllocator::<256>::from_regions(regions) else {
         log!(
             report,
             "[WARN] diagnostic AP snapshot: BLOCKED reason=allocator"
         );
-        return;
+        return false;
     };
     match smp_probe::run(&topology, &mut frames, offset) {
         Ok(result) => {
@@ -159,6 +162,7 @@ fn run_processor_acceptance(
                 report,
                 "[INFO] diagnostic acceptance 16/17: PARTIAL ap_measured=true active_cr3_checked=true inactive_cr3_unverified=true"
             );
+            true
         }
         Err(reason) => {
             smp_probe::report_snapshots(report, &topology);
@@ -170,6 +174,7 @@ fn run_processor_acceptance(
                 report,
                 "[INFO] diagnostic acceptance 16/17: BLOCKED ap_measured=false"
             );
+            false
         }
     }
 }

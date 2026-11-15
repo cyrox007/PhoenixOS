@@ -41,13 +41,19 @@ fn kernel_main(info: &'static mut BootInfo) -> ! {
     log!(report, "[INFO] device DMA: disabled");
     hardware::run(&context, &mut report);
     #[cfg(feature = "asus-acceptance")]
-    run_processor_acceptance(info, &context, &mut report);
+    run_processor_acceptance(&info.memory_regions, &context, &mut report);
     #[cfg(not(feature = "asus-acceptance"))]
-    log!(report, "[INFO] diagnostic acceptance 16/17: NOT_RUN passive=true");
+    log!(
+        report,
+        "[INFO] diagnostic acceptance 16/17: NOT_RUN passive=true"
+    );
     // Настоящая передача DMA намеренно не запускается, пока отсутствует
     // выбранное и подтверждённое физическое устройство ASUS. Наличие
     // рабочей реализации AMD IOMMU в QEMU не является доказательством.
-    log!(report, "[INFO] diagnostic acceptance 17/17: BLOCKED reason=no-verified-physical-controller-and-iommu-domain dma_authorized=false");
+    log!(
+        report,
+        "[INFO] diagnostic acceptance 17/17: BLOCKED reason=no-verified-physical-controller-and-iommu-domain dma_authorized=false"
+    );
     if report.journal_complete() {
         log!(report, "[INFO] diagnostic complete: OK");
     } else {
@@ -105,26 +111,38 @@ fn kernel_main(info: &'static mut BootInfo) -> ! {
 /// где выполнены проверки ACPI, RAM, PAT/MTRR и PCI.
 /// На неподтверждённой платформе любое активное действие запрещено.
 fn run_processor_acceptance(
-    info: &BootInfo,
+    regions: &[bootloader_api::info::MemoryRegion],
     context: &hardware::HardwareContext,
     report: &mut screen::Report<'_>,
 ) {
     if !hardware::safe_for_smp(context) {
-        log!(report, "[WARN] diagnostic AP snapshot: BLOCKED reason=invalid-memory-map");
+        log!(
+            report,
+            "[WARN] diagnostic AP snapshot: BLOCKED reason=invalid-memory-map"
+        );
         return;
     }
     let Some(topology) = hardware::processor_topology(context) else {
-        log!(report, "[WARN] diagnostic AP snapshot: BLOCKED reason=missing-madt");
+        log!(
+            report,
+            "[WARN] diagnostic AP snapshot: BLOCKED reason=missing-madt"
+        );
         return;
     };
     let Some(offset) = hardware::physical_offset(context) else {
-        log!(report, "[WARN] diagnostic AP snapshot: BLOCKED reason=missing-direct-map");
+        log!(
+            report,
+            "[WARN] diagnostic AP snapshot: BLOCKED reason=missing-direct-map"
+        );
         return;
     };
     let Ok(mut frames) =
-        phoenix_memory::SystemFrameAllocator::<256>::from_regions(&info.memory_regions)
+        phoenix_memory::SystemFrameAllocator::<256>::from_regions(regions)
     else {
-        log!(report, "[WARN] diagnostic AP snapshot: BLOCKED reason=allocator");
+        log!(
+            report,
+            "[WARN] diagnostic AP snapshot: BLOCKED reason=allocator"
+        );
         return;
     };
     match smp_probe::run(&topology, &mut frames, offset) {
@@ -133,8 +151,11 @@ fn run_processor_acceptance(
             log!(
                 report,
                 "[INFO] diagnostic AP snapshot: OK measured={} expected={} distinct={} cache={} cr3={} dma_authorized=false",
-                result.measured, result.expected, result.distinct,
-                result.cache_agrees, result.cr3_agrees
+                result.measured,
+                result.expected,
+                result.distinct,
+                result.cache_agrees,
+                result.cr3_agrees
             );
             log!(
                 report,

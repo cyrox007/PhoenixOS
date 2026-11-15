@@ -17,6 +17,8 @@ macro_rules! log {
 
 mod hardware;
 mod screen;
+#[cfg(feature = "asus-acceptance")]
+mod smp_probe;
 
 pub static BOOTLOADER_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
@@ -38,12 +40,29 @@ fn kernel_main(info: &'static mut BootInfo) -> ! {
     log!(report, "[INFO] storage controllers: not initialized");
     log!(report, "[INFO] device DMA: disabled");
     hardware::run(&context, &mut report);
-    if report.journal_complete() {
+    #[cfg(feature = "asus-acceptance")]
+    let acceptance_cpu_complete =
+        run_processor_acceptance(&info.memory_regions, &context, &mut report);
+    #[cfg(not(feature = "asus-acceptance"))]
+    let acceptance_cpu_complete = true;
+    #[cfg(not(feature = "asus-acceptance"))]
+    log!(
+        report,
+        "[INFO] diagnostic acceptance 16/17: NOT_RUN passive=true"
+    );
+    // Настоящая передача DMA намеренно не запускается, пока отсутствует
+    // выбранное и подтверждённое физическое устройство ASUS. Наличие
+    // рабочей реализации AMD IOMMU в QEMU не является доказательством.
+    log!(
+        report,
+        "[INFO] diagnostic acceptance 17/17: BLOCKED reason=no-verified-physical-controller-and-iommu-domain dma_authorized=false"
+    );
+    if report.journal_complete() && acceptance_cpu_complete {
         log!(report, "[INFO] diagnostic complete: OK");
     } else {
         log!(
             report,
-            "[WARN] diagnostic complete: INCOMPLETE journal-overflow"
+            "[WARN] diagnostic complete: INCOMPLETE journal-overflow-or-processor-coverage"
         );
     }
     // Просмотр запускается с первой страницы и автоматически обходит все.
@@ -87,6 +106,76 @@ fn kernel_main(info: &'static mut BootInfo) -> ! {
             report.display_page(pages.page());
         }
         extended = false;
+    }
+}
+
+#[cfg(feature = "asus-acceptance")]
+/// Собирает измерения всех процессоров в ТОЙ ЖЕ загрузке,
+/// где выполнены проверки ACPI, RAM, PAT/MTRR и PCI.
+/// На неподтверждённой платформе любое активное действие запрещено.
+fn run_processor_acceptance(
+    regions: &[bootloader_api::info::MemoryRegion],
+    context: &hardware::HardwareContext,
+    report: &mut screen::Report<'_>,
+) -> bool {
+    if !hardware::safe_for_smp(context) {
+        log!(
+            report,
+            "[WARN] diagnostic AP snapshot: BLOCKED reason=invalid-memory-map"
+        );
+        return false;
+    }
+    let Some(topology) = hardware::processor_topology(context) else {
+        log!(
+            report,
+            "[WARN] diagnostic AP snapshot: BLOCKED reason=missing-madt"
+        );
+        return false;
+    };
+    let Some(offset) = hardware::physical_offset(context) else {
+        log!(
+            report,
+            "[WARN] diagnostic AP snapshot: BLOCKED reason=missing-direct-map"
+        );
+        return false;
+    };
+    let Ok(mut frames) = phoenix_memory::SystemFrameAllocator::<256>::from_regions(regions) else {
+        log!(
+            report,
+            "[WARN] diagnostic AP snapshot: BLOCKED reason=allocator"
+        );
+        return false;
+    };
+    match smp_probe::run(&topology, &mut frames, offset) {
+        Ok(result) => {
+            smp_probe::report_snapshots(report, &topology);
+            log!(
+                report,
+                "[INFO] diagnostic AP snapshot: OK measured={} expected={} distinct={} cache={} cr3={} dma_authorized=false",
+                result.measured,
+                result.expected,
+                result.distinct,
+                result.cache_agrees,
+                result.cr3_agrees
+            );
+            log!(
+                report,
+                "[INFO] diagnostic acceptance 16/17: PARTIAL ap_measured=true active_cr3_checked=true inactive_cr3_unverified=true"
+            );
+            true
+        }
+        Err(reason) => {
+            smp_probe::report_snapshots(report, &topology);
+            log!(
+                report,
+                "[WARN] diagnostic AP snapshot: BLOCKED reason={reason:?} dma_authorized=false"
+            );
+            log!(
+                report,
+                "[INFO] diagnostic acceptance 16/17: BLOCKED ap_measured=false"
+            );
+            false
+        }
     }
 }
 

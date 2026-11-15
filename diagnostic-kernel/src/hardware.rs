@@ -213,6 +213,34 @@ impl ConfigAccess for DirectEcam<'_> {
     }
 }
 
+/// Возвращает проверенный перечень включённых процессоров для единой
+/// аппаратной проверки без повторной загрузки.
+pub fn processor_topology(
+    context: &HardwareContext,
+) -> Option<phoenix_acpi::madt_topology::MadtTopology> {
+    let rsdp = context.rsdp?;
+    let memory = ReadOnlyMemory::from_context(context).ok()?;
+    let rsdp = Rsdp::parse(memory.bytes(rsdp, RSDP_V2_SIZE).ok()?).ok()?;
+    let xsdt = Xsdt::parse(memory.table(rsdp.xsdt_address).ok()?).ok()?;
+    for address in xsdt.iter() {
+        let table = memory.table(address).ok()?;
+        let header = SdtHeader::parse_prefix(table).ok()?;
+        if &header.signature == b"APIC" {
+            return phoenix_acpi::madt_topology::parse_madt_topology(table).ok();
+        }
+    }
+    None
+}
+
+pub fn safe_for_smp(context: &HardwareContext) -> bool {
+    !context.ram_map_invalid && context.physical_offset.is_some()
+}
+
+/// Физическое отображение проверенного ядра для снимков AP.
+pub fn physical_offset(context: &HardwareContext) -> Option<VirtAddr> {
+    VirtAddr::try_new(context.physical_offset?).ok()
+}
+
 pub fn run(context: &HardwareContext, out: &mut Report<'_>) {
     log!(
         out,

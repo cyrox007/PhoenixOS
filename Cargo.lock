@@ -356,6 +356,7 @@ dependencies = [
  "phoenix-acpi",
  "phoenix-diagnostic-journal",
  "phoenix-framebuffer",
+ "phoenix-memory",
  "phoenix-pcie",
  "phoenix-vm",
  "uart_16550",
@@ -572,6 +573,14 @@ version = "0.0.1"
 dependencies = [
  "bootloader",
  "kernel",
+]
+
+[[package]]
+name = "phoenixos-asus-acceptance-image"
+version = "0.0.1"
+dependencies = [
+ "bootloader",
+ "phoenix-diagnostic-kernel",
 ]
 
 [[package]]

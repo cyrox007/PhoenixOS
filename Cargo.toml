@@ -5,6 +5,7 @@ members = [
     "diagnostic-kernel",
     "dma-test-kernel",
     "tools/diagnostic-image",
+    "tools/asus-acceptance-image",
     "tools/dma-test-image",
     "crates/acpi",
     "crates/phoenix-framebuffer",

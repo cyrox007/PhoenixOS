@@ -139,6 +139,38 @@ jobs:
       - name: Проверить безопасный диагностический запуск QEMU
         run: sudo python3 scripts/run-diagnostic-qemu.py artifacts/phoenixos-diagnostic-uefi.img artifacts/diagnostic-serial.log
 
+      - name: Проверить раздельность пассивного образа и аппаратной приёмки
+        run: python3 tests/platform/test-asus-acceptance-image.py
+
+      - name: Собрать единый образ аппаратной приёмки ASUS
+        run: |
+          IMAGE="$(cargo run --locked -p phoenixos-asus-acceptance-image --release --quiet)"
+          test -f "$IMAGE"
+          cp "$IMAGE" artifacts/phoenixos-asus-acceptance-uefi.img
+
+      - name: Проверить все процессоры и запрет физического DMA в одном образе QEMU
+        run: sudo env PHOENIX_ASUS_ACCEPTANCE=1 python3 scripts/run-diagnostic-qemu.py artifacts/phoenixos-asus-acceptance-uefi.img artifacts/asus-acceptance-serial.log
+
+      - name: Проверить двенадцать реальных процессоров в том же образе
+        run: sudo env PHOENIX_ASUS_ACCEPTANCE=1 PHOENIX_DIAG_CPUS=12 python3 scripts/run-diagnostic-qemu.py artifacts/phoenixos-asus-acceptance-uefi.img artifacts/asus-acceptance-12-serial.log
+
+      - name: Сохранить единый образ аппаратной приёмки ASUS
+        uses: actions/upload-artifact@v4
+        with:
+          name: phoenixos-asus-acceptance-uefi
+          path: artifacts/phoenixos-asus-acceptance-uefi.img
+          if-no-files-found: error
+
+      - name: Сохранить протокол ASUS при ошибке
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phoenixos-asus-acceptance-error-log
+          path: |
+            artifacts/asus-acceptance-serial.log
+            artifacts/asus-acceptance-12-serial.log
+          if-no-files-found: ignore
+
       - name: Сохранить диагностический журнал при ошибке
         if: failure()
         uses: actions/upload-artifact@v4

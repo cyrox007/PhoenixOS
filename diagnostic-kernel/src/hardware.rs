@@ -239,6 +239,34 @@ pub fn run(context: &HardwareContext, out: &mut Report<'_>) {
     acpi_and_pci(rsdp, &memory, context, cache.as_ref(), out);
 }
 
+/// Перечень процессоров из проверенной ACPI MADT для независимого
+/// измерения ядрами ПОСЛЕ выхода из служб UEFI.
+/// Ошибка или неполная таблица не допускают запуск дополнительных ЦП.
+pub fn processor_topology(
+    context: &HardwareContext,
+) -> Option<phoenix_acpi::madt_topology::MadtTopology> {
+    let memory = ReadOnlyMemory::from_context(context).ok()?;
+    let rsdp = context.rsdp?;
+    let descriptor = Rsdp::parse(memory.bytes(rsdp, RSDP_V2_SIZE).ok()?).ok()?;
+    let xsdt = Xsdt::parse(memory.table(descriptor.xsdt_address).ok()?).ok()?;
+    let mut topology = None;
+    for physical in xsdt.iter() {
+        let table = memory.table(physical).ok()?;
+        if phoenix_acpi::checksum(table) != 0 {
+            return None;
+        }
+        let header = SdtHeader::parse_prefix(table).ok()?;
+        if header.signature != *b"APIC" {
+            continue;
+        }
+        if topology.is_some() {
+            return None;
+        }
+        topology = Some(phoenix_acpi::madt_topology::parse_madt_topology(table).ok()?);
+    }
+    topology
+}
+
 fn cpu(context: &HardwareContext, out: &mut Report<'_>) -> Option<DmaCacheSnapshot> {
     let basic = __cpuid(0);
     let mut vendor = [0u8; 12];

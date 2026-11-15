@@ -597,10 +597,16 @@ pub fn report_snapshots(out: &mut crate::screen::Report<'_>, topology: &MadtTopo
         match OBSERVED[index].read() {
             Some(sample) if sample.valid => {
                 out.line(format_args!(
-                    "[INFO] diagnostic AP cpu={} apic={} expected={} cr3={:#x} pat={:#x} mtrr_default={:#x} amd_syscfg={:#x} amd_topmem2={:#x} amd_observed={} valid=true",
+                    "[INFO] diagnostic AP cpu={} apic={} expected={} cr3={:#x} valid=true",
                     index, sample.apic_id, expected, sample.cr3,
-                    sample.pat, sample.mtrr_default, sample.amd_syscfg,
-                    sample.amd_topmem2, sample.amd_observed,
+                ));
+                out.line(format_args!(
+                    "[INFO] diagnostic AP cpu={} pat={:#x} mtrrdef={:#x}",
+                    index, sample.pat, sample.mtrr_default,
+                ));
+                out.line(format_args!(
+                    "[INFO] diagnostic AP cpu={} syscfg={:#x} topmem2={:#x} amd={}",
+                    index, sample.amd_syscfg, sample.amd_topmem2, sample.amd_observed,
                 ));
             }
             _ => out.line(format_args!(

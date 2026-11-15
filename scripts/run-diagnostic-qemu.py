@@ -32,10 +32,14 @@ MARKERS = (
     "diagnostic PCI DMA:",
     "diagnostic ACPI: OK",
     "diagnostic PCI: OK",
+    "diagnostic complete: OK",
+)
+
+
+ACCEPTANCE_MARKERS = (
     "diagnostic AP snapshot: OK measured=4 expected=4 distinct=true cache=true cr3=true dma_authorized=false",
     "diagnostic acceptance 16/17: PARTIAL ap_measured=true",
     "diagnostic acceptance 17/17: BLOCKED reason=no-verified-physical-controller-and-iommu-domain dma_authorized=false",
-    "diagnostic complete: OK",
 )
 
 
@@ -68,7 +72,8 @@ def find_ovmf(names):
     raise RuntimeError("Не найден файл OVMF")
 
 
-def execute(image, output):
+def execute(image, output, acceptance=False):
+    required = MARKERS + ACCEPTANCE_MARKERS if acceptance else MARKERS
     code = find_ovmf([
         os.environ.get("OVMF_CODE"),
         "/usr/share/OVMF/OVMF_CODE.fd",
@@ -120,11 +125,11 @@ def execute(image, output):
                             pending = bytearray(rest)
                             line = raw.decode("utf-8", errors="replace")
                             print(line, flush=True)
-                            for marker in MARKERS:
+                            for marker in required:
                                 if marker in line:
                                     seen.add(marker)
                             if MARKERS[-1] in seen:
-                                missing = set(MARKERS) - seen
+                                missing = set(required) - seen
                                 if missing:
                                     raise RuntimeError(f"Не найдены признаки диагностики: {sorted(missing)}")
                                 print("Диагностический образ: проверка QEMU успешна", flush=True)
@@ -143,7 +148,8 @@ if __name__ == "__main__":
     if len(sys.argv) != 3:
         raise SystemExit("Использование: run-diagnostic-qemu.py <образ> <журнал>")
     try:
-        execute(sys.argv[1], sys.argv[2])
+        execute(sys.argv[1], sys.argv[2],
+                acceptance=os.environ.get("PHOENIX_ASUS_ACCEPTANCE") == "1")
     except Exception as error:
         print(f"Диагностический образ: ошибка: {error}", file=sys.stderr, flush=True)
         raise

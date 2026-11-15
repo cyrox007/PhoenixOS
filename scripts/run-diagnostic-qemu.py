@@ -32,6 +32,9 @@ MARKERS = (
     "diagnostic PCI DMA:",
     "diagnostic ACPI: OK",
     "diagnostic PCI: OK",
+    "diagnostic AP snapshot: OK measured=4 expected=4 distinct=true cache=true cr3=true dma_authorized=false",
+    "diagnostic acceptance 16/17: PARTIAL ap_measured=true",
+    "diagnostic acceptance 17/17: BLOCKED reason=no-verified-physical-controller-and-iommu-domain dma_authorized=false",
     "diagnostic complete: OK",
 )
 
@@ -42,8 +45,8 @@ def build_command(image, code, vars_file):
         "-machine", "q35,accel=kvm",
         "-nodefaults",
         "-cpu", "host",
-        # Четыре логических процессора: только BSP исполняет диагностический
-        # код. Тест обязан доказать, что остальные три не засчитаны.
+        # Четыре процессора: сначала BSP отдельно, затем все четыре
+        # действительно измерены во время одной загрузки диагностического ядра.
         "-smp", "4",
         "-m", "512M",
         "-display", "none",

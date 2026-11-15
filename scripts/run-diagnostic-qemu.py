@@ -19,6 +19,8 @@ MARKERS = (
     "diagnostic CPU coverage: expected=4 measured=1 missing=3 ids_complete=false",
     "msr_consensus=unverified BSP_only=true",
     "diagnostic CPU BSP: apic=Some(0)",
+    "diagnostic kernel AP: OK expected=4 measured=4 distinct=true cache=true cr3=true amd_msr=false dma_authorized=false",
+    "diagnostic acceptance: point16=pending-other-address-spaces point17=blocked-device-isolation dma_authorized=false",
     "diagnostic cache: OK",
     "diagnostic cache sample: phys=",
     "WB-candidate=true",

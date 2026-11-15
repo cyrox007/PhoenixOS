@@ -4,9 +4,14 @@ version = "0.0.1"
 edition = "2024"
 publish = false
 
+[features]
+default = ["hardware-diagnostic"]
+hardware-diagnostic = []
+
 [dependencies]
 bootloader_api = "=0.11.17"
 phoenix-acpi = { path = "../crates/acpi" }
+phoenix-memory = { path = "../crates/boot-memory" }
 phoenix-pcie = { path = "../crates/pcie" }
 phoenix-vm = { path = "../crates/virtual-memory" }
 phoenix-diagnostic-journal = { path = "../crates/diagnostic-journal" }

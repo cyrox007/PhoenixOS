@@ -136,9 +136,7 @@ fn run_processor_acceptance(
         );
         return;
     };
-    let Ok(mut frames) =
-        phoenix_memory::SystemFrameAllocator::<256>::from_regions(regions)
-    else {
+    let Ok(mut frames) = phoenix_memory::SystemFrameAllocator::<256>::from_regions(regions) else {
         log!(
             report,
             "[WARN] diagnostic AP snapshot: BLOCKED reason=allocator"

@@ -17,6 +17,7 @@ macro_rules! log {
 
 mod hardware;
 mod screen;
+#[cfg(feature = "asus-acceptance")]
 mod smp_probe;
 
 pub static BOOTLOADER_CONFIG: BootloaderConfig = {
@@ -39,7 +40,10 @@ fn kernel_main(info: &'static mut BootInfo) -> ! {
     log!(report, "[INFO] storage controllers: not initialized");
     log!(report, "[INFO] device DMA: disabled");
     hardware::run(&context, &mut report);
+    #[cfg(feature = "asus-acceptance")]
     run_processor_acceptance(info, &context, &mut report);
+    #[cfg(not(feature = "asus-acceptance"))]
+    log!(report, "[INFO] diagnostic acceptance 16/17: NOT_RUN passive=true");
     // Настоящая передача DMA намеренно не запускается, пока отсутствует
     // выбранное и подтверждённое физическое устройство ASUS. Наличие
     // рабочей реализации AMD IOMMU в QEMU не является доказательством.
@@ -96,6 +100,7 @@ fn kernel_main(info: &'static mut BootInfo) -> ! {
     }
 }
 
+#[cfg(feature = "asus-acceptance")]
 /// Собирает измерения всех процессоров в ТОЙ ЖЕ загрузке,
 /// где выполнены проверки ACPI, RAM, PAT/MTRR и PCI.
 /// На неподтверждённой платформе любое активное действие запрещено.

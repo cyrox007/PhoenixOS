@@ -151,6 +151,9 @@ jobs:
       - name: Проверить все процессоры и запрет физического DMA в одном образе QEMU
         run: sudo env PHOENIX_ASUS_ACCEPTANCE=1 python3 scripts/run-diagnostic-qemu.py artifacts/phoenixos-asus-acceptance-uefi.img artifacts/asus-acceptance-serial.log
 
+      - name: Проверить двенадцать реальных процессоров в том же образе
+        run: sudo env PHOENIX_ASUS_ACCEPTANCE=1 PHOENIX_DIAG_CPUS=12 python3 scripts/run-diagnostic-qemu.py artifacts/phoenixos-asus-acceptance-uefi.img artifacts/asus-acceptance-12-serial.log
+
       - name: Сохранить единый образ аппаратной приёмки ASUS
         uses: actions/upload-artifact@v4
         with:
@@ -163,7 +166,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: phoenixos-asus-acceptance-error-log
-          path: artifacts/asus-acceptance-serial.log
+          path: |
+            artifacts/asus-acceptance-serial.log
+            artifacts/asus-acceptance-12-serial.log
           if-no-files-found: ignore
 
       - name: Сохранить диагностический журнал при ошибке

@@ -237,7 +237,8 @@ fn supported_platform() -> bool {
             name[off + slot * 4..off + slot * 4 + 4].copy_from_slice(&word.to_le_bytes());
         }
     }
-    name.windows(b"Ryzen 5 5600H".len()).any(|part| part == b"Ryzen 5 5600H")
+    name.windows(b"Ryzen 5 5600H".len())
+        .any(|part| part == b"Ryzen 5 5600H")
 }
 
 fn running_apic() -> Option<u32> {
@@ -590,7 +591,6 @@ pub fn run<const N: usize>(
     verify(topology, kernel_root)
 }
 
-
 /// Отчёт по каждому реально запущенному процессору.
 pub fn report_snapshots(out: &mut crate::screen::Report<'_>, topology: &MadtTopology) {
     for (index, expected) in topology.enabled_apic_ids().iter().enumerate() {
@@ -604,7 +604,8 @@ pub fn report_snapshots(out: &mut crate::screen::Report<'_>, topology: &MadtTopo
                 ));
             }
             _ => out.line(format_args!(
-                "[WARN] diagnostic AP cpu={} expected={} valid=false", index, expected
+                "[WARN] diagnostic AP cpu={} expected={} valid=false",
+                index, expected
             )),
         }
     }
